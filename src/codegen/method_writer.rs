@@ -145,7 +145,8 @@ impl MethodWriter {
                 }
             }
             Stmt::Switch(_switch_stmt) => {
-                // Switch not yet codegen'ed; skip
+                // Generate switch via chained compares and gotos (simplified)
+                self.generate_switch_statement(_switch_stmt)?;
             }
             Stmt::Return(return_stmt) => {
                 if let Some(expr) = &return_stmt.value {
@@ -273,8 +274,41 @@ impl MethodWriter {
             Stmt::Empty => {
                 // No-op
             }
-            Stmt::Assert(_)
-            | Stmt::Synchronized(_)
+            Stmt::Assert(assert_stmt) => {
+                // if (!cond) throw new AssertionError(msg?)
+                let end_label = self.create_label();
+                // Evaluate condition
+                self.generate_expression(&assert_stmt.condition)?;
+                // If condition != 0, jump to end
+                self.emit_instruction(opcodes::IFNE);
+                self.emit_label_reference(end_label);
+                // Construct AssertionError
+                // NEW java/lang/AssertionError
+                self.emit_instruction(opcodes::NEW);
+                let _cls = self.add_class_constant("java/lang/AssertionError");
+                self.emit_short(_cls as i16);
+                // DUP
+                self.emit_instruction(opcodes::DUP);
+                // If message present, load it and call (Ljava/lang/Object;)V or (Ljava/lang/String;)V
+                if let Some(msg) = &assert_stmt.message {
+                    self.generate_expression(msg)?;
+                    // INVOKESPECIAL <init>(Ljava/lang/Object;)V (placeholder)
+                    self.emit_instruction(opcodes::INVOKESPECIAL);
+                    let _mref = self.add_method_ref("java/lang/AssertionError", "<init>", "(Ljava/lang/Object;)V");
+                    self.emit_short(_mref as i16);
+                } else {
+                    // INVOKESPECIAL <init>()V
+                    self.emit_instruction(opcodes::INVOKESPECIAL);
+                    let _mref = self.add_method_ref("java/lang/AssertionError", "<init>", "()V");
+                    self.emit_short(_mref as i16);
+                }
+                // ATHROW
+                self.emit_instruction(opcodes::ATHROW);
+                // end
+                self.mark_label(end_label);
+            }
+            
+            Stmt::Synchronized(_)
             | Stmt::TypeDecl(_) => {
                 // Not yet supported in codegen; skip
             }
@@ -591,6 +625,63 @@ impl MethodWriter {
         self.emit_instruction(opcodes::NEWARRAY);
         self.emit_byte(10); // T_INT
         
+        Ok(())
+    }
+
+    fn generate_switch_statement(&mut self, switch_stmt: &SwitchStmt) -> Result<()> {
+        // Evaluate switch expression (assume int)
+        self.generate_expression(&switch_stmt.expression)?;
+        // For each case label, duplicate value, compare, and jump
+        let end_label = self.create_label();
+        let mut case_labels: Vec<(u16, usize)> = Vec::new(); // (label_id, case_index)
+        for (idx, case) in switch_stmt.cases.iter().enumerate() {
+            if case.labels.is_empty() { continue; }
+            for label_expr in &case.labels {
+                // duplicate switch value
+                self.emit_instruction(opcodes::DUP);
+                self.generate_expression(label_expr)?;
+                self.emit_instruction(opcodes::IF_ICMPEQ);
+                let target = self.create_label();
+                self.emit_label_reference(target);
+                case_labels.push((target, idx));
+            }
+        }
+        // No match: drop value and jump to default (if any) else end
+        self.emit_instruction(opcodes::POP);
+        let mut default_label = None;
+        for (idx, case) in switch_stmt.cases.iter().enumerate() {
+            if case.labels.is_empty() {
+                let dl = self.create_label();
+                default_label = Some((dl, idx));
+                self.emit_instruction(opcodes::GOTO);
+                self.emit_label_reference(dl);
+                break;
+            }
+        }
+        if default_label.is_none() {
+            self.emit_instruction(opcodes::GOTO);
+            self.emit_label_reference(end_label);
+        }
+        // Emit case bodies
+        let mut case_end_labels: Vec<u16> = Vec::new();
+        for (idx, case) in switch_stmt.cases.iter().enumerate() {
+            // mark labels that jump here
+            for (lbl, i) in case_labels.iter().filter(|(_, i)| *i == idx) { self.mark_label(*lbl); }
+            if let Some((dl, i)) = default_label { if i == idx { self.mark_label(dl); } }
+            // emit statements
+            for stmt in &case.statements {
+                self.generate_statement(stmt)?;
+            }
+            // if case does not end with break (we cannot know), fallthrough into next
+            // insert explicit goto end to simplify
+            let after_case = self.create_label();
+            self.emit_instruction(opcodes::GOTO);
+            self.emit_label_reference(after_case);
+            case_end_labels.push(after_case);
+        }
+        // mark end
+        self.mark_label(end_label);
+        for l in case_end_labels { self.mark_label(l); }
         Ok(())
     }
     
