@@ -15,6 +15,7 @@ mod method;
 mod defs;
 mod frame;
 mod writer;
+mod annotation;
 
 pub use bytecode::*;
 pub use class_writer::*;

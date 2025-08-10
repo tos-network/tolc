@@ -1,6 +1,6 @@
 //! Constant pool and constants for Java class files
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Constant {
     Utf8(String),
     Integer(i32),
@@ -128,7 +128,7 @@ impl Constant {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConstantPool {
     pub(crate) constants: Vec<Constant>,
 }
@@ -139,78 +139,90 @@ impl ConstantPool {
     pub fn add_utf8(&mut self, value: &str) -> u16 {
         let constant = Constant::Utf8(value.to_string());
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_class(&mut self, name: &str) -> u16 {
         let name_index = self.add_utf8(name);
         let constant = Constant::Class(name_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_name_and_type(&mut self, name: &str, descriptor: &str) -> u16 {
         let name_index = self.add_utf8(name);
         let descriptor_index = self.add_utf8(descriptor);
         let constant = Constant::NameAndType(name_index, descriptor_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_field_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         let class_index = self.add_class(class);
         let name_and_type_index = self.add_name_and_type(name, descriptor);
         let constant = Constant::FieldRef(class_index, name_and_type_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         let class_index = self.add_class(class);
         let name_and_type_index = self.add_name_and_type(name, descriptor);
         let constant = Constant::MethodRef(class_index, name_and_type_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_interface_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         let class_index = self.add_class(class);
         let name_and_type_index = self.add_name_and_type(name, descriptor);
         let constant = Constant::InterfaceMethodRef(class_index, name_and_type_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_string(&mut self, value: &str) -> u16 {
         let utf8_index = self.add_utf8(value);
         let constant = Constant::String(utf8_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_integer(&mut self, value: i32) -> u16 {
         let constant = Constant::Integer(value);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_float(&mut self, value: f32) -> u16 {
         let constant = Constant::Float(value);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_long(&mut self, value: i64) -> u16 {
         let constant = Constant::Long(value);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_double(&mut self, value: f64) -> u16 {
         let constant = Constant::Double(value);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_method_handle(&mut self, reference_kind: u8, reference_index: u16) -> u16 {
         let constant = Constant::MethodHandle(reference_kind, reference_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
+    
     pub fn add_method_type(&mut self, descriptor: &str) -> u16 {
         let descriptor_index = self.add_utf8(descriptor);
         let constant = Constant::MethodType(descriptor_index);
         self.constants.push(constant);
-        (self.constants.len() - 1) as u16
+        self.constants.len() as u16  // 索引从1开始
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

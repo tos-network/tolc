@@ -290,47 +290,8 @@ impl ClassWriter {
     
     /// Generate bytecode for an annotation declaration
     pub fn generate_annotation(&mut self, annotation: &AnnotationDecl) -> Result<()> {
-        // Set annotation name and access flags
-        let annotation_name = &annotation.name;
-        let this_class_index = self.class_file.constant_pool.add_class(annotation_name);
-        self.class_file.this_class = this_class_index;
-        
-        // Set access flags - annotations are always interfaces
-        let mut access_flags = access_flags::ACC_INTERFACE | access_flags::ACC_ABSTRACT | access_flags::ACC_ANNOTATION;
-        if annotation.modifiers.contains(&Modifier::Public) {
-            access_flags |= access_flags::ACC_PUBLIC;
-        }
-        self.class_file.access_flags = access_flags;
-        
-        // Set superclass to java.lang.annotation.Annotation
-        let super_class_index = self.class_file.constant_pool.add_class("java/lang/annotation/Annotation");
-        self.class_file.super_class = super_class_index;
-        
-        // Generate annotation members
-        for member in &annotation.body {
-            self.generate_annotation_member(member)?;
-        }
-        
-        Ok(())
-    }
-    
-    /// Generate bytecode for an annotation member
-    fn generate_annotation_member(&mut self, member: &AnnotationMember) -> Result<()> {
-        let name_index = self.class_file.constant_pool.add_utf8(&member.name);
-        let descriptor_index = self.class_file.constant_pool.add_utf8(&type_to_descriptor(&member.type_ref));
-        
-        // Annotation methods are implicitly public and abstract
-        let access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_ABSTRACT;
-        
-        let method_info = MethodInfo {
-            access_flags,
-            name_index,
-            descriptor_index,
-            attributes: vec![],
-        };
-        
-        self.class_file.methods.push(method_info);
-        Ok(())
+        use super::annotation::generate_annotation;
+        generate_annotation(annotation, &mut self.class_file)
     }
     
     /// Generate bytecode for a field
@@ -497,7 +458,8 @@ impl ClassWriter {
         let name_index = self.class_file.constant_pool.add_utf8("Code");
         
         // Generate bytecode for method body
-        let mut code_writer = BodyWriter::new();
+        let constant_pool_rc = std::rc::Rc::new(std::cell::RefCell::new(self.class_file.constant_pool.clone()));
+        let mut code_writer = BodyWriter::new_with_constant_pool(constant_pool_rc);
         code_writer.generate_method_body(method)?;
         let (code_bytes, max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
         
@@ -718,7 +680,7 @@ impl MethodWriter {
         
         // Call super constructor
         let super_class_name = class.extends.as_ref().map(|t| t.name.as_str()).unwrap_or("java/lang/Object");
-        let method_ref_index = self.add_method_ref(super_class_name, "constructor", "()V");
+        let method_ref_index = self.add_method_ref(super_class_name, "<init>", "()V");
         
         // INVOKESPECIAL instruction
         self.bytecode.push(opcodes::INVOKESPECIAL);
