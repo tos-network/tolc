@@ -1,29 +1,31 @@
 # Terminos Language Compiler (tolc)
 
-A fast, deterministic compiler for the **Terminos Language**—purpose-built for smart contracts on the **Terminos VM (TVM)** while remaining **EVM-ABI compatible** for tools, wallets, and event logs.
+A fast, deterministic compiler for the **Terminos Language**—a Java8-compatible language that compiles `.tol` source files to Java bytecode (`.class` files).
 
 ---
 
 ## Overview
 
-`tolc` parses Terminos source, type-checks, runs safety and gas-aware optimizations, and emits deployable **constructor/runtime bytecode**, **ABI JSON**, **IR**, and metadata—much like `solc` does for Solidity.
+`tolc` parses Terminos source files (`.tol`), performs lexical analysis and parsing into an Abstract Syntax Tree (AST), and generates deployable **Java bytecode** that can run on any Java Virtual Machine (JVM). The language is designed to be fully compatible with Java 8 syntax and semantics while providing a modern compilation pipeline.
 
-- **Targets:** TVM (primary), optional experimental EVM output.
-- **ABI compatibility:** Generates `abi.json` and error/event selectors compatible with common Ethereum tooling.
-- **Determinism:** No syscalls or nondeterministic I/O; cost is gas-metered.
-- **Tooling:** Standard JSON in/out, import remappings, source maps.
+- **Target:** JVM bytecode (Java 8+ compatible)
+- **Language:** Java8-compatible syntax with `.tol` file extension
+- **Determinism:** No syscalls or nondeterministic I/O; deterministic compilation
+- **Tooling:** Command-line interface with multiple compilation modes
 
 ---
 
 ## Key Features
 
-- **Standard JSON I/O** (`--standard-json`) for build systems.
-- **Optimizer** with predictable passes (inlining, const folding, DCE, strength reduction).
-- **IR pipeline** (`--ir`, `--ir-optimized`) for audits/formal analysis.
-- **Source maps** and revert strings for debuggers.
-- **Docs/metadata**: `devdoc`, `userdoc`, compiler/optimizer manifest.
-- **SPDX license** line recognition (e.g., `// SPDX-License-Identifier: MIT`).
-- **Version pragmas** (e.g., `pragma terminos ^0.3.0;`).
+- **Java8 Compatibility** - Full support for Java 8 language features including classes, interfaces, enums, annotations, generics, and all control flow constructs
+- **Lexical Analysis** - Robust tokenization with detailed error reporting and location tracking
+- **AST Generation** - Complete Abstract Syntax Tree representation with visitor pattern support
+- **Bytecode Generation** - Direct compilation to JVM bytecode with StackMapTable support
+- **Multiple Output Formats** - Generate `.class` files, parse trees, or lexical analysis results
+- **Configurable Targets** - Support for Java classfile versions 6-17 (default: Java 8)
+- **Debug Support** - Optional StackMapTable frame generation with diagnostics
+- **Error Handling** - Comprehensive error reporting with source location information
+- **Visitor Pattern** - Extensible AST traversal and manipulation capabilities
 
 ---
 
@@ -35,148 +37,140 @@ A fast, deterministic compiler for the **Terminos Language**—purpose-built for
 # Version and build info
 tolc --version
 
-# Compile to bytecode + ABI
-tolc --bin --abi contracts/Counter.tol -o build/
+# Compile .tol file to .class files
+tolc compile Counter.tol -o build/
 
-# Enable optimizer (default runs=200)
-tolc --bin --abi --optimize --optimize-runs 500 contracts/Counter.tol -o build/
+# Compile with verbose output and custom Java version
+tolc compile Counter.tol -o build/ -v --target-version 11
 
-# Emit IR for review
-tolc --ir --ir-optimized contracts/Counter.tol -o build/
+# Parse .tol file and show AST
+tolc parse Counter.tol --detailed
 
-# Imports: base/include paths + remappings
-tolc --base-path .      --include-path lib      --remap "@std=lib/std"      --bin --abi contracts/App.tol -o build/
+# Lexical analysis of .tol file
+tolc lex Counter.tol --locations
+
+# Compile with debug frame information
+tolc compile Counter.tol -o build/ --debug-frames
+
+# Compile without StackMapTable frames
+tolc compile Counter.tol -o build/ --no-frames
 ```
 
-### Standard JSON (recommended)
+### Compilation Options
 
-**Input example**
-```json
-{
-  "language": "Terminos",
-  "sources": {
-    "Counter.tol": {
-      "content": "// SPDX-License-Identifier: MIT\npragma terminos ^0.3.0;\ncontract Counter { uint256 private v; function inc() public { v += 1; } function get() public view returns(uint256){ return v; } }"
-    }
-  },
-  "settings": {
-    "optimizer": { "enabled": true, "runs": 500 },
-    "outputSelection": {
-      "*": {
-        "*": [
-          "abi",
-          "evm.bytecode.object",
-          "evm.deployedBytecode.object",
-          "ir",
-          "irOptimized",
-          "metadata",
-          "devdoc",
-          "userdoc",
-          "storageLayout",
-          "sources",
-          "sourcemap"
-        ]
-      }
-    },
-    "targets": ["TVM"]
-  }
-}
-```
-
-**CLI**
 ```bash
-tolc --standard-json < in.json > out.json
+# Basic compilation
+tolc compile <input.tol> -o <output_dir>
+
+# Advanced compilation with all options
+tolc compile <input.tol> \
+  -o <output_dir> \
+  -v \
+  --target-version 11 \
+  --debug-frames
 ```
+
+
 
 ---
 
 ## Inputs, Imports, Remappings
 
-- **Base path:** `--base-path <dir>` sets the import root.
-- **Include paths:** `--include-path <dir>` (repeatable) for library search.
-- **Remappings:** `--remap "@alias=path/to/lib"` used by `import "@alias/…";`
-- **CI hardening:** `--allow-paths <dir1>,<dir2>` restricts filesystem reads.
+- **Input files:** `.tol` files with Java8-compatible syntax
+- **Output:** Java bytecode (`.class` files) in the specified output directory
+- **Target version:** Configurable Java classfile version (6-17, default: 8)
+- **Frame generation:** Optional StackMapTable generation for JVM compatibility
 
 ---
 
-## Optimizer
+## Compilation Process
 
-Enable with `--optimize`; tune with `--optimize-runs <N>` (higher favors long-lived contracts). Passes are cost-aware and preserve observable behavior.
+The compilation pipeline consists of three main stages:
+
+1. **Lexical Analysis** - Tokenizes source code with location tracking
+2. **Parsing** - Generates Abstract Syntax Tree (AST) from tokens
+3. **Code Generation** - Emits JVM bytecode with optional optimizations
 
 ---
 
 ## Artifacts
 
-- **`<Name>.bin`** – constructor/deployment bytecode  
-- **`<Name>.bin-runtime`** – runtime bytecode  
-- **`<Name>.abi`** – EVM-compatible ABI JSON  
-- **`<Name>.meta.json`** – compiler/optimizer/source hashes  
-- **`<Name>.ir` / `<Name>.ir.opt`** – IR (pre/post optimization)  
-- **`storageLayout.json`** – slot/offset map for audits/upgrades
+- **`<ClassName>.class`** – Compiled Java bytecode files
+- **AST Output** – Detailed parse tree representation (use `--detailed` flag)
+- **Token Analysis** – Lexical analysis results with location information
+- **Debug Information** – Optional StackMapTable frames for JVM verification
 
 ---
 
-## Language Directives
+## Language Features
 
-- **Version:** `pragma terminos ^0.3.0;`
-- **Experimental:** `pragma experimental ABIEncoderV2;` (example)
-- **License:** `// SPDX-License-Identifier: <id or expression>`
+- **Classes & Interfaces** - Full Java 8 class and interface support
+- **Generics** - Type parameter support with bounds
+- **Annotations** - Custom annotation processing
+- **Enums** - Enumeration type support
+- **Control Flow** - All Java control structures (if, while, for, switch, try-catch)
+- **Expressions** - Complete expression language with operator precedence
+- **Modifiers** - Access control and method/field modifiers
+- **Exceptions** - Exception handling and throwing
 
 ---
 
-## Advanced
+## Advanced Features
 
-- **Call graph / CFG:** `--emit-cfg`
-- **Gas estimates:** `--gas-estimates`
-- **Target EVM (experimental):** `--target EVM` (default: TVM)
-- **Strict mode:** `--strict` (warnings → errors)
-- **Reproducible builds:** `--deterministic` (locks timestamps/hashes in metadata)
+- **StackMapTable Generation** - Optional frame generation for JVM compatibility
+- **Debug Frames** - Enhanced diagnostics for StackMapTable generation
+- **Target Version Control** - Support for multiple Java classfile versions
+- **Verbose Output** - Detailed compilation progress information
+- **Error Location** - Precise source location reporting for compilation errors
 
 ---
 
 ## Security & Determinism
 
-- No filesystem/network/clock access in compiled code.
-- Deterministic arithmetic; explicit gas metering.
-- Revert reasons and selectors follow EVM conventions for smooth tooling integration.
+- No filesystem/network/clock access in compiled code
+- Deterministic compilation process
+- JVM bytecode verification compatible
+- Standard Java security model
 
 ---
 
 ## Licensing
 
-Put an SPDX line at the top of each source file. Common examples:
-
-- `// SPDX-License-Identifier: MIT`
-- `// SPDX-License-Identifier: (MIT OR Apache-2.0)`
-- `// SPDX-License-Identifier: UNLICENSED`
+This project is licensed under MIT OR Apache-2.0. See the LICENSE file for details.
 
 ---
 
 ## Versioning
 
-`tolc` uses semantic versions: `MAJOR.MINOR.PATCH`. Pin compiler compatibility in contracts with `pragma terminos`.
+`tolc` uses semantic versions: `MAJOR.MINOR.PATCH`. The current version is 0.1.0.
 
 ---
 
 ### Example
 
-**`contracts/Counter.tol`**
-```
-// SPDX-License-Identifier: MIT
-pragma terminos ^0.3.0;
+**`Counter.tol`**
+```java
+package com.example;
 
-contract Counter {
-    uint256 private value;
-
-    event Increased(uint256 newValue);
-
-    function inc() public {
-        value = value + 1;
-        emit Increased(value);
+public class Counter {
+    private int value;
+    
+    public Counter() {
+        this.value = 0;
     }
-
-    function get() public view returns (uint256) {
+    
+    public void increment() {
+        value++;
+    }
+    
+    public int getValue() {
         return value;
+    }
+    
+    public static void main(String[] args) {
+        Counter counter = new Counter();
+        counter.increment();
+        System.out.println("Value: " + counter.getValue());
     }
 }
 ```
@@ -184,5 +178,11 @@ contract Counter {
 **Build**
 ```bash
 mkdir -p build
-tolc --bin --bin-runtime --abi --metadata --ir --ir-optimized contracts/Counter.tol -o build/
+tolc compile Counter.tol -o build/
+```
+
+**Run**
+```bash
+cd build
+java com.example.Counter
 ```

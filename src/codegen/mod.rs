@@ -16,6 +16,9 @@ mod defs;
 mod frame;
 mod writer;
 mod annotation;
+mod error;
+mod vec;
+mod typed_index;
 
 pub use bytecode::*;
 pub use class_writer::*;
@@ -29,6 +32,10 @@ pub use method::*;
 pub use defs::*;
 pub use frame::*;
 pub use writer::*;
+pub use error::*;
+pub use vec::*;
+pub use typed_index::*;
+pub use constpool::*;
 
 use crate::ast::*;
 use crate::error::{Result, Error};
