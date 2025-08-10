@@ -1,6 +1,5 @@
 //! Size-limited vector types for JVM compliance
 
-use super::error::{ConstPoolError, ConstPoolResult};
 use std::ops::{Deref, Index, IndexMut};
 
 /// Error that occurs when trying to store items in a size-limited vector

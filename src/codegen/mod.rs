@@ -19,6 +19,7 @@ mod annotation;
 mod error;
 mod vec;
 mod typed_index;
+mod opcodor;
 
 pub use bytecode::*;
 pub use class_writer::*;
@@ -38,7 +39,7 @@ pub use typed_index::*;
 pub use constpool::*;
 
 use crate::ast::*;
-use crate::error::{Result, Error};
+use crate::error::Result;
 use crate::config::Config;
 use std::path::Path;
 
@@ -156,7 +157,6 @@ fn modifiers_to_flags(modifiers: &[Modifier]) -> u16 {
             Modifier::Transient => flags |= access_flags::ACC_TRANSIENT,
             Modifier::Volatile => flags |= access_flags::ACC_VOLATILE,
             Modifier::Strictfp => flags |= access_flags::ACC_STRICT,
-            _ => {}
         }
     }
     

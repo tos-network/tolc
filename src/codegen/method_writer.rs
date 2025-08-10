@@ -3,6 +3,7 @@
 //! This module handles the conversion of AST method declarations into Java bytecode instructions.
 
 use super::bytecode::*;
+use super::opcodor::OpcodeGenerator;    
 use crate::ast::*;
 use crate::codegen::ExceptionTableEntry;
 use crate::error::{Result, Error};
@@ -20,6 +21,8 @@ pub struct MethodWriter {
     pending_exception_entries: Vec<PendingExceptionEntry>,
     line_numbers: Vec<(u16, u16)>,
     constant_pool: Option<std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>>,
+    opcode_generator: OpcodeGenerator,
+    current_class_name: Option<String>,
 }
 
 impl MethodWriter {
@@ -37,6 +40,8 @@ impl MethodWriter {
             pending_exception_entries: Vec::new(),
             line_numbers: Vec::new(),
             constant_pool: None,
+            opcode_generator: OpcodeGenerator::new(),
+            current_class_name: None,
         }
     }
     
@@ -53,7 +58,28 @@ impl MethodWriter {
             scope_stack: Vec::new(),
             pending_exception_entries: Vec::new(),
             line_numbers: Vec::new(),
-            constant_pool: Some(constant_pool),
+            constant_pool: Some(constant_pool.clone()),
+            opcode_generator: OpcodeGenerator::new_with_constant_pool(constant_pool),
+            current_class_name: None,
+        }
+    }
+    
+    /// Create a new method writer with access to constant pool and current class name
+    pub fn new_with_constant_pool_and_class(constant_pool: std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>, class_name: String) -> Self {
+        Self {
+            bytecode: Vec::new(),
+            max_stack: 0,
+            max_locals: 0,
+            local_vars: Vec::new(),
+            labels: Vec::new(),
+            next_label_id: 0,
+            loop_stack: Vec::new(),
+            scope_stack: Vec::new(),
+            pending_exception_entries: Vec::new(),
+            line_numbers: Vec::new(),
+            constant_pool: Some(constant_pool.clone()),
+            opcode_generator: OpcodeGenerator::new_with_constant_pool(constant_pool),
+            current_class_name: Some(class_name),
         }
     }
     
@@ -152,7 +178,7 @@ impl MethodWriter {
             Stmt::Expression(expr_stmt) => {
                 self.generate_expression(&expr_stmt.expr)?;
                 // Pop result if not used
-                self.emit_instruction(opcodes::POP);
+                self.emit_opcode(self.opcode_generator.pop());
             }
             Stmt::Declaration(var_decl) => {
                 self.generate_variable_declaration(var_decl)?;
@@ -199,11 +225,11 @@ impl MethodWriter {
                     self.find_loop_break_label(None)
                 };
                 if let Some(label_id) = target {
-                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_opcode(self.opcode_generator.goto(0)); // TODO: Calculate actual offset
                     self.emit_label_reference(label_id);
                 } else {
                     // Fallback: placeholder
-                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_opcode(self.opcode_generator.goto(0));
                     self.emit_short(0);
                 }
             }
@@ -214,11 +240,11 @@ impl MethodWriter {
                     self.find_loop_continue_label(None)
                 };
                 if let Some(label_id) = target {
-                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_opcode(self.opcode_generator.goto(0)); // TODO: Calculate actual offset
                     self.emit_label_reference(label_id);
                 } else {
                     // Fallback: placeholder
-                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_opcode(self.opcode_generator.goto(0));
                     self.emit_short(0);
                 }
             }
@@ -265,34 +291,34 @@ impl MethodWriter {
                 let primary_exc = self.allocate_local_variable("$primary_exc", &thr_t);
                 self.store_local_variable(primary_exc, &thr_t)?;
                 // Close with addSuppressed
-                for (local_index, tref) in res_locals.iter().rev() {
+                for (local_index, _tref) in res_locals.iter().rev() {
                     let skip = self.create_label();
-                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(*local_index as u8);
-                    self.emit_instruction(opcodes::IFNULL); self.emit_label_reference(skip);
+                    self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(*local_index as u8);
+                    self.emit_opcode(self.opcode_generator.ifnull(0)); self.emit_label_reference(skip);
                     let inner_start = self.create_label();
                     let inner_end = self.create_label();
                     let inner_handler = self.create_label();
                     let inner_after = self.create_label();
                     self.mark_label(inner_start);
-                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(*local_index as u8);
-                    self.emit_instruction(opcodes::INVOKEINTERFACE);
+                    self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(*local_index as u8);
+                    self.emit_opcode(self.opcode_generator.invokeinterface(0, 0));
                     self.emit_short(1); self.emit_byte(1); self.emit_byte(0);
                     self.mark_label(inner_end);
                     self.emit_instruction(opcodes::GOTO); self.emit_label_reference(inner_after);
                     self.mark_label(inner_handler);
                     let suppressed = self.allocate_local_variable("$suppressed", &thr_t);
                     self.store_local_variable(suppressed, &thr_t)?;
-                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(primary_exc as u8);
-                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(suppressed as u8);
-                    self.emit_instruction(opcodes::INVOKEVIRTUAL);
+                    self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(primary_exc as u8);
+                    self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(suppressed as u8);
+                    self.emit_opcode(self.opcode_generator.invokevirtual(0));
                     self.emit_short(1);
                     self.mark_label(inner_after);
                     self.add_exception_handler_labels(inner_start, inner_end, inner_handler, 0);
                     self.mark_label(skip);
                 }
                 // rethrow
-                self.emit_instruction(opcodes::ALOAD); self.emit_byte(primary_exc as u8);
-                self.emit_instruction(opcodes::ATHROW);
+                self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(primary_exc as u8);
+                self.emit_opcode(self.opcode_generator.athrow());
                 // add outer entry
                 self.add_exception_handler_labels(try_start, try_end, handler, 0);
                 // after
@@ -307,7 +333,7 @@ impl MethodWriter {
             Stmt::Throw(throw_stmt) => {
                 self.record_line_number(throw_stmt.span.start.line as u16);
                 self.generate_expression(&throw_stmt.expr)?;
-                self.emit_instruction(opcodes::ATHROW);
+                self.emit_opcode(self.opcode_generator.athrow());
             }
             Stmt::Block(block) => {
                 self.record_line_number(block.span.start.line as u16);
@@ -323,30 +349,30 @@ impl MethodWriter {
                 // Evaluate condition
                 self.generate_expression(&assert_stmt.condition)?;
                 // If condition != 0, jump to end
-                self.emit_instruction(opcodes::IFNE);
+                self.emit_opcode(self.opcode_generator.ifne(0));
                 self.emit_label_reference(end_label);
                 // Construct AssertionError
                 // NEW java/lang/AssertionError
-                self.emit_instruction(opcodes::NEW);
+                self.emit_opcode(self.opcode_generator.new_object(0));
                 let _cls = self.add_class_constant("java/lang/AssertionError");
                 self.emit_short(_cls as i16);
                 // DUP
-                self.emit_instruction(opcodes::DUP);
+                self.emit_opcode(self.opcode_generator.dup());
                 // If message present, load it and call (Ljava/lang/Object;)V or (Ljava/lang/String;)V
                 if let Some(msg) = &assert_stmt.message {
                     self.generate_expression(msg)?;
                     // INVOKESPECIAL <init>(Ljava/lang/Object;)V (placeholder)
-                    self.emit_instruction(opcodes::INVOKESPECIAL);
+                    self.emit_opcode(self.opcode_generator.invokespecial(0));
                     let _mref = self.add_method_ref("java/lang/AssertionError", "<init>", "(Ljava/lang/Object;)V");
                     self.emit_short(_mref as i16);
                 } else {
                     // INVOKESPECIAL <init>()V
-                    self.emit_instruction(opcodes::INVOKESPECIAL);
+                    self.emit_opcode(self.opcode_generator.invokespecial(0));
                     let _mref = self.add_method_ref("java/lang/AssertionError", "<init>", "()V");
                     self.emit_short(_mref as i16);
                 }
                 // ATHROW
-                self.emit_instruction(opcodes::ATHROW);
+                self.emit_opcode(self.opcode_generator.athrow());
                 // end
                 self.mark_label(end_label);
             }
@@ -381,7 +407,7 @@ impl MethodWriter {
                 self.generate_method_call(method_call)?;
             }
             Expr::FieldAccess(field_access) => {
-                // TODO: Implement field access
+                self.generate_field_access(field_access)?;
             }
             Expr::ArrayAccess(array_access) => {
                 self.generate_array_access(array_access)?;
@@ -390,13 +416,13 @@ impl MethodWriter {
                 self.generate_cast(cast_expr)?;
             }
             Expr::InstanceOf(instance_of) => {
-                // TODO: Implement instanceof
+                self.generate_instanceof_expression(instance_of)?;
             }
             Expr::Conditional(conditional) => {
                 self.generate_ternary_expression(conditional)?;
             }
             Expr::New(new_expr) => {
-                // TODO: Implement new expression
+                self.generate_new_expression(new_expr)?;
             }
             Expr::Parenthesized(expr) => {
                 self.generate_expression(expr)?;
@@ -415,23 +441,43 @@ impl MethodWriter {
         
         // Generate operation
         match binary.operator {
-            BinaryOp::Add => self.emit_instruction(opcodes::IADD),
-            BinaryOp::Sub => self.emit_instruction(opcodes::ISUB),
-            BinaryOp::Mul => self.emit_instruction(opcodes::IMUL),
-            BinaryOp::Div => self.emit_instruction(opcodes::IDIV),
-            BinaryOp::Mod => self.emit_instruction(opcodes::IREM),
-            BinaryOp::Lt => self.emit_instruction(opcodes::IF_ICMPLT),
-            BinaryOp::Le => self.emit_instruction(opcodes::IF_ICMPLE),
-            BinaryOp::Gt => self.emit_instruction(opcodes::IF_ICMPGT),
-            BinaryOp::Ge => self.emit_instruction(opcodes::IF_ICMPGE),
-            BinaryOp::Eq => self.emit_instruction(opcodes::IF_ICMPEQ),
-            BinaryOp::Ne => self.emit_instruction(opcodes::IF_ICMPNE),
-            BinaryOp::And => self.emit_instruction(opcodes::IAND),
-            BinaryOp::Or => self.emit_instruction(opcodes::IOR),
-            BinaryOp::Xor => self.emit_instruction(opcodes::IXOR),
-            BinaryOp::LShift => self.emit_instruction(opcodes::ISHL),
-            BinaryOp::RShift => self.emit_instruction(opcodes::ISHR),
-            BinaryOp::URShift => self.emit_instruction(opcodes::IUSHR),
+            BinaryOp::Add => self.emit_opcode(self.opcode_generator.iadd()),
+            BinaryOp::Sub => self.emit_opcode(self.opcode_generator.isub()),
+            BinaryOp::Mul => self.emit_opcode(self.opcode_generator.imul()),
+            BinaryOp::Div => self.emit_opcode(self.opcode_generator.idiv()),
+            BinaryOp::Mod => self.emit_opcode(self.opcode_generator.irem()),
+            BinaryOp::Lt => {
+                // For comparison operators, we need to handle them differently
+                // since they don't leave a result on the stack
+                self.emit_opcode(self.opcode_generator.if_icmplt(0));
+                self.emit_short(0); // Placeholder offset
+            }
+            BinaryOp::Le => {
+                self.emit_opcode(self.opcode_generator.if_icmple(0));
+                self.emit_short(0); // Placeholder offset
+            }
+            BinaryOp::Gt => {
+                self.emit_opcode(self.opcode_generator.if_icmpgt(0));
+                self.emit_short(0); // Placeholder offset
+            }
+            BinaryOp::Ge => {
+                self.emit_opcode(self.opcode_generator.if_icmpge(0));
+                self.emit_short(0); // Placeholder offset
+            }
+            BinaryOp::Eq => {
+                self.emit_opcode(self.opcode_generator.if_icmpeq(0));
+                self.emit_short(0); // Placeholder offset
+            }
+            BinaryOp::Ne => {
+                self.emit_opcode(self.opcode_generator.if_icmpne(0));
+                self.emit_short(0); // Placeholder offset
+            }
+            BinaryOp::And => self.emit_opcode(self.opcode_generator.iand()),
+            BinaryOp::Or => self.emit_opcode(self.opcode_generator.ior()),
+            BinaryOp::Xor => self.emit_opcode(self.opcode_generator.ixor()),
+            BinaryOp::LShift => self.emit_opcode(self.opcode_generator.ishl()),
+            BinaryOp::RShift => self.emit_opcode(self.opcode_generator.ishr()),
+            BinaryOp::URShift => self.emit_opcode(self.opcode_generator.iushr()),
         }
         
         Ok(())
@@ -446,24 +492,96 @@ impl MethodWriter {
             }
             UnaryOp::Minus => {
                 self.generate_expression(&unary.operand)?;
-                self.emit_instruction(opcodes::INEG);
+                self.emit_opcode(self.opcode_generator.ineg());
             }
             UnaryOp::Not => {
                 self.generate_expression(&unary.operand)?;
-                self.emit_instruction(opcodes::IFEQ);
+                // Logical NOT: convert to boolean and negate
+                // First, convert to boolean (0 = false, non-zero = true)
+                self.emit_opcode(self.opcode_generator.ifne(0));
+                self.emit_short(0); // Placeholder offset
+                // If not zero, push false (0)
+                self.emit_opcode(self.opcode_generator.iconst_0());
+                // Jump to end
+                self.emit_opcode(self.opcode_generator.goto(0));
+                self.emit_short(0); // Placeholder offset
+                // Otherwise, push true (1)
+                self.emit_opcode(self.opcode_generator.iconst_1());
             }
             UnaryOp::BitNot => {
                 self.generate_expression(&unary.operand)?;
-                self.emit_instruction(opcodes::ICONST_M1);
-                self.emit_instruction(opcodes::IXOR);
+                self.emit_opcode(self.opcode_generator.iconst_m1());
+                self.emit_opcode(self.opcode_generator.ixor());
             }
-            UnaryOp::PreInc | UnaryOp::PostInc => {
-                // TODO: Implement increment
-                self.generate_expression(&unary.operand)?;
+                        UnaryOp::PreInc => {
+                // Pre-increment: ++x
+                if let Expr::Identifier(ident) = &*unary.operand {
+                    let local_var = self.find_local_variable(&ident.name).cloned();
+                    if let Some(local_var) = local_var {
+                        // Load current value
+                        self.load_local_variable(local_var.index, &local_var.var_type)?;
+                        // Increment
+                        self.emit_opcode(self.opcode_generator.iconst_1());
+                        self.emit_opcode(self.opcode_generator.iadd());
+                        // Store back
+                        self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Load again for result
+                        self.load_local_variable(local_var.index, &local_var.var_type)?;
+                    }
+                }
             }
-            UnaryOp::PreDec | UnaryOp::PostDec => {
-                // TODO: Implement decrement
-                self.generate_expression(&unary.operand)?;
+            UnaryOp::PostInc => {
+                // Post-increment: x++
+                if let Expr::Identifier(ident) = &*unary.operand {
+                    let local_var = self.find_local_variable(&ident.name).cloned();
+                    if let Some(local_var) = local_var {
+                        // Load current value
+                        self.load_local_variable(local_var.index, &local_var.var_type)?;
+                        // DUP to keep copy for result
+                        self.emit_opcode(self.opcode_generator.dup());
+                        // Increment
+                        self.emit_opcode(self.opcode_generator.iconst_1());
+                        self.emit_opcode(self.opcode_generator.iadd());
+                        // Store back
+                        self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Original value is still on stack
+                    }
+                }
+            }
+            UnaryOp::PreDec => {
+                // Pre-decrement: --x
+                if let Expr::Identifier(ident) = &*unary.operand {
+                    let local_var = self.find_local_variable(&ident.name).cloned();
+                    if let Some(local_var) = local_var {
+                        // Load current value
+                        self.load_local_variable(local_var.index, &local_var.var_type)?;
+                        // Decrement
+                        self.emit_opcode(self.opcode_generator.iconst_1());
+                        self.emit_opcode(self.opcode_generator.isub());
+                        // Store back
+                        self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Load again for result
+                        self.load_local_variable(local_var.index, &local_var.var_type)?;
+                    }
+                }
+            }
+            UnaryOp::PostDec => {
+                // Post-decrement: x--
+                if let Expr::Identifier(ident) = &*unary.operand {
+                    let local_var = self.find_local_variable(&ident.name).cloned();
+                    if let Some(local_var) = local_var {
+                        // Load current value
+                        self.load_local_variable(local_var.index, &local_var.var_type)?;
+                        // DUP to keep copy for result
+                        self.emit_opcode(self.opcode_generator.dup());
+                        // Decrement
+                        self.emit_opcode(self.opcode_generator.iconst_1());
+                        self.emit_opcode(self.opcode_generator.isub());
+                        // Store back
+                        self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Original value is still on stack
+                    }
+                }
             }
         }
         
@@ -480,73 +598,67 @@ impl MethodWriter {
         match lit {
             Literal::Integer(value) => {
                 match *value {
-                    0 => self.emit_instruction(opcodes::ICONST_0),
-                    1 => self.emit_instruction(opcodes::ICONST_1),
-                    2 => self.emit_instruction(opcodes::ICONST_2),
-                    3 => self.emit_instruction(opcodes::ICONST_3),
-                    4 => self.emit_instruction(opcodes::ICONST_4),
-                    5 => self.emit_instruction(opcodes::ICONST_5),
-                    -1 => self.emit_instruction(opcodes::ICONST_M1),
+                    0 => self.emit_opcode(self.opcode_generator.iconst_0()),
+                    1 => self.emit_opcode(self.opcode_generator.iconst_1()),
+                    2 => self.emit_opcode(self.opcode_generator.iconst_2()),
+                    3 => self.emit_opcode(self.opcode_generator.iconst_3()),
+                    4 => self.emit_opcode(self.opcode_generator.iconst_4()),
+                    5 => self.emit_opcode(self.opcode_generator.iconst_5()),
+                    -1 => self.emit_opcode(self.opcode_generator.iconst_m1()),
                     _ => {
                         if *value >= -128 && *value <= 127 {
-                            self.emit_instruction(opcodes::BIPUSH);
-                            self.emit_byte((*value as i8) as u8);
+                            self.emit_opcode(self.opcode_generator.bipush(*value as i8));
                         } else if *value >= -32768 && *value <= 32767 {
-                            self.emit_instruction(opcodes::SIPUSH);
-                            self.emit_short(*value as i16);
+                            self.emit_opcode(self.opcode_generator.sipush(*value as i16));
                         } else {
                             // For larger values, we need to use LDC
                             // This is a simplified approach
-                            self.emit_instruction(opcodes::LDC);
-                            self.emit_byte(1); // Constant pool index
+                            self.emit_opcode(self.opcode_generator.ldc(1)); // Constant pool index
                         }
                     }
                 }
             }
             Literal::Float(value) => {
                 if *value == 0.0 {
-                    self.emit_instruction(opcodes::FCONST_0);
+                    self.emit_opcode(self.opcode_generator.fconst_0());
                 } else if *value == 1.0 {
-                    self.emit_instruction(opcodes::FCONST_1);
+                    self.emit_opcode(self.opcode_generator.fconst_1());
                 } else if *value == 2.0 {
-                    self.emit_instruction(opcodes::FCONST_2);
+                    self.emit_opcode(self.opcode_generator.fconst_2());
                 } else {
                     // For other values, we need to use LDC
-                    self.emit_instruction(opcodes::LDC);
-                    self.emit_byte(1); // Constant pool index
+                    self.emit_opcode(self.opcode_generator.ldc(1)); // Constant pool index
                 }
             }
             Literal::Boolean(value) => {
                 if *value {
-                    self.emit_instruction(opcodes::ICONST_1);
+                    self.emit_opcode(self.opcode_generator.iconst_1());
                 } else {
-                    self.emit_instruction(opcodes::ICONST_0);
+                    self.emit_opcode(self.opcode_generator.iconst_0());
                 }
             }
-            Literal::String(value) => {
+            Literal::String(_value) => {
                 // TODO: Add string to constant pool
-                self.emit_instruction(opcodes::LDC);
-                self.emit_byte(1); // Constant pool index
+                self.emit_opcode(self.opcode_generator.ldc(1)); // Constant pool index
             }
             Literal::Char(value) => {
                 let int_value = *value as i32;
                 if int_value >= 0 && int_value <= 5 {
                     match int_value {
-                        0 => self.emit_instruction(opcodes::ICONST_0),
-                        1 => self.emit_instruction(opcodes::ICONST_1),
-                        2 => self.emit_instruction(opcodes::ICONST_2),
-                        3 => self.emit_instruction(opcodes::ICONST_3),
-                        4 => self.emit_instruction(opcodes::ICONST_4),
-                        5 => self.emit_instruction(opcodes::ICONST_5),
+                        0 => self.emit_opcode(self.opcode_generator.iconst_0()),
+                        1 => self.emit_opcode(self.opcode_generator.iconst_1()),
+                        2 => self.emit_opcode(self.opcode_generator.iconst_2()),
+                        3 => self.emit_opcode(self.opcode_generator.iconst_3()),
+                        4 => self.emit_opcode(self.opcode_generator.iconst_4()),
+                        5 => self.emit_opcode(self.opcode_generator.iconst_5()),
                         _ => unreachable!(),
                     }
                 } else {
-                    self.emit_instruction(opcodes::BIPUSH);
-                    self.emit_byte(int_value as u8);
+                    self.emit_opcode(self.opcode_generator.bipush(int_value as i8));
                 }
             }
             Literal::Null => {
-                self.emit_instruction(opcodes::ACONST_NULL);
+                self.emit_opcode(self.opcode_generator.aconst_null());
             }
         }
         
@@ -561,10 +673,9 @@ impl MethodWriter {
             self.load_local_variable(local_var.index, &var_type)?;
         } else {
             // Assume it's a field access on 'this'
-            self.emit_instruction(opcodes::ALOAD_0);
+            self.emit_opcode(self.opcode_generator.aload(0));
             // TODO: Add field reference to constant pool
-            self.emit_instruction(opcodes::GETFIELD);
-            self.emit_short(1); // Constant pool index
+            self.emit_opcode(self.opcode_generator.getfield(1)); // Constant pool index
         }
         
         Ok(())
@@ -577,7 +688,7 @@ impl MethodWriter {
             self.generate_expression(receiver)?;
         } else {
             // Assume 'this' for instance methods
-            self.emit_instruction(opcodes::ALOAD_0);
+            self.emit_opcode(self.opcode_generator.aload(0));
         }
         
         // Generate arguments
@@ -590,12 +701,116 @@ impl MethodWriter {
         if call.name == "println" {
             // For System.out.println, we need to call PrintStream.println
             let method_ref_index = self.add_method_ref("java/io/PrintStream", "println", "(Ljava/lang/String;)V");
-            self.emit_instruction(opcodes::INVOKEVIRTUAL);
+            self.emit_opcode(self.opcode_generator.invokevirtual(0));
             self.emit_short(method_ref_index as i16);
         } else {
-            // Default method call
-            let method_ref_index = self.add_method_ref("", &call.name, "()V"); // Simplified
-            self.emit_instruction(opcodes::INVOKEVIRTUAL);
+            // Generate method descriptor based on arguments
+            let descriptor = self.generate_method_descriptor(&call.arguments);
+            
+            // Determine the class for the method call
+            let class_name = if call.target.is_some() {
+                // If there's a target, we need to determine the class from the target
+                // For now, assume it's a method call on the target object
+                // This is a simplified approach - in a full implementation, we'd need type inference
+                "java/lang/Object".to_string()
+            } else {
+                // No target means calling on 'this' - use current class name
+                self.current_class_name.as_ref()
+                    .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
+                    .clone()
+            };
+            
+            let method_ref_index = self.add_method_ref(&class_name, &call.name, &descriptor);
+            self.emit_opcode(self.opcode_generator.invokevirtual(0));
+            self.emit_short(method_ref_index as i16);
+        }
+        
+        Ok(())
+    }
+
+    /// Generate method descriptor from arguments
+    fn generate_method_descriptor(&self, args: &[Expr]) -> String {
+        let mut descriptor = "(".to_string();
+        
+        for arg in args {
+            descriptor.push_str(&self.type_to_descriptor(arg));
+        }
+        
+        descriptor.push_str(")V"); // Assume void return for now
+        descriptor
+    }
+
+    /// Convert expression type to JVM descriptor
+    fn type_to_descriptor(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Literal(lit) => match lit.value {
+                Literal::Integer(_) => "I".to_string(),
+                Literal::Float(_) => "F".to_string(),
+                Literal::Boolean(_) => "Z".to_string(),
+                Literal::String(_) => "Ljava/lang/String;".to_string(),
+                Literal::Char(_) => "C".to_string(),
+                Literal::Null => "Ljava/lang/Object;".to_string(),
+            },
+            Expr::Identifier(_) => "I".to_string(), // Assume int for now
+            _ => "I".to_string(), // Default to int
+        }
+    }
+
+    /// Generate bytecode for field access
+    fn generate_field_access(&mut self, field_access: &FieldAccessExpr) -> Result<()> {
+        // Generate receiver expression if present
+        if let Some(receiver) = &field_access.target {
+            self.generate_expression(receiver)?;
+        } else {
+            // Assume 'this' for instance fields
+            self.emit_opcode(self.opcode_generator.aload(0));
+        }
+        
+        // Generate field access
+        let field_ref_index = self.add_field_ref("", &field_access.name, "I"); // Simplified type
+        self.emit_opcode(self.opcode_generator.getfield(0));
+        self.emit_short(field_ref_index as i16);
+        
+        Ok(())
+    }
+
+    /// Generate bytecode for instanceof expression
+    fn generate_instanceof_expression(&mut self, instance_of: &InstanceOfExpr) -> Result<()> {
+        // Generate expression to check
+        self.generate_expression(&instance_of.expr)?;
+        
+        // Generate instanceof check
+        let class_ref_index = self.add_class_constant(&instance_of.target_type.name);
+        self.emit_opcode(self.opcode_generator.instanceof(0));
+        self.emit_short(class_ref_index as i16);
+        
+        Ok(())
+    }
+
+    /// Generate bytecode for new expression
+    fn generate_new_expression(&mut self, new_expr: &NewExpr) -> Result<()> {
+        // Check if it's an array creation
+        if new_expr.target_type.array_dims > 0 {
+            self.generate_array_creation(new_expr)?;
+        } else {
+            // Regular object creation
+            let class_ref_index = self.add_class_constant(&new_expr.target_type.name);
+            
+            // NEW instruction
+            self.emit_opcode(self.opcode_generator.new_object(0));
+            self.emit_short(class_ref_index as i16);
+            
+            // DUP to keep reference for constructor call
+            self.emit_opcode(self.opcode_generator.dup());
+            
+            // Generate constructor arguments
+            for arg in &new_expr.arguments {
+                self.generate_expression(arg)?;
+            }
+            
+            // Call constructor
+            let method_ref_index = self.add_method_ref(&new_expr.target_type.name, "<init>", "()V");
+            self.emit_opcode(self.opcode_generator.invokespecial(0));
             self.emit_short(method_ref_index as i16);
         }
         
@@ -604,17 +819,16 @@ impl MethodWriter {
 
     fn generate_close_for_local(&mut self, index: u16, _tref: &TypeRef) -> Result<()> {
         // Load local
-        self.emit_instruction(opcodes::ALOAD);
+        self.emit_opcode(self.opcode_generator.aload(0));
         self.emit_byte(index as u8);
         // ifnull skip
         let end_label = self.create_label();
-        self.emit_instruction(opcodes::IFNULL);
+        self.emit_opcode(self.opcode_generator.ifnull(0));
         self.emit_label_reference(end_label);
         // invoke interface close()V (simplified; no constant pool wired)
-        self.emit_instruction(opcodes::ALOAD);
+        self.emit_opcode(self.opcode_generator.aload(0));
         self.emit_byte(index as u8);
-        self.emit_instruction(opcodes::INVOKEINTERFACE);
-        // placeholder CP index and count-and-0
+        self.emit_opcode(self.opcode_generator.invokeinterface(0, 0));
         self.emit_short(1);
         self.emit_byte(1);
         self.emit_byte(0);
@@ -625,7 +839,29 @@ impl MethodWriter {
     
     /// Generate bytecode for an assignment expression
     fn generate_assignment(&mut self, assign: &AssignmentExpr) -> Result<()> {
-        // Generate value first
+        // Handle compound assignments
+        if assign.operator != AssignmentOp::Assign {
+            // For compound assignments, we need to load the target first
+            if let Expr::Identifier(ident) = &*assign.target {
+                if let Some(local_var) = self.find_local_variable(&ident.name) {
+                    // Extract local variable info to avoid borrow checker issues
+                    let index = local_var.index;
+                    let var_type = local_var.var_type.clone();
+                    
+                    // Load current value
+                    self.load_local_variable(index, &var_type)?;
+                    // Generate right operand
+                    self.generate_expression(&assign.value)?;
+                    // Apply operation
+                    self.generate_compound_assignment(assign.operator.clone())?;
+                    // Store result
+                    self.store_local_variable(index, &var_type)?;
+                    return Ok(());
+                }
+            }
+        }
+        
+        // Regular assignment: generate value first
         self.generate_expression(&assign.value)?;
         
         // Generate target
@@ -637,8 +873,8 @@ impl MethodWriter {
                     self.store_local_variable(local_var.index, &var_type)?;
                 } else {
                     // Assume it's a field assignment on 'this'
-                    self.emit_instruction(opcodes::ALOAD_0);
-                    self.emit_instruction(opcodes::PUTFIELD);
+                    self.emit_opcode(self.opcode_generator.aload(0));
+                    self.emit_opcode(self.opcode_generator.putfield(0));
                     self.emit_short(1); // Constant pool index
                 }
             }
@@ -648,6 +884,28 @@ impl MethodWriter {
             }
         }
         
+        Ok(())
+    }
+
+    /// Generate bytecode for compound assignment operations
+    fn generate_compound_assignment(&mut self, op: AssignmentOp) -> Result<()> {
+        match op {
+            AssignmentOp::AddAssign => self.emit_opcode(self.opcode_generator.iadd()),
+            AssignmentOp::SubAssign => self.emit_opcode(self.opcode_generator.isub()),
+            AssignmentOp::MulAssign => self.emit_opcode(self.opcode_generator.imul()),
+            AssignmentOp::DivAssign => self.emit_opcode(self.opcode_generator.idiv()),
+            AssignmentOp::ModAssign => self.emit_opcode(self.opcode_generator.irem()),
+            AssignmentOp::AndAssign => self.emit_opcode(self.opcode_generator.iand()),
+            AssignmentOp::OrAssign => self.emit_opcode(self.opcode_generator.ior()),
+            AssignmentOp::XorAssign => self.emit_opcode(self.opcode_generator.ixor()),
+            AssignmentOp::LShiftAssign => self.emit_opcode(self.opcode_generator.ishl()),
+            AssignmentOp::RShiftAssign => self.emit_opcode(self.opcode_generator.ishr()),
+            AssignmentOp::URShiftAssign => self.emit_opcode(self.opcode_generator.iushr()),
+            AssignmentOp::Assign => {
+                // Should not happen here
+                return Err(Error::codegen_error("Unexpected Assign operator in compound assignment".to_string()));
+            }
+        }
         Ok(())
     }
     
@@ -660,7 +918,7 @@ impl MethodWriter {
         self.generate_expression(&array_access.index)?;
         
         // Generate array access
-        self.emit_instruction(opcodes::IALOAD); // Assume int array for now
+        self.emit_opcode(self.opcode_generator.iaload()); // Assume int array for now
         
         Ok(())
     }
@@ -674,7 +932,7 @@ impl MethodWriter {
         
         // Generate new array
         // TODO: Handle different array types
-        self.emit_instruction(opcodes::NEWARRAY);
+        self.emit_opcode(self.opcode_generator.newarray(0));
         self.emit_byte(10); // T_INT
         
         Ok(())
@@ -690,16 +948,16 @@ impl MethodWriter {
             if case.labels.is_empty() { continue; }
             for label_expr in &case.labels {
                 // duplicate switch value
-                self.emit_instruction(opcodes::DUP);
+                self.emit_opcode(self.opcode_generator.dup());
                 self.generate_expression(label_expr)?;
-                self.emit_instruction(opcodes::IF_ICMPEQ);
+                self.emit_opcode(self.opcode_generator.if_icmpeq(0));
                 let target = self.create_label();
                 self.emit_label_reference(target);
                 case_labels.push((target, idx));
             }
         }
         // No match: drop value and jump to default (if any) else end
-        self.emit_instruction(opcodes::POP);
+        self.emit_opcode(self.opcode_generator.pop());
         let mut default_label = None;
         for (idx, case) in switch_stmt.cases.iter().enumerate() {
             if case.labels.is_empty() {
@@ -718,7 +976,7 @@ impl MethodWriter {
         let mut case_end_labels: Vec<u16> = Vec::new();
         for (idx, case) in switch_stmt.cases.iter().enumerate() {
             // mark labels that jump here
-            for (lbl, i) in case_labels.iter().filter(|(_, i)| *i == idx) { self.mark_label(*lbl); }
+            for (lbl, _i) in case_labels.iter().filter(|(_, i)| *i == idx) { self.mark_label(*lbl); }
             if let Some((dl, i)) = default_label { if i == idx { self.mark_label(dl); } }
             // emit statements
             for stmt in &case.statements {
@@ -742,8 +1000,30 @@ impl MethodWriter {
         // Generate expression to cast
         self.generate_expression(&cast.expr)?;
         
-        // TODO: Generate actual cast bytecode based on target type
-        // For now, just leave the value on the stack
+        // Generate cast bytecode based on target type
+        match cast.target_type.name.as_str() {
+            "int" | "boolean" | "byte" | "short" | "char" => {
+                // No cast needed for int types, they're all compatible
+            }
+            "long" => {
+                // Convert int to long
+                self.emit_opcode(self.opcode_generator.i2l());
+            }
+            "float" => {
+                // Convert int to float
+                self.emit_opcode(self.opcode_generator.i2f());
+            }
+            "double" => {
+                // Convert int to double
+                self.emit_opcode(self.opcode_generator.i2d());
+            }
+            _ => {
+                // Reference type cast - checkcast instruction
+                let class_ref_index = self.add_class_constant(&cast.target_type.name);
+                self.emit_opcode(self.opcode_generator.checkcast(0));
+                self.emit_short(class_ref_index as i16);
+            }
+        }
         
         Ok(())
     }
@@ -758,7 +1038,7 @@ impl MethodWriter {
         let end_label = self.create_label();
         
         // Jump to else if condition is false
-        self.emit_instruction(opcodes::IFEQ);
+        self.emit_opcode(self.opcode_generator.ifeq(0));
         self.emit_label_reference(else_label);
         
         // Generate then expression
@@ -790,7 +1070,7 @@ impl MethodWriter {
         let end_label = self.create_label();
         
         // Jump to else if condition is false
-        self.emit_instruction(opcodes::IFEQ);
+        self.emit_opcode(self.opcode_generator.ifeq(0));
         self.emit_label_reference(else_label);
         
         // Generate then branch
@@ -815,10 +1095,6 @@ impl MethodWriter {
     }
     
     /// Generate bytecode for a while statement
-    fn generate_while_statement(&mut self, while_stmt: &WhileStmt) -> Result<()> {
-        self.generate_while_statement_labeled(None, while_stmt)
-    }
-
     fn generate_while_statement_labeled(&mut self, label: Option<&str>, while_stmt: &WhileStmt) -> Result<()> {
         // Create labels
         let start_label = self.create_label();
@@ -833,7 +1109,7 @@ impl MethodWriter {
         self.generate_expression(&while_stmt.condition)?;
         
         // Jump to end if condition is false
-        self.emit_instruction(opcodes::IFEQ);
+        self.emit_opcode(self.opcode_generator.ifeq(0));
         self.emit_label_reference(end_label);
         
         // Generate body
@@ -866,7 +1142,7 @@ impl MethodWriter {
         self.mark_label(start_label);
         if let Some(cond) = &for_stmt.condition {
             self.generate_expression(cond)?;
-            self.emit_instruction(opcodes::IFEQ);
+            self.emit_opcode(self.opcode_generator.ifeq(0));
             self.emit_label_reference(end_label);
         }
         // Body
@@ -875,7 +1151,7 @@ impl MethodWriter {
         self.mark_label(continue_label);
         for upd in &for_stmt.update {
             self.generate_expression(&upd.expr)?;
-            self.emit_instruction(opcodes::POP);
+            self.emit_opcode(self.opcode_generator.pop());
         }
         // Loop back
         self.emit_instruction(opcodes::GOTO);
@@ -901,47 +1177,29 @@ impl MethodWriter {
         Ok(())
     }
     
-    /// Generate bytecode for a break statement
-    fn generate_break_statement(&mut self) -> Result<()> {
-        // TODO: Implement break statement with proper label handling
-        self.emit_instruction(opcodes::GOTO);
-        self.emit_short(0); // Placeholder
-        
-        Ok(())
-    }
-    
-    /// Generate bytecode for a continue statement
-    fn generate_continue_statement(&mut self) -> Result<()> {
-        // TODO: Implement continue statement with proper label handling
-        self.emit_instruction(opcodes::GOTO);
-        self.emit_short(0); // Placeholder
-        
-        Ok(())
-    }
-    
     /// Generate bytecode for a return statement
     fn generate_return(&mut self, return_type: &TypeRef) -> Result<()> {
         // Check if it's a void return type
         if return_type.name == "void" {
-            self.emit_instruction(opcodes::RETURN);
+            self.emit_opcode(self.opcode_generator.return_void());
         } else {
             // For primitive types, use appropriate return instruction
             match return_type.name.as_str() {
                 "int" | "boolean" | "byte" | "short" | "char" => {
-                    self.emit_instruction(opcodes::IRETURN);
+                    self.emit_opcode(self.opcode_generator.ireturn());
                 }
                 "long" => {
-                    self.emit_instruction(opcodes::LRETURN);
+                    self.emit_opcode(self.opcode_generator.lreturn());
                 }
                 "float" => {
-                    self.emit_instruction(opcodes::FRETURN);
+                    self.emit_opcode(self.opcode_generator.freturn());
                 }
                 "double" => {
-                    self.emit_instruction(opcodes::DRETURN);
+                    self.emit_opcode(self.opcode_generator.dreturn());
                 }
                 _ => {
                     // Reference type
-                    self.emit_instruction(opcodes::ARETURN);
+                    self.emit_opcode(self.opcode_generator.areturn());
                 }
             }
         }
@@ -953,65 +1211,20 @@ impl MethodWriter {
     fn load_local_variable(&mut self, index: u16, var_type: &TypeRef) -> Result<()> {
         match var_type.name.as_str() {
             "int" | "boolean" | "byte" | "short" | "char" => {
-                match index {
-                    0 => self.emit_instruction(opcodes::ILOAD_0),
-                    1 => self.emit_instruction(opcodes::ILOAD_1),
-                    2 => self.emit_instruction(opcodes::ILOAD_2),
-                    3 => self.emit_instruction(opcodes::ILOAD_3),
-                    _ => {
-                        self.emit_instruction(opcodes::ILOAD);
-                        self.emit_byte(index as u8);
-                    }
-                }
+                self.emit_opcode(self.opcode_generator.iload(index));
             }
             "long" => {
-                match index {
-                    0 => self.emit_instruction(opcodes::LLOAD_0),
-                    1 => self.emit_instruction(opcodes::LLOAD_1),
-                    2 => self.emit_instruction(opcodes::LLOAD_2),
-                    3 => self.emit_instruction(opcodes::LLOAD_3),
-                    _ => {
-                        self.emit_instruction(opcodes::LLOAD);
-                        self.emit_byte(index as u8);
-                    }
-                }
+                self.emit_opcode(self.opcode_generator.lload(index));
             }
             "float" => {
-                match index {
-                    0 => self.emit_instruction(opcodes::FLOAD_0),
-                    1 => self.emit_instruction(opcodes::FLOAD_1),
-                    2 => self.emit_instruction(opcodes::FLOAD_2),
-                    3 => self.emit_instruction(opcodes::FLOAD_3),
-                    _ => {
-                        self.emit_instruction(opcodes::FLOAD);
-                        self.emit_byte(index as u8);
-                    }
-                }
+                self.emit_opcode(self.opcode_generator.fload(index));
             }
             "double" => {
-                match index {
-                    0 => self.emit_instruction(opcodes::DLOAD_0),
-                    1 => self.emit_instruction(opcodes::DLOAD_1),
-                    2 => self.emit_instruction(opcodes::DLOAD_2),
-                    3 => self.emit_instruction(opcodes::DLOAD_3),
-                    _ => {
-                        self.emit_instruction(opcodes::DLOAD);
-                        self.emit_byte(index as u8);
-                    }
-                }
+                self.emit_opcode(self.opcode_generator.dload(index));
             }
             _ => {
                 // Reference type
-                match index {
-                    0 => self.emit_instruction(opcodes::ALOAD_0),
-                    1 => self.emit_instruction(opcodes::ALOAD_1),
-                    2 => self.emit_instruction(opcodes::ALOAD_2),
-                    3 => self.emit_instruction(opcodes::ALOAD_3),
-                    _ => {
-                        self.emit_instruction(opcodes::ALOAD);
-                        self.emit_byte(index as u8);
-                    }
-                }
+                self.emit_opcode(self.opcode_generator.aload(index));
             }
         }
         
@@ -1023,7 +1236,7 @@ impl MethodWriter {
         match var_type.name.as_str() {
             "int" | "boolean" | "byte" | "short" | "char" => {
                 match index {
-                    0 => self.emit_instruction(opcodes::ISTORE_0),
+                    0 => self.emit_opcode(self.opcode_generator.istore(0)),
                     1 => self.emit_instruction(opcodes::ISTORE_1),
                     2 => self.emit_instruction(opcodes::ISTORE_2),
                     3 => self.emit_instruction(opcodes::ISTORE_3),
@@ -1153,6 +1366,12 @@ impl MethodWriter {
         self.update_stack_and_locals();
     }
     
+    /// Emit opcode using the opcode generator
+    fn emit_opcode(&mut self, opcode_bytes: Vec<u8>) {
+        self.bytecode.extend(opcode_bytes);
+        self.update_stack_and_locals();
+    }
+    
     /// Emit a byte value
     fn emit_byte(&mut self, value: u8) {
         self.bytecode.push(value);
@@ -1168,41 +1387,6 @@ impl MethodWriter {
         // TODO: Implement proper stack and locals tracking
         // For now, just increment max_stack
         self.max_stack = self.max_stack.saturating_add(1);
-    }
-    
-    /// Add an integer constant to the constant pool
-    fn add_integer_constant(&mut self, _value: i32) -> u16 {
-        // TODO: Implement constant pool management
-        1
-    }
-    
-    /// Add a long constant to the constant pool
-    fn add_long_constant(&mut self, _value: i64) -> u16 {
-        // TODO: Implement constant pool management
-        1
-    }
-    
-    /// Add a float constant to the constant pool
-    fn add_float_constant(&mut self, _value: f32) -> u16 {
-        // TODO: Implement constant pool management
-        1
-    }
-    
-    /// Add a double constant to the constant pool
-    fn add_double_constant(&mut self, _value: f64) -> u16 {
-        // TODO: Implement constant pool management
-        1
-    }
-    
-    /// Add a string constant to the constant pool
-    fn add_string_constant(&mut self, value: &str) -> u16 {
-        if let Some(cp) = &self.constant_pool {
-            let mut cp_ref = cp.borrow_mut();
-            cp_ref.add_string(value)
-        } else {
-            // Fallback for backward compatibility
-            1
-        }
     }
     
     /// Add a class constant to the constant pool
@@ -1260,7 +1444,7 @@ impl MethodWriter {
 }
 
 /// Local variable information
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LocalVariable {
     pub(crate) name: String,
     pub(crate) var_type: TypeRef,
@@ -1280,6 +1464,7 @@ struct Label {
 /// Label reference information
 #[derive(Debug)]
 struct LabelReference {
+    #[allow(dead_code)]
     position: u16,
 }
 

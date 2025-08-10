@@ -40,7 +40,7 @@ pub fn compile_tol_files(input_paths: &[String], output_dir: &str, config: &Conf
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
 
     #[test]
     fn test_basic_compilation() {

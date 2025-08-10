@@ -1,4 +1,4 @@
-use super::{AstNode, AstVisitor, Location, Span};
+use super::{AstNode, AstVisitor, Span};
 use std::fmt;
 
 // Package and Import Declarations
@@ -567,18 +567,18 @@ pub enum UnaryOp {
     Plus, Minus, Not, BitNot, PreInc, PreDec, PostInc, PostDec,
 }
 
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum AssignmentOp {
+    Assign, AddAssign, SubAssign, MulAssign, DivAssign, ModAssign,
+    AndAssign, OrAssign, XorAssign, LShiftAssign, RShiftAssign, URShiftAssign,
+}
+
 #[derive(Debug, Clone)]
 pub struct AssignmentExpr {
     pub target: Box<Expr>,
     pub operator: AssignmentOp,
     pub value: Box<Expr>,
     pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub enum AssignmentOp {
-    Assign, AddAssign, SubAssign, MulAssign, DivAssign, ModAssign,
-    AndAssign, OrAssign, XorAssign, LShiftAssign, RShiftAssign, URShiftAssign,
 }
 
 #[derive(Debug, Clone)]

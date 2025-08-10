@@ -221,7 +221,7 @@ fn test_class_file_validation_comprehensive() {
     assert!(validate_class_file(&valid_class).is_ok());
     
     // Test various invalid versions
-    let mut invalid_version = ClassFile {
+    let invalid_version = ClassFile {
         magic: MAGIC,
         minor_version: 0,
         major_version: major_versions::JAVA_1_1 - 1,

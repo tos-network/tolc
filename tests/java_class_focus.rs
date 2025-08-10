@@ -24,14 +24,10 @@ fn debug_lex_and_parse_class_java() {
 
     // Try lexing step-by-step to find first error and print context
     let mut lexer = Lexer::new(&source);
-    let mut last_ok_line = 1usize;
-    let mut last_ok_col = 1usize;
     let mut count = 0usize;
     while let Some(res) = lexer.next_token() {
         match res {
             Ok(tok) => {
-                last_ok_line = tok.location().line;
-                last_ok_col = tok.location().column;
                 count += 1;
                 if count <= 10 {
                     let lex = tok.lexeme();

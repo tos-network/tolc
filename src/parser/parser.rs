@@ -694,14 +694,22 @@ impl Parser {
                     Some(Token::RShift) => {
                         *i += 1;
                         if depth == 0 { break; }
-                        if depth >= 2 { depth -= 2; } else { depth = 0; break; }
-                        if depth == 0 { break; }
+                        if depth >= 2 { 
+                            depth -= 2; 
+                            if depth == 0 { break; }
+                        } else { 
+                            break; 
+                        }
                     }
                     Some(Token::URShift) => {
                         *i += 1;
                         if depth == 0 { break; }
-                        if depth >= 3 { depth -= 3; } else { depth = 0; break; }
-                        if depth == 0 { break; }
+                        if depth >= 3 { 
+                            depth -= 3; 
+                            if depth == 0 { break; }
+                        } else { 
+                            break; 
+                        }
                     }
                     Some(_) => { *i += 1; }
                     None => return false,
@@ -1718,10 +1726,6 @@ impl Parser {
         self.advance();
                 let args = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
                 self.consume(&Token::RParen, "Expected ')' after arguments")?;
-                let name = match expr {
-                    Expr::Identifier(IdentifierExpr { ref name, .. }) => name.clone(),
-                    _ => String::from("")
-                };
                 if let Expr::Identifier(IdentifierExpr { name: id_name, span }) = expr {
                     let span_all = Span::new(span.start, self.previous_span().end);
                     expr = Expr::MethodCall(MethodCallExpr { target: None, name: id_name, arguments: args, span: span_all });

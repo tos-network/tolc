@@ -13,11 +13,6 @@ impl RawConstPoolIndex {
     pub fn as_u16(&self) -> u16 {
         self.0
     }
-    
-    /// Convert to a typed index
-    fn as_typed<T: ConstPoolEntryInfo>(&self) -> ConstPoolIndex<T> {
-        ConstPoolIndex(*self, PhantomData)
-    }
 }
 
 impl Deref for RawConstPoolIndex {

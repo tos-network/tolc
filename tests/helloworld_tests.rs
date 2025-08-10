@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use tolc::parser::parse_tol;
 use tolc::codegen::ClassWriter;
 use tolc::codegen::class_file_to_bytes;

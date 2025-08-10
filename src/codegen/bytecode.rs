@@ -3,8 +3,11 @@
 //! This module defines the basic structures needed for generating Java .class files.
 
 /// Java bytecode instruction opcodes
+/// 
+/// All opcodes are defined according to the Java Virtual Machine Specification.
+/// Values are in hexadecimal format and ordered by opcode value.
 pub mod opcodes {
-    // Constants
+    // 0x00 - 0x0F: Constants and basic operations
     pub const NOP: u8 = 0x00;
     pub const ACONST_NULL: u8 = 0x01;
     pub const ICONST_M1: u8 = 0x02;
@@ -22,7 +25,14 @@ pub mod opcodes {
     pub const DCONST_0: u8 = 0x0e;
     pub const DCONST_1: u8 = 0x0f;
     
-    // Loads
+    // 0x10 - 0x14: Extended constants and loads
+    pub const BIPUSH: u8 = 0x10;
+    pub const SIPUSH: u8 = 0x11;
+    pub const LDC: u8 = 0x12;
+    pub const LDC_W: u8 = 0x13;
+    pub const LDC2_W: u8 = 0x14;
+    
+    // 0x15 - 0x35: Loads
     pub const ILOAD: u8 = 0x15;
     pub const LLOAD: u8 = 0x16;
     pub const FLOAD: u8 = 0x17;
@@ -49,7 +59,17 @@ pub mod opcodes {
     pub const ALOAD_2: u8 = 0x2c;
     pub const ALOAD_3: u8 = 0x2d;
     
-    // Stores
+    // 0x2E - 0x35: Array loads
+    pub const IALOAD: u8 = 0x2e;
+    pub const LALOAD: u8 = 0x2f;
+    pub const FALOAD: u8 = 0x30;
+    pub const DALOAD: u8 = 0x31;
+    pub const AALOAD: u8 = 0x32;
+    pub const BALOAD: u8 = 0x33;
+    pub const CALOAD: u8 = 0x34;
+    pub const SALOAD: u8 = 0x35;
+    
+    // 0x36 - 0x4E: Stores
     pub const ISTORE: u8 = 0x36;
     pub const LSTORE: u8 = 0x37;
     pub const FSTORE: u8 = 0x38;
@@ -76,7 +96,17 @@ pub mod opcodes {
     pub const ASTORE_2: u8 = 0x4d;
     pub const ASTORE_3: u8 = 0x4e;
     
-    // Stack operations
+    // 0x4F - 0x56: Array stores
+    pub const IASTORE: u8 = 0x4f;
+    pub const LASTORE: u8 = 0x50;
+    pub const FASTORE: u8 = 0x51;
+    pub const DASTORE: u8 = 0x52;
+    pub const AASTORE: u8 = 0x53;
+    pub const BASTORE: u8 = 0x54;
+    pub const CASTORE: u8 = 0x55;
+    pub const SASTORE: u8 = 0x56;
+    
+    // 0x57 - 0x5F: Stack operations
     pub const POP: u8 = 0x57;
     pub const POP2: u8 = 0x58;
     pub const DUP: u8 = 0x59;
@@ -87,7 +117,7 @@ pub mod opcodes {
     pub const DUP2_X2: u8 = 0x5e;
     pub const SWAP: u8 = 0x5f;
     
-    // Arithmetic
+    // 0x60 - 0x77: Arithmetic operations
     pub const IADD: u8 = 0x60;
     pub const LADD: u8 = 0x61;
     pub const FADD: u8 = 0x62;
@@ -113,15 +143,13 @@ pub mod opcodes {
     pub const FNEG: u8 = 0x76;
     pub const DNEG: u8 = 0x77;
     
-    // Shifts
+    // 0x78 - 0x83: Shifts and logical operations
     pub const ISHL: u8 = 0x78;
     pub const LSHL: u8 = 0x79;
     pub const ISHR: u8 = 0x7a;
     pub const LSHR: u8 = 0x7b;
     pub const IUSHR: u8 = 0x7c;
     pub const LUSHR: u8 = 0x7d;
-    
-    // Logical
     pub const IAND: u8 = 0x7e;
     pub const LAND: u8 = 0x7f;
     pub const IOR: u8 = 0x80;
@@ -129,7 +157,10 @@ pub mod opcodes {
     pub const IXOR: u8 = 0x82;
     pub const LXOR: u8 = 0x83;
     
-    // Conversions
+    // 0x84: Increment
+    pub const IINC: u8 = 0x84;
+    
+    // 0x85 - 0x93: Type conversions
     pub const I2L: u8 = 0x85;
     pub const I2F: u8 = 0x86;
     pub const I2D: u8 = 0x87;
@@ -146,14 +177,14 @@ pub mod opcodes {
     pub const I2C: u8 = 0x92;
     pub const I2S: u8 = 0x93;
     
-    // Comparisons
+    // 0x94 - 0x98: Comparisons
     pub const LCMP: u8 = 0x94;
     pub const FCMPL: u8 = 0x95;
     pub const FCMPG: u8 = 0x96;
     pub const DCMPL: u8 = 0x97;
     pub const DCMPG: u8 = 0x98;
     
-    // Control flow
+    // 0x99 - 0xB1: Control flow
     pub const IFEQ: u8 = 0x99;
     pub const IFNE: u8 = 0x9a;
     pub const IFLT: u8 = 0x9b;
@@ -180,7 +211,7 @@ pub mod opcodes {
     pub const ARETURN: u8 = 0xb0;
     pub const RETURN: u8 = 0xb1;
     
-    // References
+    // 0xB2 - 0xC3: References and object operations
     pub const GETSTATIC: u8 = 0xb2;
     pub const PUTSTATIC: u8 = 0xb3;
     pub const GETFIELD: u8 = 0xb4;
@@ -200,7 +231,7 @@ pub mod opcodes {
     pub const MONITORENTER: u8 = 0xc2;
     pub const MONITOREXIT: u8 = 0xc3;
     
-    // Extended
+    // 0xC4 - 0xC9: Extended instructions
     pub const WIDE: u8 = 0xc4;
     pub const MULTIANEWARRAY: u8 = 0xc5;
     pub const IFNULL: u8 = 0xc6;
@@ -208,46 +239,7 @@ pub mod opcodes {
     pub const GOTO_W: u8 = 0xc8;
     pub const JSR_W: u8 = 0xc9;
     
-    // Wide instructions
-    pub const WIDE_ILOAD: u8 = 0x15;
-    pub const WIDE_LLOAD: u8 = 0x16;
-    pub const WIDE_FLOAD: u8 = 0x17;
-    pub const WIDE_DLOAD: u8 = 0x18;
-    pub const WIDE_ALOAD: u8 = 0x19;
-    pub const WIDE_ISTORE: u8 = 0x36;
-    pub const WIDE_LSTORE: u8 = 0x37;
-    pub const WIDE_FSTORE: u8 = 0x38;
-    pub const WIDE_DSTORE: u8 = 0x39;
-    pub const WIDE_ASTORE: u8 = 0x3a;
-    pub const WIDE_RET: u8 = 0xa9;
-    pub const WIDE_IINC: u8 = 0x84;
-    
-    // Missing opcodes
-    pub const BIPUSH: u8 = 0x10;
-    pub const SIPUSH: u8 = 0x11;
-    pub const LDC: u8 = 0x12;
-    pub const LDC_W: u8 = 0x13;
-    pub const LDC2_W: u8 = 0x14;
-    
-    // Increment
-    pub const IINC: u8 = 0x84;
-    
-    // Array operations
-    pub const IALOAD: u8 = 0x2e;
-    pub const LALOAD: u8 = 0x2f;
-    pub const FALOAD: u8 = 0x30;
-    pub const DALOAD: u8 = 0x31;
-    pub const AALOAD: u8 = 0x32;
-    pub const BALOAD: u8 = 0x33;
-    pub const CALOAD: u8 = 0x34;
-    pub const SALOAD: u8 = 0x35;
-    
-    pub const IASTORE: u8 = 0x4f;
-    pub const LASTORE: u8 = 0x50;
-    pub const FASTORE: u8 = 0x51;
-    pub const DASTORE: u8 = 0x52;
-    pub const AASTORE: u8 = 0x53;
-    pub const BASTORE: u8 = 0x54;
-    pub const CASTORE: u8 = 0x55;
-    pub const SASTORE: u8 = 0x56;
+    // Note: WIDE instruction (0xC4) modifies the behavior of other instructions
+    // when used as a prefix. The actual instruction codes remain the same,
+    // but the WIDE prefix changes how operands are interpreted.
 }

@@ -32,7 +32,6 @@ pub fn parse_tol_files(sources: &[&str]) -> Result<Vec<Ast>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::AstPrinter;
 
     #[test]
     fn test_parse_simple_class() {
