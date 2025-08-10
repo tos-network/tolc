@@ -1,0 +1,21 @@
+## Rust build artifacts
+target/
+**/target/
+debug/
+**/debug/
+release/
+**/release/
+**/*.rs.bk
+
+## Test/bench artifacts
+**/*.profraw
+coverage/
+criterion/
+
+## Editor/OS files
+.DS_Store
+.idea/
+.vscode/
+
+
+
