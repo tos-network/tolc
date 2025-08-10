@@ -29,6 +29,17 @@ enum Commands {
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
+        /// Target Java classfile version (6..17)
+        #[arg(long, value_name = "N", default_value_t = 8)]
+        target_version: u8,
+
+        /// Emit StackMapTable frames with extra diagnostics
+        #[arg(long, default_value_t = false)]
+        debug_frames: bool,
+
+        /// Do not emit StackMapTable frames
+        #[arg(long, default_value_t = false)]
+        no_frames: bool,
     },
     
     /// Parse a .tol file and show the AST
@@ -58,8 +69,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match &cli.command {
-        Commands::Compile { input, output, verbose } => {
-            compile_file(input, output.as_ref(), *verbose)?;
+        Commands::Compile { input, output, verbose, target_version, debug_frames, no_frames } => {
+            compile_file(input, output.as_ref(), *verbose, *target_version, *debug_frames, *no_frames)?;
         }
         Commands::Parse { input, detailed } => {
             parse_file(input, *detailed)?;
@@ -72,7 +83,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool) -> Result<()> {
+fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target_version: u8, debug_frames: bool, no_frames: bool) -> Result<()> {
     if verbose {
         println!("Compiling {}...", input.display());
     }
@@ -87,7 +98,18 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool) -> Res
     }
     
     let output_str = output_dir.to_string_lossy();
-    generate_bytecode(&ast, &output_str, &tolc::config::Config::default())?;
+
+    let mut config = tolc::config::Config::default()
+        .with_target_java_version(target_version)
+        .with_verbose(verbose)
+        .with_output_dir(output_dir.clone());
+
+    if debug_frames { config = config.with_debug(true); }
+    if no_frames { config = config.with_emit_frames(false); }
+
+    config.validate()?;
+
+    generate_bytecode(&ast, &output_str, &config)?;
     
     if verbose {
         println!("Compilation successful! Output directory: {}", output_dir.display());

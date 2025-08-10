@@ -3,6 +3,19 @@
 //! This module handles the conversion of AST class declarations into Java bytecode.
 
 use super::bytecode::*;
+use crate::codegen::{
+    access_flags,
+    AttributeInfo,
+    ClassFile,
+    FieldInfo,
+    MethodInfo,
+    FrameBuilder,
+    make_stack_map_attribute,
+    LineNumberTableAttribute,
+    make_line_number_table_attribute,
+};
+use super::descriptor::type_to_descriptor;
+use crate::config::Config;
 use crate::ast::*;
 use crate::error::Result;
 use super::method_writer::MethodWriter as BodyWriter;
@@ -10,6 +23,7 @@ use super::method_writer::MethodWriter as BodyWriter;
 /// Class writer for generating Java bytecode
 pub struct ClassWriter {
     class_file: ClassFile,
+    config: Config,
 }
 
 impl ClassWriter {
@@ -17,6 +31,14 @@ impl ClassWriter {
     pub fn new() -> Self {
         Self {
             class_file: ClassFile::new(),
+            config: Config::default(),
+        }
+    }
+
+    pub fn new_with_config(config: Config) -> Self {
+        Self {
+            class_file: ClassFile::new(),
+            config,
         }
     }
     
@@ -193,7 +215,7 @@ impl ClassWriter {
     /// Generate bytecode for an interface field (implicitly public, static, final)
     fn generate_interface_field(&mut self, field: &FieldDecl) -> Result<()> {
         let name_index = self.class_file.constant_pool.add_utf8(&field.name);
-        let descriptor_index = self.class_file.constant_pool.add_utf8(&self.type_to_descriptor(&field.type_ref));
+        let descriptor_index = self.class_file.constant_pool.add_utf8(&type_to_descriptor(&field.type_ref));
         
         // Interface fields are implicitly public, static, and final
         let access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_STATIC | access_flags::ACC_FINAL;
@@ -295,7 +317,7 @@ impl ClassWriter {
     /// Generate bytecode for an annotation member
     fn generate_annotation_member(&mut self, member: &AnnotationMember) -> Result<()> {
         let name_index = self.class_file.constant_pool.add_utf8(&member.name);
-        let descriptor_index = self.class_file.constant_pool.add_utf8(&self.type_to_descriptor(&member.type_ref));
+        let descriptor_index = self.class_file.constant_pool.add_utf8(&type_to_descriptor(&member.type_ref));
         
         // Annotation methods are implicitly public and abstract
         let access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_ABSTRACT;
@@ -314,7 +336,7 @@ impl ClassWriter {
     /// Generate bytecode for a field
     fn generate_field(&mut self, field: &FieldDecl) -> Result<()> {
         let name_index = self.class_file.constant_pool.add_utf8(&field.name);
-        let descriptor_index = self.class_file.constant_pool.add_utf8(&self.type_to_descriptor(&field.type_ref));
+        let descriptor_index = self.class_file.constant_pool.add_utf8(&type_to_descriptor(&field.type_ref));
         
         let mut access_flags = 0;
         if field.modifiers.contains(&Modifier::Public) {
@@ -434,14 +456,14 @@ impl ClassWriter {
         
         // Parameter types
         for param in &method.parameters {
-            descriptor.push_str(&self.type_to_descriptor(&param.type_ref));
+            descriptor.push_str(&type_to_descriptor(&param.type_ref));
         }
         
         descriptor.push(')');
         
         // Return type
         if let Some(return_type) = &method.return_type {
-            descriptor.push_str(&self.type_to_descriptor(return_type));
+            descriptor.push_str(&type_to_descriptor(return_type));
         } else {
             descriptor.push('V'); // void
         }
@@ -456,7 +478,7 @@ impl ClassWriter {
         
         // Parameter types
         for param in &constructor.parameters {
-            descriptor.push_str(&self.type_to_descriptor(&param.type_ref));
+            descriptor.push_str(&type_to_descriptor(&param.type_ref));
         }
         
         descriptor.push(')');
@@ -468,33 +490,7 @@ impl ClassWriter {
     }
     
     /// Convert Terminos type to Java descriptor
-    fn type_to_descriptor(&self, ty: &TypeRef) -> String {
-        // Handle array dimensions first
-        let mut descriptor = String::new();
-        for _ in 0..ty.array_dims {
-            descriptor.push('[');
-        }
-        
-        // Handle the base type
-        let base_descriptor = match ty.name.as_str() {
-            "int" => "I".to_string(),
-            "long" => "J".to_string(), 
-            "float" => "F".to_string(),
-            "double" => "D".to_string(),
-            "boolean" => "Z".to_string(),
-            "char" => "C".to_string(),
-            "byte" => "B".to_string(),
-            "short" => "S".to_string(),
-            "void" => "V".to_string(),
-            _ => {
-                // Reference type - convert package separators to path separators
-                format!("L{};", ty.name.replace('.', "/"))
-            }
-        };
-        
-        descriptor.push_str(&base_descriptor);
-        descriptor
-    }
+    // moved to descriptor.rs
     
     /// Generate code attribute for a method
     fn generate_code_attribute(&mut self, method: &MethodDecl) -> Result<AttributeInfo> {
@@ -503,7 +499,7 @@ impl ClassWriter {
         // Generate bytecode for method body
         let mut code_writer = BodyWriter::new();
         code_writer.generate_method_body(method)?;
-        let (code_bytes, max_stack, max_locals, exceptions) = code_writer.finalize();
+        let (code_bytes, max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
         
         // Create code attribute
         let mut attribute_bytes = Vec::new();
@@ -518,12 +514,56 @@ impl ClassWriter {
         
         // Exception table
         attribute_bytes.extend_from_slice(&(exceptions.len() as u16).to_be_bytes());
-        for e in exceptions {
+        for e in &exceptions {
             attribute_bytes.extend_from_slice(&e.to_bytes());
         }
         
-        // Attributes (empty for now)
-        attribute_bytes.extend_from_slice(&0u16.to_be_bytes());
+        // Sub-attributes of Code
+        let mut sub_attrs: Vec<AttributeInfo> = Vec::new();
+        if self.config.emit_frames {
+            let handler_pcs: Vec<u16> = exceptions.iter().map(|e| e.handler_pc).collect();
+            let throwable_cp = self.class_file.constant_pool.add_class("java/lang/Throwable");
+            let smt = FrameBuilder::new().compute_from_with_handler_stack(
+                &code_bytes,
+                &handler_pcs,
+                crate::codegen::VerificationType::Object(throwable_cp),
+            );
+            if self.config.debug {
+                for line in crate::codegen::describe_stack_map_frames(&smt) { eprintln!("[frames] {}", line); }
+            }
+            sub_attrs.push(make_stack_map_attribute(&mut self.class_file.constant_pool, &smt));
+        }
+        if self.config.debug {
+            let mut lnt = LineNumberTableAttribute::new();
+            if line_numbers.is_empty() {
+                // Fallback: minimal entry
+                let line = method.span.start.line as u16;
+                lnt.add_line_number(0, line.max(1));
+            } else {
+                for (pc, line) in &line_numbers { lnt.add_line_number(*pc, *line); }
+            }
+            sub_attrs.push(make_line_number_table_attribute(&mut self.class_file.constant_pool, &lnt));
+            // LocalVariableTable from collected locals (filter out synthetic like "this" and "$*")
+            let mut lvt = crate::codegen::LocalVariableTableAttribute::new();
+            for lv in &locals {
+                if lv.name == "this" || lv.name.starts_with('$') { continue; }
+                let desc = type_to_descriptor(&lv.var_type);
+                if desc.is_empty() { continue; }
+                let name_index = self.class_file.constant_pool.add_utf8(&lv.name);
+                let desc_index = self.class_file.constant_pool.add_utf8(&desc);
+                let entry = crate::codegen::LocalVariableEntry {
+                    start_pc: lv.start_pc,
+                    length: if lv.length == 0 { code_bytes.len() as u16 - lv.start_pc } else { lv.length },
+                    name_index,
+                    descriptor_index: desc_index,
+                    index: lv.index,
+                };
+                lvt.entries.push(entry);
+            }
+            sub_attrs.push(crate::codegen::make_local_variable_table_attribute(&mut self.class_file.constant_pool, &lvt));
+        }
+        attribute_bytes.extend_from_slice(&(sub_attrs.len() as u16).to_be_bytes());
+        for a in sub_attrs { attribute_bytes.extend_from_slice(&a.to_bytes(&self.class_file.constant_pool)); }
         
         Ok(AttributeInfo::new(name_index, attribute_bytes))
     }
@@ -553,8 +593,23 @@ impl ClassWriter {
         // Exception table (empty for now)
         attribute_bytes.extend_from_slice(&0u16.to_be_bytes());
         
-        // Attributes (empty for now)
-        attribute_bytes.extend_from_slice(&0u16.to_be_bytes());
+        // Sub-attributes of Code
+        let mut sub_attrs: Vec<AttributeInfo> = Vec::new();
+        if self.config.emit_frames {
+            let smt = FrameBuilder::new().compute_from(&code_bytes, &[]);
+            if self.config.debug {
+                for line in crate::codegen::describe_stack_map_frames(&smt) { eprintln!("[frames] {}", line); }
+            }
+            sub_attrs.push(make_stack_map_attribute(&mut self.class_file.constant_pool, &smt));
+        }
+        if self.config.debug {
+            let mut lnt = LineNumberTableAttribute::new();
+            let line = class.span.start.line as u16;
+            lnt.add_line_number(0, line.max(1));
+            sub_attrs.push(make_line_number_table_attribute(&mut self.class_file.constant_pool, &lnt));
+        }
+        attribute_bytes.extend_from_slice(&(sub_attrs.len() as u16).to_be_bytes());
+        for a in sub_attrs { attribute_bytes.extend_from_slice(&a.to_bytes(&self.class_file.constant_pool)); }
         
         Ok(AttributeInfo::new(name_index, attribute_bytes))
     }
@@ -584,8 +639,23 @@ impl ClassWriter {
         // Exception table (empty for now)
         attribute_bytes.extend_from_slice(&0u16.to_be_bytes());
         
-        // Attributes (empty for now)
-        attribute_bytes.extend_from_slice(&0u16.to_be_bytes());
+        // Sub-attributes of Code
+        let mut sub_attrs: Vec<AttributeInfo> = Vec::new();
+        if self.config.emit_frames {
+            let smt = FrameBuilder::new().compute_from(&code_bytes, &[]);
+            if self.config.debug {
+                for line in crate::codegen::describe_stack_map_frames(&smt) { eprintln!("[frames] {}", line); }
+            }
+            sub_attrs.push(make_stack_map_attribute(&mut self.class_file.constant_pool, &smt));
+        }
+        if self.config.debug {
+            let mut lnt = LineNumberTableAttribute::new();
+            let line = constructor.span.start.line as u16;
+            lnt.add_line_number(0, line.max(1));
+            sub_attrs.push(make_line_number_table_attribute(&mut self.class_file.constant_pool, &lnt));
+        }
+        attribute_bytes.extend_from_slice(&(sub_attrs.len() as u16).to_be_bytes());
+        for a in sub_attrs { attribute_bytes.extend_from_slice(&a.to_bytes(&self.class_file.constant_pool)); }
         
         Ok(AttributeInfo::new(name_index, attribute_bytes))
     }

@@ -938,15 +938,15 @@ impl Parser {
         let mut first_decl: Option<FieldDecl> = None;
         let mut more_decls: Vec<ClassMember> = Vec::new();
         loop {
-            let name = self.parse_identifier()?;
-            let mut _array_dims = 0;
-            while self.check(&Token::LBracket) {
+        let name = self.parse_identifier()?;
+        let mut _array_dims = 0;
+        while self.check(&Token::LBracket) {
                 self.advance();
-                self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
-                _array_dims += 1;
-            }
-            let initializer = if self.match_token(&Token::Assign) {
-                Some(self.parse_expression()?)
+            self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
+            _array_dims += 1;
+        }
+        let initializer = if self.match_token(&Token::Assign) {
+            Some(self.parse_expression()?)
             } else { None };
             let span_decl = Span::new(self.current_span().start, self.previous_span().end);
 
@@ -1485,9 +1485,9 @@ impl Parser {
                 target: Box::new(left),
                 operator,
                 value: Box::new(value),
-                span,
-            }));
-        }
+                    span,
+                }));
+            }
         Ok(left)
     }
 
@@ -1715,7 +1715,7 @@ impl Parser {
         // Chained operations: calls, field access, array access, post-inc/dec
         loop {
             if self.check(&Token::LParen) {
-                self.advance();
+        self.advance();
                 let args = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
                 self.consume(&Token::RParen, "Expected ')' after arguments")?;
                 let name = match expr {

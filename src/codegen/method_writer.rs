@@ -4,6 +4,7 @@
 
 use super::bytecode::*;
 use crate::ast::*;
+use crate::codegen::ExceptionTableEntry;
 use crate::error::{Result, Error};
 
 /// Method writer for generating Java bytecode
@@ -15,7 +16,9 @@ pub struct MethodWriter {
     labels: Vec<Label>,
     next_label_id: u16,
     loop_stack: Vec<LoopContext>,
+    scope_stack: Vec<Scope>,
     pending_exception_entries: Vec<PendingExceptionEntry>,
+    line_numbers: Vec<(u16, u16)>,
 }
 
 impl MethodWriter {
@@ -29,7 +32,9 @@ impl MethodWriter {
             labels: Vec::new(),
             next_label_id: 0,
             loop_stack: Vec::new(),
+            scope_stack: Vec::new(),
             pending_exception_entries: Vec::new(),
+            line_numbers: Vec::new(),
         }
     }
     
@@ -107,8 +112,17 @@ impl MethodWriter {
     
     /// Generate bytecode for a block
     fn generate_block(&mut self, block: &Block) -> Result<()> {
+        // Enter new lexical scope
+        self.scope_stack.push(Scope::default());
         for stmt in &block.statements {
+            // record a line number entry at the start of each statement
+            self.record_stmt_line(stmt);
             self.generate_statement(stmt)?;
+        }
+        // Exit scope: close locals (length=end-start)
+        if let Some(scope) = self.scope_stack.pop() {
+            let end_pc = self.bytecode.len() as u16;
+            for idx in scope.locals { self.set_local_length(idx, end_pc); }
         }
         Ok(())
     }
@@ -190,6 +204,8 @@ impl MethodWriter {
                 }
             }
             Stmt::Try(try_stmt) => {
+                // mark source line for try
+                self.record_line_number(try_stmt.span.start.line as u16);
                 // try-with-resources with exceptional path auto close and addSuppressed
                 let mut res_locals: Vec<(u16, TypeRef)> = Vec::new();
                 for (idx, res) in try_stmt.resources.iter().enumerate() {
@@ -263,18 +279,26 @@ impl MethodWriter {
                 // after
                 self.mark_label(after);
                 if let Some(finally_block) = &try_stmt.finally_block { self.generate_block(finally_block)?; }
+                // close lifetimes of resource locals at end of try-with-resources
+                let end_pc = self.bytecode.len() as u16;
+                for (local_index, _) in &res_locals {
+                    self.set_local_length((*local_index) as usize, end_pc);
+                }
             }
             Stmt::Throw(throw_stmt) => {
+                self.record_line_number(throw_stmt.span.start.line as u16);
                 self.generate_expression(&throw_stmt.expr)?;
                 self.emit_instruction(opcodes::ATHROW);
             }
             Stmt::Block(block) => {
+                self.record_line_number(block.span.start.line as u16);
                 self.generate_block(block)?;
             }
             Stmt::Empty => {
                 // No-op
             }
             Stmt::Assert(assert_stmt) => {
+                self.record_line_number(assert_stmt.span.start.line as u16);
                 // if (!cond) throw new AssertionError(msg?)
                 let end_label = self.create_label();
                 // Evaluate condition
@@ -1043,13 +1067,19 @@ impl MethodWriter {
     /// Allocate a new local variable
     fn allocate_local_variable(&mut self, name: &str, var_type: &TypeRef) -> u16 {
         let index = self.max_locals;
-        self.local_vars.push(LocalVariable {
+        let lv = LocalVariable {
             name: name.to_string(),
             var_type: var_type.clone(),
             index,
             start_pc: self.bytecode.len() as u16,
             length: 0,
-        });
+        };
+        let idx_in_vec = self.local_vars.len();
+        self.local_vars.push(lv);
+        // Track in current scope if any
+        if let Some(scope) = self.scope_stack.last_mut() {
+            scope.locals.push(idx_in_vec);
+        }
         self.max_locals += 1;
         index
     }
@@ -1164,7 +1194,7 @@ impl MethodWriter {
     pub fn get_bytecode(self) -> Vec<u8> { self.bytecode }
 
     /// Finalize and return code, max stack, max locals, and resolved exception table
-    pub fn finalize(self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>) {
+    pub(crate) fn finalize(self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>, Vec<LocalVariable>, Vec<(u16,u16)>) {
         let mut exceptions: Vec<ExceptionTableEntry> = Vec::new();
         for pe in &self.pending_exception_entries {
             let start_pc = self.labels.iter().find(|l| l.id == pe.start_label).map(|l| l.position).unwrap_or(0);
@@ -1172,7 +1202,7 @@ impl MethodWriter {
             let handler_pc = self.labels.iter().find(|l| l.id == pe.handler_label).map(|l| l.position).unwrap_or(0);
             exceptions.push(ExceptionTableEntry::new(start_pc, end_pc, handler_pc, pe.catch_type));
         }
-        (self.bytecode, self.max_stack, self.max_locals, exceptions)
+        (self.bytecode, self.max_stack, self.max_locals, exceptions, self.local_vars, self.line_numbers)
     }
     
     /// Get the maximum stack size
@@ -1188,12 +1218,12 @@ impl MethodWriter {
 
 /// Local variable information
 #[derive(Debug)]
-struct LocalVariable {
-    name: String,
-    var_type: TypeRef,
-    index: u16,
-    start_pc: u16,
-    length: u16,
+pub(crate) struct LocalVariable {
+    pub(crate) name: String,
+    pub(crate) var_type: TypeRef,
+    pub(crate) index: u16,
+    pub(crate) start_pc: u16,
+    pub(crate) length: u16,
 }
 
 /// Label information
@@ -1225,6 +1255,11 @@ struct PendingExceptionEntry {
     catch_type: u16,
 }
 
+#[derive(Debug, Default)]
+struct Scope {
+    locals: Vec<usize>,
+}
+
 impl MethodWriter {
     fn find_loop_break_label(&self, label: Option<&String>) -> Option<u16> {
         match label {
@@ -1237,5 +1272,45 @@ impl MethodWriter {
             Some(name) => self.loop_stack.iter().rev().find(|c| c.label.as_ref().map(|s| s == name).unwrap_or(false)).map(|c| c.continue_label),
             None => self.loop_stack.last().map(|c| c.continue_label),
         }
+    }
+
+    fn set_local_length(&mut self, local_vec_index: usize, end_pc: u16) {
+        if let Some(lv) = self.local_vars.get_mut(local_vec_index) {
+            if lv.length == 0 {
+                // length is end - start
+                lv.length = end_pc.saturating_sub(lv.start_pc);
+            }
+        }
+    }
+
+    fn record_line_number(&mut self, line: u16) {
+        let pc = self.bytecode.len() as u16;
+        if let Some((last_pc, last_line)) = self.line_numbers.last() {
+            if *last_pc == pc && *last_line == line { return; }
+        }
+        self.line_numbers.push((pc, line.max(1)));
+    }
+
+    fn record_stmt_line(&mut self, stmt: &Stmt) {
+        let line = match stmt {
+            Stmt::Expression(s) => s.span.start.line,
+            Stmt::Declaration(s) => s.span.start.line,
+            Stmt::TypeDecl(td) => td.span().start.line,
+            Stmt::If(s) => s.span.start.line,
+            Stmt::While(s) => s.span.start.line,
+            Stmt::For(s) => s.span.start.line,
+            Stmt::Switch(s) => s.span.start.line,
+            Stmt::Return(s) => s.span.start.line,
+            Stmt::Break(s) => s.span.start.line,
+            Stmt::Continue(s) => s.span.start.line,
+            Stmt::Try(s) => s.span.start.line,
+            Stmt::Throw(s) => s.span.start.line,
+            Stmt::Assert(s) => s.span.start.line,
+            Stmt::Synchronized(s) => s.span.start.line,
+            Stmt::Labeled(s) => s.span.start.line,
+            Stmt::Block(s) => s.span.start.line,
+            Stmt::Empty => return,
+        } as u16;
+        self.record_line_number(line);
     }
 }
