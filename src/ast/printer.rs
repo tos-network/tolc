@@ -507,6 +507,9 @@ impl AstVisitor for AstPrinter {
                     self.visit_stmt(else_branch);
                 }
             }
+            Stmt::TypeDecl(type_decl) => {
+                self.visit_type_decl(type_decl);
+            }
             Stmt::While(while_stmt) => {
                 self.write_indent();
                 self.output.push_str("while (");
@@ -571,7 +574,27 @@ impl AstVisitor for AstPrinter {
             }
             Stmt::Try(try_stmt) => {
                 self.write_indent();
-                self.output.push_str("try ");
+                if !try_stmt.resources.is_empty() {
+                    self.output.push_str("try (");
+                    for (i, res) in try_stmt.resources.iter().enumerate() {
+                        if i > 0 { self.output.push_str("; "); }
+                        match res {
+                            TryResource::Var { type_ref, name, initializer, .. } => {
+                                self.visit_type_ref(type_ref);
+                                self.output.push(' ');
+                                self.output.push_str(name);
+                                self.output.push_str(" = ");
+                                self.visit_expr(initializer);
+                            }
+                            TryResource::Expr { expr, .. } => {
+                                self.visit_expr(expr);
+                            }
+                        }
+                    }
+                    self.output.push_str(") ");
+                } else {
+                    self.output.push_str("try ");
+                }
                 self.visit_block(&try_stmt.try_block);
                 
                 for catch in &try_stmt.catch_clauses {
@@ -593,6 +616,32 @@ impl AstVisitor for AstPrinter {
                 self.output.push_str("throw ");
                 self.visit_expr(&throw_stmt.expr);
                 self.output.push_str(";\n");
+            }
+            Stmt::Assert(a) => {
+                self.write_indent();
+                self.output.push_str("assert ");
+                self.visit_expr(&a.condition);
+                if let Some(m) = &a.message {
+                    self.output.push_str(" : ");
+                    self.visit_expr(m);
+                }
+                self.output.push_str(";\n");
+            }
+            Stmt::Synchronized(s) => {
+                self.write_indent();
+                self.output.push_str("synchronized (");
+                self.visit_expr(&s.lock);
+                self.output.push_str(") ");
+                self.output.push_str("{\n");
+                self.indent();
+                self.visit_block(&s.body);
+                self.dedent();
+                self.writeln("}");
+            }
+            Stmt::Labeled(l) => {
+                self.write_indent();
+                self.output.push_str(&format!("{}: ", l.label));
+                self.visit_stmt(&l.statement);
             }
             Stmt::Block(block) => {
                 self.output.push_str("{\n");

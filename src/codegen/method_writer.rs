@@ -14,6 +14,8 @@ pub struct MethodWriter {
     local_vars: Vec<LocalVariable>,
     labels: Vec<Label>,
     next_label_id: u16,
+    loop_stack: Vec<LoopContext>,
+    pending_exception_entries: Vec<PendingExceptionEntry>,
 }
 
 impl MethodWriter {
@@ -26,6 +28,8 @@ impl MethodWriter {
             local_vars: Vec::new(),
             labels: Vec::new(),
             next_label_id: 0,
+            loop_stack: Vec::new(),
+            pending_exception_entries: Vec::new(),
         }
     }
     
@@ -124,10 +128,21 @@ impl MethodWriter {
                 self.generate_if_statement(if_stmt)?;
             }
             Stmt::While(while_stmt) => {
-                self.generate_while_statement(while_stmt)?;
+                self.generate_while_statement_labeled(None, while_stmt)?;
             }
             Stmt::For(for_stmt) => {
                 self.generate_for_statement(for_stmt)?;
+            }
+            Stmt::Labeled(labeled) => {
+                // If the labeled statement is a loop, pass the label down, otherwise just generate inner
+                match &*labeled.statement {
+                    Stmt::While(ws) => self.generate_while_statement_labeled(Some(&labeled.label), ws)?,
+                    Stmt::For(fs) => {
+                        // TODO: implement for with labels; fallback to normal generation
+                        self.generate_for_statement(fs)?;
+                    }
+                    _ => self.generate_statement(&labeled.statement)?,
+                }
             }
             Stmt::Switch(_switch_stmt) => {
                 // Switch not yet codegen'ed; skip
@@ -144,19 +159,109 @@ impl MethodWriter {
                 })?;
             }
             Stmt::Break(break_stmt) => {
-                // TODO: Handle labeled breaks
-                self.emit_instruction(opcodes::GOTO);
-                // Placeholder for break target
-                self.emit_short(0);
+                let target = if let Some(ref name) = break_stmt.label {
+                    self.find_loop_break_label(Some(name))
+                } else {
+                    self.find_loop_break_label(None)
+                };
+                if let Some(label_id) = target {
+                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_label_reference(label_id);
+                } else {
+                    // Fallback: placeholder
+                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_short(0);
+                }
             }
             Stmt::Continue(continue_stmt) => {
-                // TODO: Handle labeled continues
-                self.emit_instruction(opcodes::GOTO);
-                // Placeholder for continue target
-                self.emit_short(0);
+                let target = if let Some(ref name) = continue_stmt.label {
+                    self.find_loop_continue_label(Some(name))
+                } else {
+                    self.find_loop_continue_label(None)
+                };
+                if let Some(label_id) = target {
+                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_label_reference(label_id);
+                } else {
+                    // Fallback: placeholder
+                    self.emit_instruction(opcodes::GOTO);
+                    self.emit_short(0);
+                }
             }
-            Stmt::Try(_try_stmt) => {
-                // TODO: Implement try statement
+            Stmt::Try(try_stmt) => {
+                // try-with-resources with exceptional path auto close and addSuppressed
+                let mut res_locals: Vec<(u16, TypeRef)> = Vec::new();
+                for (idx, res) in try_stmt.resources.iter().enumerate() {
+                    match res {
+                        TryResource::Var { type_ref, name, initializer, .. } => {
+                            self.generate_expression(initializer)?;
+                            let local_index = self.allocate_local_variable(name, type_ref);
+                            self.store_local_variable(local_index, type_ref)?;
+                            res_locals.push((local_index, type_ref.clone()));
+                        }
+                        TryResource::Expr { expr, .. } => {
+                            self.generate_expression(expr)?;
+                            let tref = TypeRef { name: "java/lang/AutoCloseable".to_string(), type_args: Vec::new(), array_dims: 0, span: try_stmt.span };
+                            let local_index = self.allocate_local_variable(&format!("$res{}", idx), &tref);
+                            self.store_local_variable(local_index, &tref)?;
+                            res_locals.push((local_index, tref));
+                        }
+                    }
+                }
+                // Outer try/catch-all
+                let try_start = self.create_label();
+                let try_end = self.create_label();
+                let handler = self.create_label();
+                let after = self.create_label();
+                self.mark_label(try_start);
+                self.generate_block(&try_stmt.try_block)?;
+                self.mark_label(try_end);
+                // Normal close
+                for (local_index, tref) in res_locals.iter().rev() {
+                    self.generate_close_for_local(*local_index, tref)?;
+                }
+                // jump over handler
+                self.emit_instruction(opcodes::GOTO);
+                self.emit_label_reference(after);
+                // Handler
+                self.mark_label(handler);
+                let thr_t = TypeRef { name: "java/lang/Throwable".to_string(), type_args: Vec::new(), array_dims: 0, span: try_stmt.span };
+                let primary_exc = self.allocate_local_variable("$primary_exc", &thr_t);
+                self.store_local_variable(primary_exc, &thr_t)?;
+                // Close with addSuppressed
+                for (local_index, tref) in res_locals.iter().rev() {
+                    let skip = self.create_label();
+                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(*local_index as u8);
+                    self.emit_instruction(opcodes::IFNULL); self.emit_label_reference(skip);
+                    let inner_start = self.create_label();
+                    let inner_end = self.create_label();
+                    let inner_handler = self.create_label();
+                    let inner_after = self.create_label();
+                    self.mark_label(inner_start);
+                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(*local_index as u8);
+                    self.emit_instruction(opcodes::INVOKEINTERFACE);
+                    self.emit_short(1); self.emit_byte(1); self.emit_byte(0);
+                    self.mark_label(inner_end);
+                    self.emit_instruction(opcodes::GOTO); self.emit_label_reference(inner_after);
+                    self.mark_label(inner_handler);
+                    let suppressed = self.allocate_local_variable("$suppressed", &thr_t);
+                    self.store_local_variable(suppressed, &thr_t)?;
+                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(primary_exc as u8);
+                    self.emit_instruction(opcodes::ALOAD); self.emit_byte(suppressed as u8);
+                    self.emit_instruction(opcodes::INVOKEVIRTUAL);
+                    self.emit_short(1);
+                    self.mark_label(inner_after);
+                    self.add_exception_handler_labels(inner_start, inner_end, inner_handler, 0);
+                    self.mark_label(skip);
+                }
+                // rethrow
+                self.emit_instruction(opcodes::ALOAD); self.emit_byte(primary_exc as u8);
+                self.emit_instruction(opcodes::ATHROW);
+                // add outer entry
+                self.add_exception_handler_labels(try_start, try_end, handler, 0);
+                // after
+                self.mark_label(after);
+                if let Some(finally_block) = &try_stmt.finally_block { self.generate_block(finally_block)?; }
             }
             Stmt::Throw(throw_stmt) => {
                 self.generate_expression(&throw_stmt.expr)?;
@@ -167,6 +272,11 @@ impl MethodWriter {
             }
             Stmt::Empty => {
                 // No-op
+            }
+            Stmt::Assert(_)
+            | Stmt::Synchronized(_)
+            | Stmt::TypeDecl(_) => {
+                // Not yet supported in codegen; skip
             }
         }
         Ok(())
@@ -405,6 +515,27 @@ impl MethodWriter {
         
         Ok(())
     }
+
+    fn generate_close_for_local(&mut self, index: u16, _tref: &TypeRef) -> Result<()> {
+        // Load local
+        self.emit_instruction(opcodes::ALOAD);
+        self.emit_byte(index as u8);
+        // ifnull skip
+        let end_label = self.create_label();
+        self.emit_instruction(opcodes::IFNULL);
+        self.emit_label_reference(end_label);
+        // invoke interface close()V (simplified; no constant pool wired)
+        self.emit_instruction(opcodes::ALOAD);
+        self.emit_byte(index as u8);
+        self.emit_instruction(opcodes::INVOKEINTERFACE);
+        // placeholder CP index and count-and-0
+        self.emit_short(1);
+        self.emit_byte(1);
+        self.emit_byte(0);
+        // end label
+        self.mark_label(end_label);
+        Ok(())
+    }
     
     /// Generate bytecode for an assignment expression
     fn generate_assignment(&mut self, assign: &AssignmentExpr) -> Result<()> {
@@ -542,9 +673,15 @@ impl MethodWriter {
     
     /// Generate bytecode for a while statement
     fn generate_while_statement(&mut self, while_stmt: &WhileStmt) -> Result<()> {
+        self.generate_while_statement_labeled(None, while_stmt)
+    }
+
+    fn generate_while_statement_labeled(&mut self, label: Option<&str>, while_stmt: &WhileStmt) -> Result<()> {
         // Create labels
         let start_label = self.create_label();
         let end_label = self.create_label();
+        // Push loop context
+        self.loop_stack.push(LoopContext { label: label.map(|s| s.to_string()), continue_label: start_label, break_label: end_label });
         
         // Mark start label
         self.mark_label(start_label);
@@ -565,14 +702,44 @@ impl MethodWriter {
         
         // Mark end label
         self.mark_label(end_label);
+        // Pop loop context
+        self.loop_stack.pop();
         
         Ok(())
     }
     
     /// Generate bytecode for a for statement
     fn generate_for_statement(&mut self, for_stmt: &ForStmt) -> Result<()> {
-        // TODO: Implement for statement
-        // This is complex and needs proper label handling
+        // Init
+        for init in &for_stmt.init {
+            self.generate_statement(init)?;
+        }
+        // Labels
+        let start_label = self.create_label();
+        let end_label = self.create_label();
+        let continue_label = self.create_label();
+        self.loop_stack.push(LoopContext { label: None, continue_label, break_label: end_label });
+        // Condition
+        self.mark_label(start_label);
+        if let Some(cond) = &for_stmt.condition {
+            self.generate_expression(cond)?;
+            self.emit_instruction(opcodes::IFEQ);
+            self.emit_label_reference(end_label);
+        }
+        // Body
+        self.generate_statement(&for_stmt.body)?;
+        // Continue label and updates
+        self.mark_label(continue_label);
+        for upd in &for_stmt.update {
+            self.generate_expression(&upd.expr)?;
+            self.emit_instruction(opcodes::POP);
+        }
+        // Loop back
+        self.emit_instruction(opcodes::GOTO);
+        self.emit_label_reference(start_label);
+        // End
+        self.mark_label(end_label);
+        self.loop_stack.pop();
         Ok(())
     }
     
@@ -825,6 +992,11 @@ impl MethodWriter {
         // Emit placeholder bytes for the branch offset
         self.emit_short(0);
     }
+
+    /// Record an exception handler table entry using labels
+    fn add_exception_handler_labels(&mut self, start: u16, end: u16, handler: u16, catch_type: u16) {
+        self.pending_exception_entries.push(PendingExceptionEntry { start_label: start, end_label: end, handler_label: handler, catch_type });
+    }
     
     /// Emit an instruction
     fn emit_instruction(&mut self, opcode: u8) {
@@ -898,8 +1070,18 @@ impl MethodWriter {
     }
     
     /// Get the generated bytecode
-    pub fn get_bytecode(self) -> Vec<u8> {
-        self.bytecode
+    pub fn get_bytecode(self) -> Vec<u8> { self.bytecode }
+
+    /// Finalize and return code, max stack, max locals, and resolved exception table
+    pub fn finalize(self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>) {
+        let mut exceptions: Vec<ExceptionTableEntry> = Vec::new();
+        for pe in &self.pending_exception_entries {
+            let start_pc = self.labels.iter().find(|l| l.id == pe.start_label).map(|l| l.position).unwrap_or(0);
+            let end_pc = self.labels.iter().find(|l| l.id == pe.end_label).map(|l| l.position).unwrap_or(0);
+            let handler_pc = self.labels.iter().find(|l| l.id == pe.handler_label).map(|l| l.position).unwrap_or(0);
+            exceptions.push(ExceptionTableEntry::new(start_pc, end_pc, handler_pc, pe.catch_type));
+        }
+        (self.bytecode, self.max_stack, self.max_locals, exceptions)
     }
     
     /// Get the maximum stack size
@@ -935,4 +1117,34 @@ struct Label {
 #[derive(Debug)]
 struct LabelReference {
     position: u16,
+}
+
+#[derive(Debug)]
+struct LoopContext {
+    label: Option<String>,
+    continue_label: u16,
+    break_label: u16,
+}
+
+#[derive(Debug)]
+struct PendingExceptionEntry {
+    start_label: u16,
+    end_label: u16,
+    handler_label: u16,
+    catch_type: u16,
+}
+
+impl MethodWriter {
+    fn find_loop_break_label(&self, label: Option<&String>) -> Option<u16> {
+        match label {
+            Some(name) => self.loop_stack.iter().rev().find(|c| c.label.as_ref().map(|s| s == name).unwrap_or(false)).map(|c| c.break_label),
+            None => self.loop_stack.last().map(|c| c.break_label),
+        }
+    }
+    fn find_loop_continue_label(&self, label: Option<&String>) -> Option<u16> {
+        match label {
+            Some(name) => self.loop_stack.iter().rev().find(|c| c.label.as_ref().map(|s| s == name).unwrap_or(false)).map(|c| c.continue_label),
+            None => self.loop_stack.last().map(|c| c.continue_label),
+        }
+    }
 }

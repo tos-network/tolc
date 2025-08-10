@@ -286,6 +286,9 @@ where
                 }
                 T::default()
             }
+            Stmt::TypeDecl(type_decl) => {
+                self.visit_type_decl(type_decl)
+            }
             Stmt::While(while_stmt) => {
                 self.visit_expr(&while_stmt.condition);
                 self.visit_stmt(&while_stmt.body);
@@ -324,6 +327,18 @@ where
             }
             Stmt::Break(_) | Stmt::Continue(_) => T::default(),
             Stmt::Try(try_stmt) => {
+                // Resources
+                for res in &try_stmt.resources {
+                    match res {
+                        TryResource::Var { type_ref, initializer, .. } => {
+                            self.visit_type_ref(type_ref);
+                            self.visit_expr(initializer);
+                        }
+                        TryResource::Expr { expr, .. } => {
+                            self.visit_expr(expr);
+                        }
+                    }
+                }
                 self.visit_block(&try_stmt.try_block);
                 for catch in &try_stmt.catch_clauses {
                     self.visit_parameter(&catch.parameter);
@@ -336,6 +351,20 @@ where
             }
             Stmt::Throw(throw_stmt) => {
                 self.visit_expr(&throw_stmt.expr);
+                T::default()
+            }
+            Stmt::Assert(assert_stmt) => {
+                self.visit_expr(&assert_stmt.condition);
+                if let Some(msg) = &assert_stmt.message { self.visit_expr(msg); }
+                T::default()
+            }
+            Stmt::Synchronized(sync_stmt) => {
+                self.visit_expr(&sync_stmt.lock);
+                self.visit_block(&sync_stmt.body);
+                T::default()
+            }
+            Stmt::Labeled(labeled_stmt) => {
+                self.visit_stmt(&labeled_stmt.statement);
                 T::default()
             }
             Stmt::Block(block) => self.visit_block(block),

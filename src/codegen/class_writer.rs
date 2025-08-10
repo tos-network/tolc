@@ -5,6 +5,7 @@
 use super::bytecode::*;
 use crate::ast::*;
 use crate::error::Result;
+use super::method_writer::MethodWriter as BodyWriter;
 
 /// Class writer for generating Java bytecode
 pub struct ClassWriter {
@@ -500,11 +501,9 @@ impl ClassWriter {
         let name_index = self.class_file.constant_pool.add_utf8("Code");
         
         // Generate bytecode for method body
-        let mut code_writer = MethodWriter::new();
+        let mut code_writer = BodyWriter::new();
         code_writer.generate_method_body(method)?;
-        let max_stack = code_writer.max_stack;
-        let max_locals = code_writer.max_locals;
-        let code_bytes = code_writer.get_bytecode();
+        let (code_bytes, max_stack, max_locals, exceptions) = code_writer.finalize();
         
         // Create code attribute
         let mut attribute_bytes = Vec::new();
@@ -517,8 +516,11 @@ impl ClassWriter {
         attribute_bytes.extend_from_slice(&(code_bytes.len() as u32).to_be_bytes());
         attribute_bytes.extend_from_slice(&code_bytes);
         
-        // Exception table (empty for now)
-        attribute_bytes.extend_from_slice(&0u16.to_be_bytes());
+        // Exception table
+        attribute_bytes.extend_from_slice(&(exceptions.len() as u16).to_be_bytes());
+        for e in exceptions {
+            attribute_bytes.extend_from_slice(&e.to_bytes());
+        }
         
         // Attributes (empty for now)
         attribute_bytes.extend_from_slice(&0u16.to_be_bytes());

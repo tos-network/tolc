@@ -348,6 +348,7 @@ impl AstNode for Block {
 pub enum Stmt {
     Expression(ExprStmt),
     Declaration(VarDeclStmt),
+    TypeDecl(TypeDecl),
     If(IfStmt),
     While(WhileStmt),
     For(ForStmt),
@@ -357,6 +358,9 @@ pub enum Stmt {
     Continue(ContinueStmt),
     Try(TryStmt),
     Throw(ThrowStmt),
+    Assert(AssertStmt),
+    Synchronized(SynchronizedStmt),
+    Labeled(LabeledStmt),
     Block(Block),
     Empty,
 }
@@ -440,6 +444,7 @@ pub struct ContinueStmt {
 
 #[derive(Debug, Clone)]
 pub struct TryStmt {
+    pub resources: Vec<TryResource>,
     pub try_block: Block,
     pub catch_clauses: Vec<CatchClause>,
     pub finally_block: Option<Block>,
@@ -456,6 +461,42 @@ pub struct CatchClause {
 #[derive(Debug, Clone)]
 pub struct ThrowStmt {
     pub expr: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum TryResource {
+    Var {
+        modifiers: Vec<Modifier>,
+        type_ref: TypeRef,
+        name: String,
+        initializer: Expr,
+        span: Span,
+    },
+    Expr {
+        expr: Expr,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AssertStmt {
+    pub condition: Expr,
+    pub message: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct SynchronizedStmt {
+    pub lock: Expr,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct LabeledStmt {
+    pub label: String,
+    pub statement: Box<Stmt>,
     pub span: Span,
 }
 

@@ -10,6 +10,8 @@ use crate::error::Result;
 pub struct Parser {
     tokens: Vec<LexicalToken>,
     current: usize,
+    label_stack: Vec<String>,
+    pending_members: Vec<ClassMember>,
 }
 
 impl Parser {
@@ -25,6 +27,8 @@ impl Parser {
         Ok(Self {
             tokens,
             current: 0,
+            label_stack: Vec::new(),
+            pending_members: Vec::new(),
         })
     }
     
@@ -408,9 +412,21 @@ impl Parser {
             }
         }
         
-        self.consume(&Token::Gt, "Expected '>' after type parameters")?;
+        self.consume_generic_gt()?;
         
         Ok(params)
+    }
+
+    // Helper: consume a '>' or combined >> / >>> as generic closers
+    fn consume_generic_gt(&mut self) -> Result<()> {
+        if self.match_token(&Token::Gt) { return Ok(()); }
+        if self.match_token(&Token::RShift) { return Ok(()); }
+        if self.match_token(&Token::URShift) { return Ok(()); }
+        Err(ParseError::UnexpectedToken {
+            expected: ">".to_string(),
+            found: format!("{:?}", self.peek().token_type()),
+            location: self.peek().location(),
+        }.into())
     }
     
     fn parse_type_parameter(&mut self) -> Result<TypeParam> {
@@ -437,6 +453,25 @@ impl Parser {
             Token::Boolean | Token::Byte | Token::Short | Token::Int | Token::Long | Token::Char | Token::Float | Token::Double | Token::Void => {
                 let tok = self.advance();
                 tok.lexeme().to_string()
+            }
+            Token::Question => {
+                let _q = self.advance();
+                let mut wildcard_name = "?".to_string();
+                if self.match_token(&Token::Extends) {
+                    let bound = self.parse_type_ref()?;
+                    wildcard_name = "?extends".to_string();
+                    let end_span = self.previous_span();
+                    let span = Span::new(start_span.start, end_span.end);
+                    return Ok(TypeRef { name: wildcard_name, type_args: vec![bound], array_dims: 0, span });
+                } else if self.match_token(&Token::Super) {
+                    let bound = self.parse_type_ref()?;
+                    wildcard_name = "?super".to_string();
+                    let end_span = self.previous_span();
+                    let span = Span::new(start_span.start, end_span.end);
+                    return Ok(TypeRef { name: wildcard_name, type_args: vec![bound], array_dims: 0, span });
+                } else {
+                    return Ok(TypeRef { name: wildcard_name, type_args: Vec::new(), array_dims: 0, span: start_span });
+                }
             }
             Token::Identifier => self.parse_qualified_name()?,
             _ => {
@@ -484,7 +519,7 @@ impl Parser {
             }
         }
         
-        self.consume(&Token::Gt, "Expected '>' after type arguments")?;
+        self.consume_generic_gt()?;
         
         Ok(args)
     }
@@ -504,9 +539,27 @@ impl Parser {
     }
     
     fn parse_class_member(&mut self) -> Result<ClassMember> {
+        // Pending members produced by previous field multi-declarators
+        if let Some(member) = self.pending_members.pop() {
+            return Ok(member);
+        }
         // This is a simplified implementation
         // In a full parser, you'd need to handle all member types
         let modifiers = self.parse_modifiers()?;
+
+        // Static initializer block: 'static' '{' ... '}'
+        if self.check(&Token::Static) && self.peek_token_type(self.current + 1) == Some(&Token::LBrace) {
+            self.advance(); // consume 'static'
+            let body = self.parse_block()?;
+            let span = body.span;
+            return Ok(ClassMember::Initializer(InitializerBlock { modifiers: vec![Modifier::Static], body, span }));
+        }
+        // Instance initializer block: '{' ... '}'
+        if self.check(&Token::LBrace) {
+            let body = self.parse_block()?;
+            let span = body.span;
+            return Ok(ClassMember::Initializer(InitializerBlock { modifiers: Vec::new(), body, span }));
+        }
         
         if self.check(&Token::Class) || self.check(&Token::Interface) || self.check(&Token::Enum) {
             let type_decl = self.parse_type_decl()?;
@@ -616,8 +669,13 @@ impl Parser {
             | Some(Token::Char)
             | Some(Token::Float)
             | Some(Token::Double)
-            | Some(Token::Void) => {
+            | Some(Token::Void)
+            | Some(Token::Question) => {
                 *i += 1; // consume type name
+                if self.peek_token_type(*i) == Some(&Token::Extends) || self.peek_token_type(*i) == Some(&Token::Super) {
+                    *i += 1;
+                    if !self.lookahead_type_ref(i) { return false; }
+                }
             }
             _ => return false,
         }
@@ -633,10 +691,22 @@ impl Parser {
                         depth -= 1;
                         if depth == 0 { break; }
                     }
+                    Some(Token::RShift) => {
+                        *i += 1;
+                        if depth == 0 { break; }
+                        if depth >= 2 { depth -= 2; } else { depth = 0; break; }
+                        if depth == 0 { break; }
+                    }
+                    Some(Token::URShift) => {
+                        *i += 1;
+                        if depth == 0 { break; }
+                        if depth >= 3 { depth -= 3; } else { depth = 0; break; }
+                        if depth == 0 { break; }
+                    }
                     Some(_) => { *i += 1; }
                     None => return false,
                 }
-                if depth == 0 && self.peek_token_type(*i - 1) == Some(&Token::Gt) { break; }
+                if depth == 0 { break; }
             }
         }
         // Array dimensions []*
@@ -864,39 +934,43 @@ impl Parser {
         // Parse field type
         let type_ref = self.parse_type_ref()?;
         
-        // Parse field name
-        let name = self.parse_identifier()?;
-        
-        // Parse array dimensions
-        let mut _array_dims = 0;
-        while self.check(&Token::LBracket) {
-            self.advance(); // consume '['
-            self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
-            _array_dims += 1;
+        // Parse one or more declarators: name (array dims) [= initializer]
+        let mut first_decl: Option<FieldDecl> = None;
+        let mut more_decls: Vec<ClassMember> = Vec::new();
+        loop {
+            let name = self.parse_identifier()?;
+            let mut _array_dims = 0;
+            while self.check(&Token::LBracket) {
+                self.advance();
+                self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
+                _array_dims += 1;
+            }
+            let initializer = if self.match_token(&Token::Assign) {
+                Some(self.parse_expression()?)
+            } else { None };
+            let span_decl = Span::new(self.current_span().start, self.previous_span().end);
+
+            let decl = FieldDecl {
+                modifiers: modifiers.clone(),
+                annotations: annotations.clone(),
+                type_ref: type_ref.clone(),
+                name,
+                initializer,
+                span: span_decl,
+            };
+
+            if first_decl.is_none() {
+                first_decl = Some(decl);
+            } else {
+                more_decls.push(ClassMember::Field(decl));
+            }
+
+            if !self.match_token(&Token::Comma) { break; }
         }
-        
-        // Parse initialization
-        let initializer = if self.match_token(&Token::Assign) {
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
-        
         self.consume(&Token::Semicolon, "Expected ';' after field declaration")?;
-        
-        let span = Span::new(
-            self.current_span().start,
-            self.previous_span().end,
-        );
-        
-        Ok(FieldDecl {
-            modifiers,
-            annotations,
-            type_ref,
-            name,
-            initializer,
-            span,
-        })
+        // Queue remaining declarators as pending members to be returned on next parse_class_member() calls
+        while let Some(m) = more_decls.pop() { self.pending_members.push(m); }
+        Ok(first_decl.expect("at least one field declarator"))
     }
 
     fn parse_constructor_decl(&mut self, modifiers: Vec<Modifier>) -> Result<ConstructorDecl> {
@@ -914,7 +988,34 @@ impl Parser {
             if self.check(&Token::RParen) { self.advance(); }
         }
         let throws = if self.check(&Token::Throws) { self.advance(); self.parse_type_list()? } else { Vec::new() };
-        let body = self.parse_block()?;
+        // Parse body with optional leading this(...) or super(...)
+        self.consume(&Token::LBrace, "Expected '{' to start constructor body")?;
+        // Optional explicit constructor invocation must be first statement
+        let mut seen_explicit_ctor_call = false;
+        if self.check(&Token::This) || self.check(&Token::Super) {
+            // Parse 'this(args);' or 'super(args);'
+            self.advance(); // consume this/super
+            self.consume(&Token::LParen, "Expected '(' after this/super")?;
+            if !self.check(&Token::RParen) { let _ = self.parse_argument_list()?; }
+            self.consume(&Token::RParen, "Expected ')' after constructor invocation arguments")?;
+            if self.check(&Token::Semicolon) { self.advance(); }
+            seen_explicit_ctor_call = true;
+        }
+        // Remaining statements
+        let mut statements = Vec::new();
+        while !self.check(&Token::RBrace) && !self.is_at_end() {
+            if self.check(&Token::Semicolon) { self.advance(); continue; }
+            // Enforce: explicit ctor call only allowed as first statement
+            if self.check(&Token::This) || self.check(&Token::Super) {
+                let loc = self.peek().location();
+                if seen_explicit_ctor_call || !statements.is_empty() {
+                    return Err(ParseError::semantic_error("explicit constructor invocation must be the first statement and appear only once", loc).into());
+                }
+            }
+            match self.parse_statement() { Ok(s) => statements.push(s), Err(_) => { self.synchronize_in_block(); } }
+        }
+        let _ = self.consume(&Token::RBrace, "Expected '}' to close constructor body");
+        let body = Block { statements, span: Span::new(start.start, self.previous_span().end) };
         let span = Span::new(start.start, self.previous_span().end);
         Ok(ConstructorDecl { modifiers, annotations: Vec::new(), name, parameters, throws, body, span })
     }
@@ -1177,6 +1278,28 @@ impl Parser {
             }.into());
         }
         
+        // Empty statement
+        if self.check(&Token::Semicolon) {
+            self.advance();
+            return Ok(Stmt::Empty);
+        }
+
+        // LabeledStatement: Identifier ':' Statement
+        if self.check(&Token::Identifier) {
+            let save = self.current;
+            let label = self.parse_identifier()?;
+            if self.match_token(&Token::Colon) {
+                self.label_stack.push(label.clone());
+                let stmt = self.parse_statement()?;
+                self.label_stack.pop();
+                let span = Span::new(self.current_span().start, self.previous_span().end);
+                return Ok(Stmt::Labeled(LabeledStmt { label, statement: Box::new(stmt), span }));
+            } else {
+                // rollback
+                self.current = save;
+            }
+        }
+
         // Block
         if self.check(&Token::LBrace) {
             return Ok(Stmt::Block(self.parse_block()?));
@@ -1190,17 +1313,29 @@ impl Parser {
         // Control flow and simple statements
         if self.check(&Token::Return) {
             let start = self.current_span();
-            self.advance();
+                    self.advance();
             let value = if !self.check(&Token::Semicolon) { Some(self.parse_expression()?) } else { None };
             self.consume(&Token::Semicolon, "Expected ';' after return")?;
             let end = self.previous_span();
             let span = Span::new(start.start, end.end);
             return Ok(Stmt::Return(ReturnStmt { value, span }));
         }
+        if self.check(&Token::Throw) {
+            return self.parse_throw_statement();
+        }
+        if self.check(&Token::Synchronized) {
+            return self.parse_synchronized_statement();
+        }
         if self.check(&Token::Break) {
             let start = self.current_span();
             self.advance();
             let label = if self.check(&Token::Identifier) { Some(self.parse_identifier()?) } else { None };
+            if let Some(ref l) = label {
+                if !self.label_stack.iter().any(|x| x == l) {
+                    // degrade to unlabeled break if unknown label
+                    // alternatively, record an error but continue
+                }
+            }
             self.consume(&Token::Semicolon, "Expected ';' after break")?;
             let end = self.previous_span();
             let span = Span::new(start.start, end.end);
@@ -1210,6 +1345,11 @@ impl Parser {
             let start = self.current_span();
             self.advance();
             let label = if self.check(&Token::Identifier) { Some(self.parse_identifier()?) } else { None };
+            if let Some(ref l) = label {
+                if !self.label_stack.iter().any(|x| x == l) {
+                    // degrade to unlabeled continue if unknown label
+                }
+            }
             self.consume(&Token::Semicolon, "Expected ';' after continue")?;
             let end = self.previous_span();
             let span = Span::new(start.start, end.end);
@@ -1218,8 +1358,16 @@ impl Parser {
         if self.check(&Token::If) { return self.parse_if_stmt(); }
         if self.check(&Token::While) { return self.parse_while_stmt(); }
         if self.check(&Token::For) { return self.parse_for_stmt(); }
+        if self.check(&Token::Assert) { return self.parse_assert_statement(); }
         if self.check(&Token::Try) { return self.parse_try_stmt(); }
         if self.check(&Token::Switch) { return self.parse_switch_stmt(); }
+
+        // Local type declaration (class/interface/enum) inside blocks
+        if self.check(&Token::Class) || self.check(&Token::Interface) || self.check(&Token::Enum) || self.check(&Token::At) {
+            if let Ok(decl) = self.parse_type_decl() {
+                return Ok(Stmt::TypeDecl(decl));
+            }
+        }
 
         // Variable declaration starting with a type (use lookahead)
         if Self::is_variable_declaration_start(self) {
@@ -1233,25 +1381,61 @@ impl Parser {
         Ok(Stmt::Expression(ExprStmt { expr, span }))
     }
 
+    fn parse_assert_statement(&mut self) -> Result<Stmt> {
+        // Grammar:
+        // assert Expression [ : Expression ] ;
+        let start = self.current_span();
+        self.consume(&Token::Assert, "Expected 'assert'")?;
+        let cond = self.parse_expression()?;
+        let msg = if self.match_token(&Token::Colon) { Some(self.parse_expression()?) } else { None };
+        self.consume(&Token::Semicolon, "Expected ';' after assert statement")?;
+        let span = Span::new(start.start, self.previous_span().end);
+        Ok(Stmt::Assert(AssertStmt { condition: cond, message: msg, span }))
+    }
+
+    fn parse_throw_statement(&mut self) -> Result<Stmt> {
+        let start = self.current_span();
+        self.consume(&Token::Throw, "Expected 'throw'")?;
+        let expr = self.parse_expression()?;
+        self.consume(&Token::Semicolon, "Expected ';' after throw expression")?;
+        let end = self.previous_span();
+        let span = Span::new(start.start, end.end);
+        Ok(Stmt::Throw(ThrowStmt { expr, span }))
+    }
+
+    fn parse_synchronized_statement(&mut self) -> Result<Stmt> {
+        // Parse: synchronized ( expr ) block
+        let start = self.current_span();
+        self.consume(&Token::Synchronized, "Expected 'synchronized'")?;
+        self.consume(&Token::LParen, "Expected '(' after 'synchronized'")?;
+        let lock = self.parse_expression()?;
+        self.consume(&Token::RParen, "Expected ')' after synchronized expression")?;
+        let body = self.parse_block()?;
+        let span = Span::new(start.start, self.previous_span().end);
+        Ok(Stmt::Synchronized(SynchronizedStmt { lock, body, span }))
+    }
+
     fn parse_variable_declaration_stmt(&mut self) -> Result<Stmt> {
         let start = self.current_span();
         let type_ref = self.parse_type_ref()?;
-        let name = self.parse_identifier()?;
-        let mut array_dims = 0;
-        while self.match_token(&Token::LBracket) {
-            self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
-            array_dims += 1;
+        let mut variables: Vec<VariableDeclarator> = Vec::new();
+        loop {
+            let name = self.parse_identifier()?;
+            let mut array_dims = 0;
+            while self.match_token(&Token::LBracket) {
+                self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
+                array_dims += 1;
+            }
+            let initializer = if self.match_token(&Token::Assign) {
+                Some(self.parse_expression()?)
+            } else { None };
+            let decl_span = Span::new(start.start, self.previous_span().end);
+            variables.push(VariableDeclarator { name, array_dims, initializer, span: decl_span });
+            if !self.match_token(&Token::Comma) { break; }
         }
-        let initializer = if self.match_token(&Token::Assign) {
-            Some(self.parse_expression()?)
-        } else { None };
         self.consume(&Token::Semicolon, "Expected ';' after variable declaration")?;
         let span = Span::new(start.start, self.previous_span().end);
-        Ok(Stmt::Declaration(VarDeclStmt {
-            type_ref,
-            variables: vec![VariableDeclarator { name, array_dims, initializer, span }],
-            span,
-        }))
+        Ok(Stmt::Declaration(VarDeclStmt { type_ref, variables, span }))
     }
     
     fn parse_expression(&mut self) -> Result<Expr> {
@@ -1259,24 +1443,69 @@ impl Parser {
         if self.check(&Token::New) {
             return self.parse_new_expression();
         }
-        // Parse assignment (right-associative)
+        // Assignment is the lowest precedence (right-associative)
         let expr = self.parse_assignment_expr()?;
         Ok(expr)
     }
 
     fn parse_assignment_expr(&mut self) -> Result<Expr> {
-        let left = self.parse_logical_or_expr()?;
-        if self.match_token(&Token::Assign) {
+        let left = self.parse_conditional_expr()?;
+        // Check for assignment or compound assignment operators
+        let op = if self.match_token(&Token::Assign) {
+            Some(AssignmentOp::Assign)
+        } else if self.match_token(&Token::AddAssign) {
+            Some(AssignmentOp::AddAssign)
+        } else if self.match_token(&Token::SubAssign) {
+            Some(AssignmentOp::SubAssign)
+        } else if self.match_token(&Token::MulAssign) {
+            Some(AssignmentOp::MulAssign)
+        } else if self.match_token(&Token::DivAssign) {
+            Some(AssignmentOp::DivAssign)
+        } else if self.match_token(&Token::ModAssign) {
+            Some(AssignmentOp::ModAssign)
+        } else if self.match_token(&Token::AndAssign) {
+            Some(AssignmentOp::AndAssign)
+        } else if self.match_token(&Token::OrAssign) {
+            Some(AssignmentOp::OrAssign)
+        } else if self.match_token(&Token::XorAssign) {
+            Some(AssignmentOp::XorAssign)
+        } else if self.match_token(&Token::LShiftAssign) {
+            Some(AssignmentOp::LShiftAssign)
+        } else if self.match_token(&Token::RShiftAssign) {
+            Some(AssignmentOp::RShiftAssign)
+        } else if self.match_token(&Token::URShiftAssign) {
+            Some(AssignmentOp::URShiftAssign)
+        } else {
+            None
+        };
+        if let Some(operator) = op {
             let value = self.parse_assignment_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
             return Ok(Expr::Assignment(AssignmentExpr {
                 target: Box::new(left),
-                operator: AssignmentOp::Assign,
+                operator,
                 value: Box::new(value),
-                    span,
-                }));
-            }
+                span,
+            }));
+        }
         Ok(left)
+    }
+
+    fn parse_conditional_expr(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_logical_or_expr()?;
+        if self.match_token(&Token::Question) {
+            let then_expr = self.parse_expression()?;
+            self.consume(&Token::Colon, "Expected ':' in conditional expression")?;
+            let else_expr = self.parse_expression()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            expr = Expr::Conditional(ConditionalExpr {
+                condition: Box::new(expr),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+                span,
+            });
+        }
+        Ok(expr)
     }
 
     fn parse_logical_or_expr(&mut self) -> Result<Expr> {
@@ -1290,8 +1519,38 @@ impl Parser {
     }
 
     fn parse_logical_and_expr(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_equality_expr()?;
+        let mut expr = self.parse_bitwise_or_expr()?;
         while self.match_token(&Token::AndAnd) {
+            let right = self.parse_bitwise_or_expr()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::And, right: Box::new(right), span });
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_or_expr(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_bitwise_xor_expr()?;
+        while self.match_token(&Token::Pipe) {
+            let right = self.parse_bitwise_xor_expr()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Or, right: Box::new(right), span });
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_xor_expr(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_bitwise_and_expr()?;
+        while self.match_token(&Token::Caret) {
+            let right = self.parse_bitwise_and_expr()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Xor, right: Box::new(right), span });
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_and_expr(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_equality_expr()?;
+        while self.match_token(&Token::Amp) {
             let right = self.parse_equality_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
             expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::And, right: Box::new(right), span });
@@ -1316,24 +1575,48 @@ impl Parser {
     }
 
     fn parse_relational_expr(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_additive_expr()?;
+        let mut expr = self.parse_shift_expr()?;
         loop {
             if self.match_token(&Token::Lt) {
-                let right = self.parse_additive_expr()?;
+                let right = self.parse_shift_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Lt, right: Box::new(right), span });
             } else if self.match_token(&Token::Le) {
-                let right = self.parse_additive_expr()?;
+                let right = self.parse_shift_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Le, right: Box::new(right), span });
             } else if self.match_token(&Token::Gt) {
-                let right = self.parse_additive_expr()?;
+                let right = self.parse_shift_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Gt, right: Box::new(right), span });
             } else if self.match_token(&Token::Ge) {
-                let right = self.parse_additive_expr()?;
+                let right = self.parse_shift_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Ge, right: Box::new(right), span });
+            } else if self.match_token(&Token::InstanceOf) {
+                let target_type = self.parse_type_ref()?;
+                let span = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::InstanceOf(InstanceOfExpr { expr: Box::new(expr), target_type, span });
+            } else { break; }
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift_expr(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_additive_expr()?;
+        loop {
+            if self.match_token(&Token::LShift) {
+                let right = self.parse_additive_expr()?;
+                let span = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::LShift, right: Box::new(right), span });
+            } else if self.match_token(&Token::RShift) {
+                let right = self.parse_additive_expr()?;
+                let span = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::RShift, right: Box::new(right), span });
+            } else if self.match_token(&Token::URShift) {
+                let right = self.parse_additive_expr()?;
+                let span = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::URShift, right: Box::new(right), span });
             } else { break; }
         }
         Ok(expr)
@@ -1376,10 +1659,26 @@ impl Parser {
     }
 
     fn parse_unary_expr(&mut self) -> Result<Expr> {
+        // Prefix operators
+        if self.match_token(&Token::Inc) {
+            let operand = self.parse_unary_expr()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            return Ok(Expr::Unary(UnaryExpr { operator: UnaryOp::PreInc, operand: Box::new(operand), span }));
+        }
+        if self.match_token(&Token::Dec) {
+            let operand = self.parse_unary_expr()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            return Ok(Expr::Unary(UnaryExpr { operator: UnaryOp::PreDec, operand: Box::new(operand), span }));
+        }
         if self.match_token(&Token::Bang) {
             let operand = self.parse_unary_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
             return Ok(Expr::Unary(UnaryExpr { operator: UnaryOp::Not, operand: Box::new(operand), span }));
+        }
+        if self.match_token(&Token::Tilde) {
+            let operand = self.parse_unary_expr()?;
+            let span = Span::new(self.current_span().start, self.previous_span().end);
+            return Ok(Expr::Unary(UnaryExpr { operator: UnaryOp::BitNot, operand: Box::new(operand), span }));
         }
         if self.match_token(&Token::Minus) {
             let operand = self.parse_unary_expr()?;
@@ -1391,35 +1690,48 @@ impl Parser {
             let span = Span::new(self.current_span().start, self.previous_span().end);
             return Ok(Expr::Unary(UnaryExpr { operator: UnaryOp::Plus, operand: Box::new(operand), span }));
         }
+        // Cast: '(' Type ')' UnaryExpression
+        if self.check(&Token::LParen) {
+            let save = self.current;
+            self.advance(); // consume '('
+            let mut i = self.current;
+            if self.lookahead_type_ref(&mut i) && self.peek_token_type(i) == Some(&Token::RParen) {
+                // It's a cast
+                let target_type = self.parse_type_ref()?;
+                self.consume(&Token::RParen, "Expected ')' after cast type")?;
+                let expr = self.parse_unary_expr()?;
+                let span = Span::new(self.current_span().start, self.previous_span().end);
+                return Ok(Expr::Cast(CastExpr { target_type, expr: Box::new(expr), span }));
+            } else {
+                // Not a cast; rollback
+                self.current = save;
+            }
+        }
         self.parse_postfix_expr()
     }
 
     fn parse_postfix_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary_expr()?;
-        // Immediate call on identifier: foo(...)
+        // Chained operations: calls, field access, array access, post-inc/dec
         loop {
             if self.check(&Token::LParen) {
-                // only treat as call if the current expr is an identifier or already a field/method chain
-        self.advance();
+                self.advance();
                 let args = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
                 self.consume(&Token::RParen, "Expected ')' after arguments")?;
                 let name = match expr {
                     Expr::Identifier(IdentifierExpr { ref name, .. }) => name.clone(),
-                    _ => String::from(""),
+                    _ => String::from("")
                 };
-                // If it's a bare identifier call, target None. Otherwise keep expr as target and need a name.
                 if let Expr::Identifier(IdentifierExpr { name: id_name, span }) = expr {
                     let span_all = Span::new(span.start, self.previous_span().end);
                     expr = Expr::MethodCall(MethodCallExpr { target: None, name: id_name, arguments: args, span: span_all });
                 } else {
-                    // Call on previous expr is not supported without a name; break
                     break;
                 }
                 continue;
             }
             if self.match_token(&Token::Dot) {
                 let name = self.parse_identifier()?;
-                // Method or field?
                 if self.check(&Token::LParen) {
                     self.advance();
                     let arguments = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
@@ -1430,6 +1742,23 @@ impl Parser {
                     let span_all = Span::new(self.current_span().start, self.previous_span().end);
                     expr = Expr::FieldAccess(FieldAccessExpr { target: Some(Box::new(expr)), name, span: span_all });
                 }
+                continue;
+            }
+            if self.match_token(&Token::LBracket) {
+                let index = self.parse_expression()?;
+                self.consume(&Token::RBracket, "Expected ']' after array index")?;
+                let span_all = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::ArrayAccess(ArrayAccessExpr { array: Box::new(expr), index: Box::new(index), span: span_all });
+                continue;
+            }
+            if self.match_token(&Token::Inc) {
+                let span_all = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::Unary(UnaryExpr { operator: UnaryOp::PostInc, operand: Box::new(expr), span: span_all });
+                continue;
+            }
+            if self.match_token(&Token::Dec) {
+                let span_all = Span::new(self.current_span().start, self.previous_span().end);
+                expr = Expr::Unary(UnaryExpr { operator: UnaryOp::PostDec, operand: Box::new(expr), span: span_all });
                 continue;
             }
             break;
@@ -1691,6 +2020,41 @@ impl Parser {
     fn parse_try_stmt(&mut self) -> Result<Stmt> {
         let start = self.current_span();
         self.consume(&Token::Try, "Expected 'try'")?;
+        // Optional try-with-resources
+        let mut resources: Vec<TryResource> = Vec::new();
+        if self.check(&Token::LParen) {
+            self.advance();
+            if !self.check(&Token::RParen) {
+                loop {
+                    let save = self.current;
+                    // Try parse resource as variable declaration: Type Identifier '=' Expr
+                    let mut parsed_var = false;
+                    let mut i = self.current;
+                    if self.lookahead_type_ref(&mut i) {
+                        let type_ref = self.parse_type_ref()?;
+                        if self.check(&Token::Identifier) {
+                            let name = self.parse_identifier()?;
+                            if self.match_token(&Token::Assign) {
+                                let init = self.parse_expression()?;
+                                let span = Span::new(self.current_span().start, self.previous_span().end);
+                                resources.push(TryResource::Var { modifiers: Vec::new(), type_ref, name, initializer: init, span });
+                                parsed_var = true;
+                            }
+                        }
+                    }
+                    if !parsed_var {
+                        // rollback and parse as expression resource
+                        self.current = save;
+                        let expr = self.parse_expression()?;
+                        let span = Span::new(self.current_span().start, self.previous_span().end);
+                        resources.push(TryResource::Expr { expr, span });
+                    }
+                    if !self.match_token(&Token::Semicolon) { break; }
+                    if self.check(&Token::RParen) { break; }
+                }
+            }
+            self.consume(&Token::RParen, "Expected ')' after try-with-resources")?;
+        }
         let try_block = self.parse_block()?;
         let mut catch_clauses: Vec<CatchClause> = Vec::new();
         while self.check(&Token::Catch) {
@@ -1708,7 +2072,7 @@ impl Parser {
         }
         let finally_block = if self.check(&Token::Finally) { self.advance(); Some(self.parse_block()?) } else { None };
         let span = Span::new(start.start, self.previous_span().end);
-        Ok(Stmt::Try(TryStmt { try_block, catch_clauses, finally_block, span }))
+        Ok(Stmt::Try(TryStmt { resources, try_block, catch_clauses, finally_block, span }))
     }
 
     fn parse_switch_stmt(&mut self) -> Result<Stmt> {
@@ -1721,7 +2085,7 @@ impl Parser {
         let mut cases: Vec<SwitchCase> = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
             let mut labels: Vec<Expr> = Vec::new();
-            // Collect consecutive case/default labels
+            // Collect consecutive case/default labels (aggregate multiple labels for same group)
             loop {
                 if self.match_token(&Token::Case) {
                     let label_expr = self.parse_expression()?;

@@ -83,6 +83,8 @@ pub enum Token {
     Case,
     #[token("default")]
     Default,
+    #[token("assert")]
+    Assert,
     #[token("break")]
     Break,
     #[token("continue")]
