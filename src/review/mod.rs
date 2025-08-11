@@ -1,9 +1,14 @@
 use crate::ast::*;
+mod package;
+mod imports;
 mod types;
 mod class;
 mod interface;
 mod annotation;
 mod enums;
+mod fields;
+mod methods;
+mod statements;
 
 pub type ReviewResult<T> = Result<T, ReviewError>;
 
@@ -21,34 +26,49 @@ pub enum ReviewError {
     ClassAbstractAndFinal(String),
     #[error("Interface '{0}' cannot be final")]
     InterfaceFinal(String),
+    #[error("Duplicate member: {0}")]
+    DuplicateMember(String),
+    #[error("Illegal interface field modifiers for '{0}' (expected public static final)")]
+    IllegalInterfaceFieldModifiers(String),
+    #[error("Illegal interface method modifiers for '{0}'")]
+    IllegalInterfaceMethodModifiers(String),
+    #[error("Duplicate parameter name '{0}'")]
+    DuplicateParameter(String),
+    #[error("use of local variable '{0}' before definite assignment")]
+    UseBeforeInit(String),
+    #[error("cannot assign to final parameter '{0}'")]
+    AssignToFinal(String),
+    #[error("cannot assign to final field '{0}'")]
+    AssignToFinalField(String),
+    #[error("At most one varargs constructor is allowed per class")]
+    MultipleVarargsConstructors,
+    #[error("method call '{name}({found})' does not match any arity; expected one of: {expected}")]
+    MethodCallArityMismatch { name: String, expected: String, found: usize },
+    #[error("Duplicate local variable '{0}' in the same scope")]
+    DuplicateLocalVar(String),
+    #[error("Incompatible initializer: expected {expected}, found {found}")]
+    IncompatibleInitializer { expected: String, found: String },
+    #[error("inapplicable method '{name}' for argument types [{found}]; no match among [{expected}]")]
+    InapplicableMethod { name: String, expected: String, found: String },
+    #[error("ambiguous method '{name}' for argument types [{found}]; candidates: {candidates}")]
+    AmbiguousMethod { name: String, candidates: String, found: String },
+    #[error("illegal static call: '{typename}::{name}' is not static in this context")]
+    IllegalStaticCall { typename: String, name: String },
+    #[error("type '{typename}' expects {expected} type argument(s); found {found}")]
+    GenericArityMismatch { typename: String, expected: usize, found: usize },
+    #[error("type argument '{found}' for '{typename}' does not satisfy upper bound '{bound}'")]
+    GenericBoundViolation { typename: String, bound: String, found: String },
+    #[error("enum '{0}' constructors cannot be public or protected")]
+    IllegalEnumConstructorVisibility(String),
+    #[error("illegal modifier combination for constructor '{0}'")]
+    IllegalConstructorModifiers(String),
 }
 
 /// AST-level review before codegen
 pub fn review(ast: &Ast) -> ReviewResult<()> {
-    review_package(ast)?;
-    review_imports(ast)?;
+    self::package::review_package(ast)?;
+    self::imports::review_imports(ast)?;
     types::review_types(ast)?;
-    Ok(())
-}
-
-fn review_package(ast: &Ast) -> ReviewResult<()> {
-    if let Some(pkg) = &ast.package_decl {
-        if pkg.name.trim().is_empty() {
-            return Err(ReviewError::MissingPackage);
-        }
-    }
-    Ok(())
-}
-
-fn review_imports(ast: &Ast) -> ReviewResult<()> {
-    use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::new();
-    for imp in &ast.imports {
-        let key = imp.name.clone();
-        if !seen.insert(key.clone()) {
-            return Err(ReviewError::DuplicateImport(key));
-        }
-    }
     Ok(())
 }
 

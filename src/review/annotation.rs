@@ -1,4 +1,4 @@
-use super::{ReviewError, ReviewResult};
+use super::ReviewResult;
 use crate::ast::AnnotationDecl;
 
 pub(crate) fn review_annotation(_a: &AnnotationDecl) -> ReviewResult<()> {

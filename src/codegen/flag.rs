@@ -20,6 +20,8 @@ pub mod access_flags {
     pub const ACC_ANNOTATION: u16 = 0x2000;
     pub const ACC_ENUM: u16 = 0x4000;
     pub const ACC_MODULE: u16 = 0x8000;
+    // Java 17+: class flags include ACC_SEALED (0x0020) overlapping with ACC_SUPER historically; kept separate for clarity if needed
+    pub const ACC_SEALED: u16 = 0x0020; // for completeness; usage gated by version and context
 }
 
 

@@ -171,6 +171,22 @@ impl NamedAttribute {
         Ok(Self { name: ConstPoolIndex::from(name_index), info: AttributeInfo::Custom(CustomAttribute { payload }) })
     }
 
+    pub fn new_record_attribute(
+        const_pool: &mut ConstantPool,
+        components: Vec<RecordComponentInfo>,
+    ) -> Result<Self, AttributeCreateError> {
+        let name = const_pool.try_add_utf8("Record")?;
+        Ok(Self { name: ConstPoolIndex::from(name), info: AttributeInfo::Record(RecordAttribute { components }) })
+    }
+
+    pub fn new_permitted_subclasses_attribute(
+        const_pool: &mut ConstantPool,
+        classes: Vec<ConstPoolIndex<ConstClassInfo>>,
+    ) -> Result<Self, AttributeCreateError> {
+        let name = const_pool.try_add_utf8("PermittedSubclasses")?;
+        Ok(Self { name: ConstPoolIndex::from(name), info: AttributeInfo::PermittedSubclasses(PermittedSubclassesAttribute { classes }) })
+    }
+
     pub fn to_bytes(&self, const_pool: &ConstantPool) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.name.as_u16().to_be_bytes());
@@ -627,6 +643,44 @@ impl NestMembersAttribute {
     }
 }
 
+// Java 14+: Record
+#[derive(Debug, Clone)]
+pub struct RecordAttribute {
+    pub components: Vec<RecordComponentInfo>,
+}
+
+impl RecordAttribute {
+    fn write_to_classfile(&self, buffer: &mut Vec<u8>, _const_pool: &ConstantPool) {
+        buffer.extend_from_slice(&(self.components.len() as u16).to_be_bytes());
+        for c in &self.components {
+            buffer.extend_from_slice(&c.name.as_u16().to_be_bytes());
+            buffer.extend_from_slice(&c.descriptor.as_u16().to_be_bytes());
+            buffer.extend_from_slice(&(c.attributes.len() as u16).to_be_bytes());
+            for a in &c.attributes { buffer.extend_from_slice(&a.to_bytes(&ConstantPool::new())); }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordComponentInfo {
+    pub name: ConstPoolIndex<ConstUtf8Info>,
+    pub descriptor: ConstPoolIndex<ConstUtf8Info>,
+    pub attributes: Vec<NamedAttribute>,
+}
+
+// Java 15+: PermittedSubclasses
+#[derive(Debug, Clone)]
+pub struct PermittedSubclassesAttribute {
+    pub classes: Vec<ConstPoolIndex<ConstClassInfo>>, // u2 count + u2 classes[count]
+}
+
+impl PermittedSubclassesAttribute {
+    fn write_to_classfile(&self, buffer: &mut Vec<u8>, _const_pool: &ConstantPool) {
+        buffer.extend_from_slice(&(self.classes.len() as u16).to_be_bytes());
+        for c in &self.classes { buffer.extend_from_slice(&c.as_u16().to_be_bytes()); }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CustomAttribute {
     pub payload: Vec<u8>,
@@ -638,12 +692,37 @@ impl CustomAttribute {
     }
 }
 
-// Placeholder types for annotations
+// Placeholder but enriched types for annotations (carry optional retention/targets metadata for verify-time checks)
 #[derive(Debug, Clone)]
-pub struct AnnotationEntry;
+pub enum RetentionPolicy { Source, Class, Runtime }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationTarget {
+    Type,
+    Field,
+    Method,
+    Parameter,
+    Constructor,
+    LocalVariable,
+    AnnotationType,
+    Package,
+    TypeParameter,
+    TypeUse,
+}
 
 #[derive(Debug, Clone)]
-pub struct TypeAnnotationEntry;
+pub struct AnnotationEntry {
+    pub type_name: ConstPoolIndex<ConstUtf8Info>,
+    pub retention: Option<RetentionPolicy>,
+    pub targets: Vec<AnnotationTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeAnnotationEntry {
+    pub type_name: ConstPoolIndex<ConstUtf8Info>,
+    pub retention: Option<RetentionPolicy>,
+    pub targets: Vec<AnnotationTarget>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ElementValue;
@@ -679,6 +758,10 @@ pub enum AttributeInfo {
     ModuleMainClass(ModuleMainClassAttribute),
     NestHost(NestHostAttribute),
     NestMembers(NestMembersAttribute),
+    // Java 14+: Record attribute
+    Record(RecordAttribute),
+    // Java 15+: PermittedSubclasses attribute for sealed classes
+    PermittedSubclasses(PermittedSubclassesAttribute),
     Custom(CustomAttribute),
 }
 
@@ -714,6 +797,8 @@ impl AttributeInfo {
             Self::ModuleMainClass(v) => v.write_to_classfile(&mut buffer, const_pool),
             Self::NestHost(v) => v.write_to_classfile(&mut buffer, const_pool),
             Self::NestMembers(v) => v.write_to_classfile(&mut buffer, const_pool),
+            Self::Record(v) => v.write_to_classfile(&mut buffer, const_pool),
+            Self::PermittedSubclasses(v) => v.write_to_classfile(&mut buffer, const_pool),
             Self::Custom(v) => v.write_to_classfile(&mut buffer),
         }
         buffer

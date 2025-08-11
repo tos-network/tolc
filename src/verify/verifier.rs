@@ -3,7 +3,7 @@ use crate::ast::*;
 use crate::codegen::class::ClassFile;
 use crate::codegen::constpool::Constant;
 use crate::codegen::flag::access_flags;
-use super::{constant_pool, class_access_flags, fields, methods, interfaces};
+use super::{constant_pool, class_access_flags, fields, methods, interfaces, attributes};
 
 pub type VerifyResult<T> = Result<T, VerifyError>;
 
@@ -28,6 +28,13 @@ pub enum VerifyError {
 
 /// Verify the ClassFile by orchestrating all sub-verifiers
 pub fn verify(class_file: &ClassFile) -> VerifyResult<()> {
+    // Java 8-only target: reject class files beyond major 52
+    if class_file.major_version > 52 {
+        return Err(VerifyError::Internal(format!(
+            "Unsupported class file version {} (target is Java 8 / 52)",
+            class_file.major_version
+        )));
+    }
     constant_pool::verify(class_file).map_err(|e| VerifyError::Internal(e.to_string()))?;
     class_access_flags::verify(class_file, None).map_err(|e| VerifyError::Internal(e.to_string()))?;
     verify_this_class(class_file)?;
@@ -35,6 +42,7 @@ pub fn verify(class_file: &ClassFile) -> VerifyResult<()> {
     interfaces::verify(class_file).map_err(|e| VerifyError::Internal(e.to_string()))?;
     fields::verify(class_file).map_err(|e| VerifyError::Internal(e.to_string()))?;
     methods::verify(class_file).map_err(|e| VerifyError::Internal(e.to_string()))?;
+    attributes::verify(class_file).map_err(|e| VerifyError::Internal(e.to_string()))?;
     Ok(())
 }
 

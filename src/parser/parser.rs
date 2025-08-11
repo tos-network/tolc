@@ -1425,6 +1425,8 @@ impl Parser {
 
     fn parse_variable_declaration_stmt(&mut self) -> Result<Stmt> {
         let start = self.current_span();
+        // Allow local variable modifiers (e.g., final)
+        let modifiers = self.parse_modifiers()?;
         let type_ref = self.parse_type_ref()?;
         let mut variables: Vec<VariableDeclarator> = Vec::new();
         loop {
@@ -1443,7 +1445,7 @@ impl Parser {
         }
         self.consume(&Token::Semicolon, "Expected ';' after variable declaration")?;
         let span = Span::new(start.start, self.previous_span().end);
-        Ok(Stmt::Declaration(VarDeclStmt { type_ref, variables, span }))
+        Ok(Stmt::Declaration(VarDeclStmt { modifiers, type_ref, variables, span }))
     }
     
     fn parse_expression(&mut self) -> Result<Expr> {
@@ -1964,9 +1966,10 @@ impl Parser {
                     let span = Span::new(start.start, self.previous_span().end);
                     // Represent as a generic for-statement with declaration in init and no condition/update
                     let decl = VarDeclStmt {
+                        modifiers: Vec::new(),
                         type_ref: var_type,
                         variables: vec![VariableDeclarator { name: var_name, array_dims: 0, initializer: None, span }],
-            span,
+                        span,
                     };
                     return Ok(Stmt::For(ForStmt { init: vec![Stmt::Declaration(decl)], condition: None, update: Vec::new(), body, span }));
                 }

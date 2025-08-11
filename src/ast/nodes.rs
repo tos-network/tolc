@@ -373,6 +373,7 @@ pub struct ExprStmt {
 
 #[derive(Debug, Clone)]
 pub struct VarDeclStmt {
+    pub modifiers: Vec<Modifier>,
     pub type_ref: TypeRef,
     pub variables: Vec<VariableDeclarator>,
     pub span: Span,

@@ -60,8 +60,8 @@ fn verify_access_flags(class_file: &ClassFile, access_flags: u16) -> Result<()> 
         return Err(FieldVerifyError::InvalidFieldAccessFlags(access_flags));
     }
 
-    let class_is_interface = class_file.access_flags & access_flags::ACC_INTERFACE != 0;
-    if class_is_interface {
+    let _class_is_interface = class_file.access_flags & access_flags::ACC_INTERFACE != 0;
+    if _class_is_interface {
         let must = access_flags::ACC_PUBLIC | access_flags::ACC_STATIC | access_flags::ACC_FINAL;
         let has_all = access_flags & must == must;
         let illegal = access_flags::ACC_PRIVATE
@@ -87,7 +87,7 @@ fn verify_access_flags(class_file: &ClassFile, access_flags: u16) -> Result<()> 
 fn verify_attributes(class_file: &ClassFile, field_access: u16, attrs: &[NamedAttribute]) -> Result<()> {
     let mut has_constant_value = false;
     let mut has_signature = false;
-    let class_is_interface = class_file.access_flags & access_flags::ACC_INTERFACE != 0;
+    let _class_is_interface = class_file.access_flags & access_flags::ACC_INTERFACE != 0;
 
     for a in attrs {
         match &a.info {
@@ -111,11 +111,19 @@ fn verify_attributes(class_file: &ClassFile, field_access: u16, attrs: &[NamedAt
                     _ => return Err(FieldVerifyError::InvalidConstantValueKind),
                 }
             }
-            AttributeInfo::Signature(_) => {
+            AttributeInfo::Signature(sig_attr) => {
                 if has_signature {
                     return Err(FieldVerifyError::DuplicateFieldAttribute("Signature".to_string()));
                 }
                 has_signature = true;
+                // Minimal signature content validation
+                let idx = sig_attr.signature.as_u16();
+                let idx_usize = (idx as usize).saturating_sub(1);
+                if let Some(Constant::Utf8(s)) = class_file.constant_pool.constants.get(idx_usize) {
+                    if !crate::verify::signature::is_valid_field_signature(s) || !crate::verify::attributes::is_valid_signature(s) {
+                        return Err(FieldVerifyError::InvalidFieldAttribute("Invalid Signature".to_string()));
+                    }
+                } else { return Err(FieldVerifyError::InvalidFieldAttribute("Invalid Signature".to_string())); }
             }
             AttributeInfo::Synthetic(_) | AttributeInfo::Deprecated(_) => {}
             AttributeInfo::RuntimeVisibleAnnotations(_)
@@ -145,7 +153,7 @@ fn verify_attributes(class_file: &ClassFile, field_access: u16, attrs: &[NamedAt
             | AttributeInfo::NestMembers(_) => {
                 return Err(FieldVerifyError::InvalidFieldAttribute(attribute_name(class_file, a)));
             }
-            AttributeInfo::Custom(_) => {
+            AttributeInfo::Custom(_) | AttributeInfo::Record(_) | AttributeInfo::PermittedSubclasses(_) => {
                 // Custom attributes are not recognized for fields here
                 return Err(FieldVerifyError::InvalidFieldAttribute(attribute_name(class_file, a)));
             }

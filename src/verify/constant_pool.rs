@@ -14,6 +14,8 @@ pub enum ConstantPoolVerifyError {
     BootstrapMethodsNotDefined,
     #[error("Invalid bootstrap method index {0}")]
     InvalidBootstrapMethodIndex(usize),
+    #[error("Duplicate BootstrapMethods attribute found")]
+    DuplicateBootstrapMethodsAttribute,
 }
 
 pub type Result<T> = std::result::Result<T, ConstantPoolVerifyError>;
@@ -22,6 +24,7 @@ pub type Result<T> = std::result::Result<T, ConstantPoolVerifyError>;
 pub fn verify(class_file: &ClassFile) -> Result<()> {
     verify_version_constants(class_file)?;
     verify_constant_indexes(class_file)?;
+    verify_bootstrap_methods_structure(class_file)?;
     Ok(())
 }
 
@@ -108,6 +111,45 @@ fn verify_constant_indexes(class_file: &ClassFile) -> Result<()> {
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn verify_bootstrap_methods_structure(class_file: &ClassFile) -> Result<()> {
+    // At most one BootstrapMethods attribute
+    let mut count = 0usize;
+    for a in &class_file.attributes {
+        if let AttributeInfo::BootstrapMethods(bsm) = &a.info {
+            count += 1;
+            // Best-effort checks based on current attribute model: indices must refer to Class
+            for m in &bsm.bootstrap_methods {
+                // JVMS: bootstrap_method_ref must be a CONSTANT_MethodHandle; our Constant lacks explicit kind typing here.
+                // Best-effort: allow Class and MethodHandle; prefer MethodHandle when model supports it.
+                let mh_idx = m.bootstrap_method.as_u16() as usize;
+                match class_file.constant_pool.constants.get(mh_idx.saturating_sub(1)) {
+                    Some(Constant::MethodHandle(_, _)) => {}
+                    Some(Constant::Class(_)) => {} // permissive until MethodHandleIndex is fully wired
+                    None => return Err(ConstantPoolVerifyError::InvalidConstantPoolIndex(m.bootstrap_method.as_u16())),
+                    _ => return Err(ConstantPoolVerifyError::InvalidConstantPoolIndexType(m.bootstrap_method.as_u16())),
+                }
+                // Arguments: typically CONSTANT_String/Class/MethodType/etc. We conservatively allow Utf8-backed kinds via existing pool checks
+                for arg in &m.bootstrap_arguments {
+                    let aidx = arg.as_u16() as usize;
+                    match class_file.constant_pool.constants.get(aidx.saturating_sub(1)) {
+                        Some(Constant::Class(_))
+                        | Some(Constant::String(_))
+                        | Some(Constant::MethodType(_))
+                        | Some(Constant::Integer(_))
+                        | Some(Constant::Float(_))
+                        | Some(Constant::Long(_))
+                        | Some(Constant::Double(_)) => {}
+                        None => return Err(ConstantPoolVerifyError::InvalidConstantPoolIndex(arg.as_u16())),
+                        _ => return Err(ConstantPoolVerifyError::InvalidConstantPoolIndexType(arg.as_u16())),
+                    }
+                }
+            }
+        }
+    }
+    if count > 1 { return Err(ConstantPoolVerifyError::DuplicateBootstrapMethodsAttribute); }
     Ok(())
 }
 

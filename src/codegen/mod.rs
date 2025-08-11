@@ -86,8 +86,10 @@ fn generate_class_bytecode(class: &ClassDecl, output_dir: &Path, config: &Config
     // Generate the class bytecode using the existing method
     class_writer.generate_class(class)?;
     
-    // Get the generated class file and write it
+    // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
+    crate::verify::verify(&class_file)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", class.name));
     
     // Write the class file bytes to disk
@@ -104,8 +106,10 @@ fn generate_interface_bytecode(interface: &InterfaceDecl, output_dir: &Path, con
     // Generate the interface bytecode
     class_writer.generate_interface(interface)?;
     
-    // Get the generated class file and write it
+    // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
+    crate::verify::verify(&class_file)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", interface.name));
     
     let bytes = class_file_to_bytes(&class_file);
@@ -121,8 +125,10 @@ fn generate_enum_bytecode(enum_decl: &EnumDecl, output_dir: &Path, config: &Conf
     // Generate the enum bytecode
     class_writer.generate_enum(enum_decl)?;
     
-    // Get the generated class file and write it
+    // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
+    crate::verify::verify(&class_file)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", enum_decl.name));
     
     let bytes = class_file_to_bytes(&class_file);
@@ -138,8 +144,10 @@ fn generate_annotation_bytecode(annotation: &AnnotationDecl, output_dir: &Path, 
     // Generate the annotation bytecode
     class_writer.generate_annotation(annotation)?;
     
-    // Get the generated class file and write it
+    // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
+    crate::verify::verify(&class_file)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", annotation.name));
     
     let bytes = class_file_to_bytes(&class_file);

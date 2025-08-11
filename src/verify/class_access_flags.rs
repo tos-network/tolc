@@ -44,6 +44,12 @@ pub fn verify(class_file: &ClassFile, class_name: Option<&str>) -> Result<()> {
         return Err(ClassAccessFlagsError::Invalid(flags));
     }
 
+    // Sealed classes (ACC_SEALED) sanity: do not allow on interfaces here, and require not final
+    if has(access_flags::ACC_SEALED) {
+        if has(access_flags::ACC_INTERFACE) { return Err(ClassAccessFlagsError::Invalid(flags)); }
+        if has(access_flags::ACC_FINAL) { return Err(ClassAccessFlagsError::Invalid(flags)); }
+    }
+
     Ok(())
 }
 
