@@ -12,6 +12,8 @@
 pub mod ast;
 pub mod parser;
 pub mod codegen;
+pub mod verify;
+pub mod review;
 pub mod error;
 pub mod config;
 

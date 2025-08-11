@@ -299,7 +299,7 @@ impl BytecodeBuilder {
         self.line_numbers
     }
     
-    // Constants - 使用 OpcodeGenerator
+    // Constants - Use OpcodeGenerator
     pub fn aconst_null(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(0)?;
         self.stack_state.push(1)?;
@@ -405,7 +405,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Loads - 使用 OpcodeGenerator
+    // Loads - Use OpcodeGenerator
     pub fn iload(&mut self, index: u16) -> Result<(), StackError> {
         self.stack_state.pop(0)?;
         self.stack_state.push(1)?;
@@ -441,7 +441,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Stores - 使用 OpcodeGenerator
+    // Stores - Use OpcodeGenerator
     pub fn istore(&mut self, index: u16) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
         self.emit_opcode(self.opcode_generator.istore(index));
@@ -472,7 +472,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Stack operations - 使用 OpcodeGenerator
+    // Stack operations - Use OpcodeGenerator
     pub fn pop(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
         self.emit_opcode(self.opcode_generator.pop());
@@ -534,7 +534,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Arithmetic operations - 使用 OpcodeGenerator
+    // Arithmetic operations - Use OpcodeGenerator
     pub fn iadd(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(2)?;
         self.stack_state.push(1)?;
@@ -675,7 +675,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Bitwise operations - 使用 OpcodeGenerator
+    // Bitwise operations - Use OpcodeGenerator
     pub fn iand(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(2)?;
         self.stack_state.push(1)?;
@@ -788,7 +788,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Control flow - 使用 OpcodeGenerator
+    // Control flow - Use OpcodeGenerator
     pub fn ifeq(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
         // Store the position of the instruction (opcode) for JVM offset calculation
@@ -909,7 +909,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Switch statements - 使用 OpcodeGenerator
+    // Switch statements - Use OpcodeGenerator
     pub fn tableswitch(&mut self, default_label: &str, low: i32, high: i32, case_labels: &[&str]) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop the switch value
         
@@ -959,7 +959,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Returns - 使用 OpcodeGenerator
+    // Returns - Use OpcodeGenerator
     pub fn ireturn(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
         self.emit_opcode(self.opcode_generator.ireturn());
@@ -995,7 +995,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Array operations - 使用 OpcodeGenerator
+    // Array operations - Use OpcodeGenerator
     pub fn newarray(&mut self, atype: u8) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop array length
         self.stack_state.push(1)?; // Push array reference
@@ -1128,7 +1128,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Field access operations - 使用 OpcodeGenerator
+    // Field access operations - Use OpcodeGenerator
     pub fn getfield(&mut self, index: u16) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop object reference
         self.stack_state.push(1)?; // Push field value (size depends on field type)
@@ -1154,7 +1154,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Method invocation operations - 使用 OpcodeGenerator
+    // Method invocation operations - Use OpcodeGenerator
     pub fn invokevirtual(&mut self, index: u16) -> Result<(), StackError> {
         // Note: Stack manipulation depends on method signature
         // This is a simplified version - actual implementation should check method signature
@@ -1186,7 +1186,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Type conversion operations - 使用 OpcodeGenerator
+    // Type conversion operations - Use OpcodeGenerator
     pub fn i2l(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop int
         self.stack_state.push(2)?; // Push long
@@ -1215,7 +1215,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Exception handling and synchronization - 使用 OpcodeGenerator
+    // Exception handling and synchronization - Use OpcodeGenerator
     pub fn athrow(&mut self) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop exception object
         self.emit_opcode(self.opcode_generator.athrow());
@@ -1234,7 +1234,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Constant loading operations - 使用 OpcodeGenerator
+    // Constant loading operations - Use OpcodeGenerator
     pub fn ldc(&mut self, index: u16) -> Result<(), StackError> {
         self.stack_state.push(1)?; // Push constant value
         self.emit_opcode(self.opcode_generator.ldc(index));
@@ -1247,7 +1247,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Object creation and type checking - 使用 OpcodeGenerator
+    // Object creation and type checking - Use OpcodeGenerator
     pub fn new_object(&mut self, index: u16) -> Result<(), StackError> {
         self.stack_state.push(1)?; // Push object reference
         self.emit_opcode(self.opcode_generator.new_object(index));
@@ -1267,7 +1267,7 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // Subroutine and wide operations - 使用 OpcodeGenerator
+    // Subroutine and wide operations - Use OpcodeGenerator
     pub fn jsr(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.push(1)?; // Push return address
         self.emit_opcode(self.opcode_generator.jsr(0)); // Placeholder offset
@@ -1295,14 +1295,14 @@ impl BytecodeBuilder {
         Ok(())
     }
 
-    // No-operation instruction - 使用 OpcodeGenerator
+    // No-operation instruction - Use OpcodeGenerator
     pub fn nop(&mut self) -> Result<(), StackError> {
         // No stack change
         self.emit_opcode(self.opcode_generator.nop());
         Ok(())
     }
 
-    // Push operations for small constants - 使用 OpcodeGenerator
+    // Push operations for small constants - Use OpcodeGenerator
     pub fn bipush(&mut self, byte: i8) -> Result<(), StackError> {
         self.stack_state.push(1)?; // Push byte value
         self.emit_opcode(self.opcode_generator.bipush(byte));

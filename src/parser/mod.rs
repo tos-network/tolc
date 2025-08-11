@@ -20,6 +20,14 @@ pub fn parse_tol(source: &str) -> Result<Ast> {
     parser::parse(source)
 }
 
+/// Parse and verify a .tol source file
+pub fn parse_and_verify(source: &str) -> Result<Ast> {
+    let ast = parser::parse(source)?;
+    crate::review::review(&ast)
+        .map_err(|e| crate::error::Error::Semantic { message: e.to_string() })?;
+    Ok(ast)
+}
+
 /// Parse multiple .tol source files
 pub fn parse_tol_files(sources: &[&str]) -> Result<Vec<Ast>> {
     let mut asts = Vec::new();
