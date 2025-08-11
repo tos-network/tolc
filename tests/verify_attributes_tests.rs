@@ -94,7 +94,7 @@ fn runtime_retention_must_be_in_visible_set() {
     }
 }
 
-use tolc::codegen::attribute::{ModuleAttribute, ModuleRequires, ModuleExports, ModuleOpens, ModuleUses, ModuleProvides};
+use tolc::codegen::attribute::ModuleAttribute;
 
 #[test]
 fn verify_rejects_module_attribute_below_java9() {

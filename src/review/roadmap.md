@@ -251,7 +251,8 @@ This document outlines of tolc's compilation
 
 ## Changelog
 
- - Added `coverage.md` documenting a fine-grained coverage comparison against javac (Java 8 semantics). This serves as a living checklist to guide review/verify parity work.
+- Added `coverage.md` documenting a fine-grained coverage comparison against javac (Java 8 semantics). This serves as a living checklist to guide review/verify parity work.
+- review: Added a basic checked-exception analysis (throws/catch coverage) and tests; updated coverage table accordingly.
 
 - Sprint 1 (ENTER-lite) – initial landing
   - review (per AST, pre-ClassFile):

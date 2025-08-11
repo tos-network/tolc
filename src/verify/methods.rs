@@ -139,7 +139,8 @@ fn verify_method_attributes(class_file: &ClassFile, method: &crate::codegen::met
                 // StackMapTable sanity: monotonic pc coverage within code length (minimal)
                 {
                     use crate::codegen::frame::StackMapFrame;
-                    let mut pc_accum: u32 = 0;
+                    // reserved for future extended checks
+                    let _pc_accum: u32 = 0;
                     for inner in &code_attr.attributes {
                         if let AttributeInfo::StackMapTable(smt) = &inner.info {
                             let mut prev_locals_len: Option<usize> = None;

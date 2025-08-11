@@ -2,7 +2,7 @@ use crate::codegen::attribute::AttributeInfo;
 use crate::codegen::class::ClassFile;
 use crate::codegen::flag::access_flags;
 use crate::codegen::constpool::Constant;
-use crate::codegen::attribute::{AnnotationEntry, TypeAnnotationEntry, RetentionPolicy, AnnotationTarget};
+use crate::codegen::attribute::{AnnotationEntry, TypeAnnotationEntry, RetentionPolicy};
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum AttributesVerifyError {

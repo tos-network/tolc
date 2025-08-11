@@ -42,9 +42,9 @@ Notes
 | Static access | `TypeName.m(...)` / `TypeName.f` must be static | ✓ | `review/statements.rs`, `review/fields.rs` | Check/Resolve | — |
 | Generics | Type-argument count in new/cast/instanceof | ✓ | `review/statements.rs`; tests | Attr | — |
 | Generics | Upper-bound checks (local index/explicit imports) | ◐ | `review/types.rs`, `review/statements.rs` | Attr | No cross-library resolution |
-| Exceptions | Checked exceptions report (throws/catch coverage) | ✗ | — | Flow/Attr | Not implemented |
-| Access control | Cross-package/derived visibility and override access | ✗ | — | Check/Resolve | Not implemented |
-| Overrides | Return/throws/override-consistency | ✗ | — | Check/Resolve/Attr | Not implemented |
+| Exceptions | Checked exceptions report (throws/catch coverage) | ◐ | `review/statements.rs`; tests: `review_exceptions_tests.rs` | Flow/Attr | Throw typing (new/identifier/cast); call-site propagation for same-class and cross-type methods/constructors (incl. static-imported); hierarchy via local index. Gaps: try-with-resources close(), precise rethrow/multi-catch rules, external types without index. |
+| Access control | Cross-package/derived visibility and override access | ◐ | `review/types.rs`, `review/methods.rs` | Check/Resolve | Enforced: no static/instance override/hide, no visibility reduction (incl. package vs protected across packages), final cannot be overridden (direct super). Gaps: full super chain and interface method checks, cross-package protected access nuances. |
+| Overrides | Return/throws/override-consistency | ◐ | `review/types.rs`, `review/methods.rs` | Check/Resolve/Attr | Enforced across super chain and interfaces: static/instance override rules, final override, visibility (incl. package), return type covariance for references, throws narrowing (basic). Gaps: complete throws subtyping matrix, nuanced protected/package edge cases. |
 | Annotations | Retention=Runtime must be in visible set | ✓ | `verify/attributes.rs`; tests | Attr | — |
 | Annotations | Type-annotation targets/context legality | ◐ | `verify/attributes.rs` | Attr | Basic validation only |
 | Constant pool | Indices and kinds validation | ✓ | `verify/constant_pool.rs` | JVMS | — |

@@ -248,6 +248,215 @@ pub(crate) fn review_body_call_arity(
     Ok(())
 }
 
+// Checked exceptions: report unhandled checked exceptions unless caught or declared
+pub(crate) fn review_body_checked_exceptions(
+    current_class: &ClassDecl,
+    body: &Block,
+    declared_throws: &[String],
+    global: &crate::review::types::GlobalMemberIndex,
+) -> ReviewResult<()> {
+    fn is_unchecked_exception(name: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
+        if name == "RuntimeException" || name == "Error" { return true; }
+        if let Some(mt) = crate::review::statements::resolve_type_in_index(global, name) {
+            let mut cur = mt.super_name.clone();
+            let mut seen = std::collections::HashSet::new();
+            while let Some(sup) = cur {
+                if sup == "RuntimeException" || sup == "Error" { return true; }
+                if !seen.insert(sup.clone()) { break; }
+                cur = crate::review::statements::resolve_type_in_index(global, &sup).and_then(|m| m.super_name.clone());
+            }
+        }
+        false
+    }
+
+    fn is_assignable_to_any(global: &crate::review::types::GlobalMemberIndex, src: &str, dsts: &[String]) -> bool {
+        for d in dsts { if crate::review::statements::is_reference_assignable(global, src, d) { return true; } }
+        false
+    }
+
+    fn walk_expr_for_exn(
+        current_class: &ClassDecl,
+        expr: &Expr,
+        declared: &[String],
+        global: &crate::review::types::GlobalMemberIndex,
+        catch_stack: &Vec<Vec<String>>, 
+        scopes: &Vec<HashMap<String, String>>,
+    ) -> ReviewResult<()> {
+        // Helper to enforce coverage for a thrown exception type name
+        let require = |exc: &str| -> ReviewResult<()> {
+            if !is_unchecked_exception(exc, global)
+                && !catch_stack.iter().rev().any(|frame| is_assignable_to_any(global, exc, frame))
+                && !is_assignable_to_any(global, exc, declared)
+            {
+                return Err(ReviewError::UnreportedCheckedException(exc.to_string()));
+            }
+            Ok(())
+        };
+
+        match expr {
+            Expr::MethodCall(mc) => {
+                // Only handle local class calls (unqualified or qualified by class name)
+                let is_unqualified = mc.target.is_none();
+                let is_self = mc.target.as_ref().and_then(|t| match &**t { Expr::Identifier(id) if id.name == current_class.name => Some(()), _ => None }).is_some();
+                if is_unqualified || is_self {
+                    // Prefer GlobalMemberIndex recorded throws for current type if available
+                    if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
+                        if let Some(list) = mt.methods_throws.get(&mc.name) {
+                            let arity = mc.arguments.len();
+                            for (a, thr) in list.iter() { if *a == arity { for t in thr { require(t)?; } } }
+                        }
+                    } else {
+                        // Fallback to scanning current class AST
+                        let arity = mc.arguments.len();
+                        let mut union_throws: HashSet<String> = HashSet::new();
+                        for member in &current_class.body { if let ClassMember::Method(m) = member { if m.name == mc.name && m.parameters.len() == arity { for t in &m.throws { union_throws.insert(t.name.clone()); } } } }
+                        for t in union_throws.iter() { require(t)?; }
+                    }
+                }
+                // Qualified cross-type calls: TypeName.m(...)
+                if let Some(t) = &mc.target {
+                    if let Expr::Identifier(id) = &**t {
+                        if id.name != current_class.name {
+                            if let Some(mt) = crate::review::types::resolve_type_in_index(global, &id.name) {
+                                if let Some(list) = mt.methods_throws.get(&mc.name) {
+                                    let arity = mc.arguments.len();
+                                    for (a, thr) in list.iter() { if *a == arity { for t in thr { require(t)?; } } }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Unqualified: try explicit static import mapping to a type
+                    if let Some(ty) = global.static_explicit.get(&mc.name) {
+                        if let Some(mt) = crate::review::types::resolve_type_in_index(global, ty) {
+                            if let Some(list) = mt.methods_throws.get(&mc.name) {
+                                let arity = mc.arguments.len();
+                                for (a, thr) in list.iter() { if *a == arity { for t in thr { require(t)?; } } }
+                            }
+                        }
+                    }
+                }
+                // Visit target and args
+                if let Some(t) = &mc.target { walk_expr_for_exn(current_class, t, declared, global, catch_stack, scopes)?; }
+                for a in &mc.arguments { walk_expr_for_exn(current_class, a, declared, global, catch_stack, scopes)?; }
+                Ok(())
+            }
+            Expr::New(n) => {
+                // Constructors of current class only
+                if n.target_type.name == current_class.name {
+                    if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
+                        if let Some(list) = mt.ctors_throws.get(&current_class.name) {
+                            let arity = n.arguments.len();
+                            for (a, thr) in list.iter() { if *a == arity { for t in thr { require(t)?; } } }
+                        }
+                    } else {
+                        let arity = n.arguments.len();
+                        let mut union_throws: HashSet<String> = HashSet::new();
+                        for member in &current_class.body { if let ClassMember::Constructor(c) = member { if c.parameters.len() == arity { for t in &c.throws { union_throws.insert(t.name.clone()); } } } }
+                        for t in union_throws.iter() { require(t)?; }
+                    }
+                } else {
+                    // Cross-type constructor throws
+                    if let Some(mt) = crate::review::types::resolve_type_in_index(global, &n.target_type.name) {
+                        if let Some(list) = mt.ctors_throws.get(&n.target_type.name) {
+                            let arity = n.arguments.len();
+                            for (a, thr) in list.iter() { if *a == arity { for t in thr { require(t)?; } } }
+                        }
+                    }
+                }
+                for a in &n.arguments { walk_expr_for_exn(current_class, a, declared, global, catch_stack, scopes)?; }
+                Ok(())
+            }
+            Expr::Cast(c) => {
+                walk_expr_for_exn(current_class, &c.expr, declared, global, catch_stack, scopes)
+            }
+            Expr::Assignment(a) => {
+                walk_expr_for_exn(current_class, &a.value, declared, global, catch_stack, scopes)?;
+                walk_expr_for_exn(current_class, &a.target, declared, global, catch_stack, scopes)
+            }
+            Expr::Unary(u) => walk_expr_for_exn(current_class, &u.operand, declared, global, catch_stack, scopes),
+            Expr::Binary(b) => { walk_expr_for_exn(current_class, &b.left, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &b.right, declared, global, catch_stack, scopes) }
+            Expr::ArrayAccess(a) => { walk_expr_for_exn(current_class, &a.array, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &a.index, declared, global, catch_stack, scopes) }
+            Expr::FieldAccess(f) => { if let Some(t) = &f.target { walk_expr_for_exn(current_class, t, declared, global, catch_stack, scopes)?; } Ok(()) }
+            Expr::Conditional(c) => { walk_expr_for_exn(current_class, &c.condition, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &c.then_expr, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &c.else_expr, declared, global, catch_stack, scopes) }
+            Expr::Parenthesized(p) => walk_expr_for_exn(current_class, p, declared, global, catch_stack, scopes),
+            _ => Ok(())
+        }
+    }
+
+    fn expr_static_type(expr: &Expr, scopes: &Vec<HashMap<String, String>>) -> Option<String> {
+        match expr {
+            Expr::New(n) => Some(n.target_type.name.clone()),
+            Expr::Identifier(id) => {
+                for s in scopes.iter().rev() { if let Some(t) = s.get(&id.name) { return Some(t.clone()); } }
+                None
+            }
+            Expr::Cast(c) => Some(c.target_type.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn walk(block: &Block, current_class: &ClassDecl, declared: &[String], global: &crate::review::types::GlobalMemberIndex, catch_stack: &mut Vec<Vec<String>>, scopes: &mut Vec<HashMap<String, String>>) -> ReviewResult<()> {
+        for s in &block.statements {
+            match s {
+                Stmt::Throw(ts) => {
+                    if let Some(exc) = expr_static_type(&ts.expr, scopes) {
+                        if !is_unchecked_exception(&exc, global)
+                            && !catch_stack.iter().rev().any(|frame| is_assignable_to_any(global, &exc, frame))
+                            && !is_assignable_to_any(global, &exc, declared)
+                        { return Err(ReviewError::UnreportedCheckedException(exc)); }
+                    }
+                }
+                Stmt::Try(t) => {
+                    // try-block sees current catches
+                    let frame: Vec<String> = t.catch_clauses.iter().map(|c| c.parameter.type_ref.name.clone()).collect();
+                    catch_stack.push(frame);
+                    // New scope for try block
+                    scopes.push(HashMap::new());
+                    walk(&t.try_block, current_class, declared, global, catch_stack, scopes)?;
+                    scopes.pop();
+                    catch_stack.pop();
+                    // catch blocks: establish catch var type in a new scope
+                    for c in &t.catch_clauses { 
+                        scopes.push({ let mut m = HashMap::new(); m.insert(c.parameter.name.clone(), c.parameter.type_ref.name.clone()); m });
+                        walk(&c.block, current_class, declared, global, catch_stack, scopes)?; 
+                        scopes.pop();
+                    }
+                    if let Some(fin) = &t.finally_block { scopes.push(HashMap::new()); walk(fin, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                }
+                Stmt::If(i) => {
+                    let then_block = if let Stmt::Block(b) = &*i.then_branch { b.clone() } else { Block { statements: vec![(*i.then_branch.clone())], span: i.span } }; 
+                    scopes.push(HashMap::new());
+                    walk(&then_block, current_class, declared, global, catch_stack, scopes)?;
+                    scopes.pop();
+                    if let Some(else_b) = &i.else_branch {
+                        let else_block = if let Stmt::Block(b) = &**else_b { b.clone() } else { Block { statements: vec![(**else_b).clone()], span: i.span } };
+                        scopes.push(HashMap::new());
+                        walk(&else_block, current_class, declared, global, catch_stack, scopes)?;
+                        scopes.pop();
+                    }
+                }
+                Stmt::While(w) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*w.body.clone())], span: w.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                Stmt::For(f) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*f.body.clone())], span: f.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                Stmt::Block(b) => { scopes.push(HashMap::new()); walk(b, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                Stmt::Switch(sw) => { for c in &sw.cases { scopes.push(HashMap::new()); walk(&Block { statements: c.statements.clone(), span: c.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); } }
+                Stmt::Labeled(ls) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                Stmt::Declaration(vd) => {
+                    // Record declared variable types
+                    for var in &vd.variables { if let Some(scope) = scopes.last_mut() { scope.insert(var.name.clone(), vd.type_ref.name.clone()); } }
+                }
+                Stmt::Expression(es) => { walk_expr_for_exn(current_class, &es.expr, declared, global, catch_stack, scopes)?; }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    let mut catch_stack: Vec<Vec<String>> = Vec::new();
+    let mut scopes: Vec<HashMap<String, String>> = vec![HashMap::new()];
+    walk(body, current_class, declared_throws, global, &mut catch_stack, &mut scopes)
+}
+
 // Local variable duplicate detection and simple initializer compatibility in a single pass
 pub(crate) fn review_body_locals_and_inits(
     body: &Block,
@@ -823,7 +1032,7 @@ fn walk_expr(
                                 return Err(ReviewError::InapplicableMethod { name: mc.name.clone(), expected, found });
                             } else if applicable.len() > 1 {
                                 // prefer exact matches first
-                                let mut exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
+                                let exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
                                 if exact.len() > 1 {
                                     let candidates = exact.iter().map(|(s, _, _)| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
                                     let found = found_list.join(",");
@@ -945,7 +1154,7 @@ fn walk_expr(
                                             let found = found_list.join(",");
                                             return Err(ReviewError::InapplicableMethod { name: format!("{}::{}", id.name, mc.name), expected, found });
                                         } else if applicable.len() > 1 {
-                                            let mut exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
+                                            let exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
                                             if exact.len() > 1 {
                                                 let candidates = exact.iter().map(|(s, _, _)| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
                                                 let found = found_list.join(",");
@@ -1473,7 +1682,7 @@ fn break_specificity_tie(cands: &[&Vec<String>], global: Option<&crate::review::
         let b = cands[i];
         let mut a_better_any = false;
         let mut b_better_any = false;
-        let mut comparable_all = true;
+        let comparable_all = true;
         for (ta, tb) in a.iter().zip(b.iter()) {
             match more_specific_type(ta, tb, global) {
                 Some(true) => a_better_any = true,
@@ -1510,5 +1719,6 @@ fn more_specific_type(a: &str, b: &str, global: Option<&crate::review::types::Gl
     }
     None
 }
+
 
 

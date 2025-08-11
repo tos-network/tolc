@@ -2,21 +2,47 @@ use super::{ReviewError, ReviewResult};
 use crate::ast::*;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Visibility { Private, Package, Protected, Public }
+
+#[derive(Debug, Clone)]
+pub(crate) struct MethodMeta {
+    pub signature: Vec<String>,
+    pub visibility: Visibility,
+    pub is_static: bool,
+    pub is_final: bool,
+    pub is_abstract: bool,
+    pub return_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MemberTables {
     pub methods_arities: HashMap<String, Vec<usize>>,
     pub methods_varargs_min: HashMap<String, usize>,
     pub methods_signatures: HashMap<String, Vec<Vec<String>>>,
     pub methods_static: HashMap<String, bool>,
+    pub methods_throws: HashMap<String, Vec<(usize, Vec<String>)>>, // name -> list of (arity, throws)
+    pub methods_meta: HashMap<String, Vec<MethodMeta>>, // name -> overload metas
+    pub methods_throws_by_sig: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // name -> list of (param types, throws)
     pub fields_static: HashMap<String, bool>,
     pub fields_final: HashMap<String, bool>,
     pub ctors_arities: HashMap<String, Vec<usize>>, // keyed by type name (self)
     pub ctors_varargs_min: HashMap<String, usize>,
     pub ctors_signatures: HashMap<String, Vec<Vec<String>>>,
+    pub ctors_throws: HashMap<String, Vec<(usize, Vec<String>)>>, // keyed by type name (self)
+    pub ctors_throws_by_sig: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // keyed by type name (self)
     pub type_param_count: usize,
     pub type_param_bounds: Vec<Vec<String>>, // simple names of bounds per type parameter
     pub super_name: Option<String>,
     pub interfaces: Vec<String>,
+    pub package_name: Option<String>,
+    pub is_interface: bool,
+}
+pub(crate) fn visibility_of(mods: &[Modifier]) -> Visibility {
+    if mods.iter().any(|m| matches!(m, Modifier::Public)) { return Visibility::Public; }
+    if mods.iter().any(|m| matches!(m, Modifier::Protected)) { return Visibility::Protected; }
+    if mods.iter().any(|m| matches!(m, Modifier::Private)) { return Visibility::Private; }
+    Visibility::Package
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,7 +57,7 @@ pub(crate) struct GlobalMemberIndex {
     pub enum_index: HashMap<String, HashMap<String, usize>>, // enum -> const -> ordinal
 }
 
-fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
+pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
     let mut idx = GlobalMemberIndex { by_type: HashMap::new(), imports: Vec::new(), package: None, wildcard_imports: Vec::new(), static_explicit: HashMap::new(), static_wildcard: Vec::new(), enum_index: HashMap::new() };
     // record package
     idx.package = ast.package_decl.as_ref().map(|p| p.name.clone());
@@ -88,6 +114,20 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
                         let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
                         mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                        let throws: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                        mt.methods_throws.entry(m.name.clone()).or_default().push((arity, throws));
+                        let sig_keys: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                        let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                        mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig_keys.clone(), throws_vec));
+                        let meta = MethodMeta {
+                            signature: sig_keys,
+                            visibility: visibility_of(&m.modifiers),
+                            is_static,
+                            is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
+                            is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                            return_type: m.return_type.as_ref().map(|t| t.name.clone()),
+                        };
+                        mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
                     }
                     ClassMember::Constructor(cons) => {
                         let arity = cons.parameters.len();
@@ -100,6 +140,11 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         }
                         let sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
                         mt.ctors_signatures.entry(c.name.clone()).or_default().push(sig);
+                        let throws: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
+                        mt.ctors_throws.entry(c.name.clone()).or_default().push((arity, throws));
+                        let ct_sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                        let ct_thr: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
+                        mt.ctors_throws_by_sig.entry(c.name.clone()).or_default().push((ct_sig, ct_thr));
                     }
                     _ => {}
                 }
@@ -111,6 +156,9 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             if let Some(ext) = &c.extends { mt.super_name = Some(ext.name.clone()); } else { mt.super_name = None; }
             // record implemented interfaces
             mt.interfaces = c.implements.iter().map(|t| t.name.clone()).collect();
+            // record package name
+            mt.package_name = idx.package.clone();
+            mt.is_interface = false;
             // insert by simple name
             idx.by_type.insert(c.name.clone(), mt.clone());
             // and fully qualified if package exists
@@ -124,7 +172,26 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
         } else if let TypeDecl::Interface(i) = td {
             let mut mt = MemberTables::default();
             mt.type_param_count = i.type_params.len();
+            mt.package_name = idx.package.clone();
             mt.interfaces = i.extends.iter().map(|t| t.name.clone()).collect();
+            mt.is_interface = true;
+            // record interface methods metas and throws by signature
+            for member in &i.body {
+                if let InterfaceMember::Method(m) = member {
+                    let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                    let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                    let meta = MethodMeta {
+                        signature: sig.clone(),
+                        visibility: visibility_of(&m.modifiers),
+                        is_static: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static)),
+                        is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
+                        is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                        return_type: m.return_type.as_ref().map(|t| t.name.clone()),
+                    };
+                    mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
+                    mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig, throws_vec));
+                }
+            }
             idx.by_type.insert(i.name.clone(), mt.clone());
             if let Some(pkg) = &idx.package {
                 let fq = format!("{}.{}", pkg, i.name);
@@ -140,6 +207,20 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
         }
     }
     idx
+}
+
+pub(crate) fn resolve_type_in_index<'a>(global: &'a GlobalMemberIndex, name: &str) -> Option<&'a MemberTables> {
+    if let Some(mt) = global.by_type.get(name) { return Some(mt); }
+    for imp in &global.imports {
+        if let Some(last) = imp.rsplit('.').next() {
+            if last == name { if let Some(mt) = global.by_type.get(imp) { return Some(mt); } }
+        }
+    }
+    for wi in &global.wildcard_imports {
+        let fq = format!("{}.{name}", wi);
+        if let Some(mt) = global.by_type.get(&fq) { return Some(mt); }
+    }
+    None
 }
 
 pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
