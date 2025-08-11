@@ -339,3 +339,54 @@ This document outlines of tolc's compilation
     - EnclosingMethod/InnerClasses consistency check (EnclosingMethod requires InnerClasses)
     - BootstrapMethods stricter content checks (indices sanity)
     - StackMapTable strict pc coverage sanity vs code length (non-debug builds as well)
+
+
+### tolC vs javac (Java 8) front-end/verify coverage
+
+- Note: tolC targets Java 8 only; javac supports full Java 8 semantics.
+
+- Legend: 
+  - Covered: implemented and tested
+  - Partial: subset implemented; significant gaps remain
+  - Missing: not implemented
+
+| Area | tolC status | Notes |
+|---|---|---|
+| Packages/imports | Covered | Duplicates, wildcard/static imports, shadowing precedence (basic) |
+| Type duplicates | Covered | Duplicate types per CU |
+| Modifiers/visibility (class/interface/method/field) | Partial | Many illegal combos enforced; more flags interactions pending |
+| Interface field rules | Covered | public static final enforced |
+| Interface method illegal modifiers | Covered | private/protected/final rejected |
+| Member duplicates (fields/methods) | Covered | Fields by name; methods by full param type list (overloading) |
+| Method overloading resolution | Partial | Arity, varargs arity, primitive widening + tie-break; no boxing/unboxing/generics inference |
+| Static context checks | Covered | Reject TypeName.m for non-static; self-qualified non-static |
+| Must-return (non-void) | Partial | Basic structured blocks, if/else, while(true), for(;;), try-finally |
+| DA/DU locals | Partial | Use-before-init, branch merge, loop merge with break/continue, try/catch/finally merge, switch default intersection |
+| Labeled break/continue | Partial | Basic termination and labeled handling; deeper multi-level precision pending |
+| Switch fall-through DA | Partial | Fall-through merge across cases; no full reachability diagnostics |
+| Finals (parameters/locals) | Covered | Single assignment enforced |
+| Finals (fields/instances) | Partial | Forbid assignment and ++/-- on final fields in methods; no constructor/init “assigned exactly once” yet |
+| Generics arity (new/cast/instanceof) | Covered | Includes imported types and zero-arity misuse |
+| Generics bounds | Partial | Minimal upper bounds via superclass chain; no wildcards/intersections/capture |
+| Exceptions checking (throws/catch) | Missing | Not implemented |
+| Const folding/compile-time constants | Missing | Not implemented |
+| Numeric promotions/type attribution | Partial | Literals, subset of promotions and conditional merge |
+| Verify: constant pool shape/kinds | Covered | Indices and kinds sanity |
+| Verify: class/method/field flags | Partial | Common invalid combos enforced; more combos pending |
+| Verify: Code presence/absence | Covered | Abstract/native absence; non-abstract presence |
+| Verify: Return opcode vs descriptor | Covered | Last opcode matches descriptor |
+| Verify: Parameter annotations count | Covered | RVPA/RIPA count equals descriptor params |
+| Verify: StackMapTable PC coverage | Covered | Monotonic PCs within code length |
+| Verify: StackMapTable frames | Partial | Locals/stack bounds per frame; no type-state transitions |
+| Verify: InnerClasses/EnclosingMethod | Covered | Presence linkage; name/owner consistency for entries |
+| Verify: Signature content | Partial | Minimal grammar + lexical checks (class/field/method) |
+| Verify: BootstrapMethods | Partial | CP indices sanity; not full target-kind validation |
+| Verify: Annotations retention/target | Partial | Runtime retention must be in visible sets; no fine-grained target checks |
+| Version gates (Java 8 target) | Covered | Reject >52 and disregard 9+ attributes |
+
+- Priorities to reach javac parity (Java 8):
+  - Exceptions checking; final fields “assigned exactly once” along constructor/initializer paths
+  - Overload resolution: boxing/unboxing, varargs element conversions, specificity
+  - Generics: wildcards, intersection bounds, capture conversion, assignability lattice
+  - Flow: path-sensitive DA/DU, switch reachability diagnostics
+  - Verify: StackMapTable state types and transitions; deeper Signature grammar and content rules
