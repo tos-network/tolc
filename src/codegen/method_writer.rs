@@ -3,17 +3,16 @@
 //! This module handles the conversion of AST method declarations into Java bytecode instructions.
 
 use super::bytecode::*;
+use super::opcodes;
 use super::opcodor::OpcodeGenerator;    
 use crate::ast::*;
-use crate::codegen::ExceptionTableEntry;
+use crate::codegen::attribute::ExceptionTableEntry;
 use crate::error::{Result, Error};
 
 /// Method writer for generating Java bytecode
 pub struct MethodWriter {
     bytecode: Vec<u8>,
-    max_stack: u16,
-    max_locals: u16,
-    local_vars: Vec<LocalVariable>,
+    stack_state: StackState,
     labels: Vec<Label>,
     next_label_id: u16,
     loop_stack: Vec<LoopContext>,
@@ -30,9 +29,7 @@ impl MethodWriter {
     pub fn new() -> Self {
         Self {
             bytecode: Vec::new(),
-            max_stack: 0,
-            max_locals: 0,
-            local_vars: Vec::new(),
+            stack_state: StackState::new(),
             labels: Vec::new(),
             next_label_id: 0,
             loop_stack: Vec::new(),
@@ -49,9 +46,7 @@ impl MethodWriter {
     pub fn new_with_constant_pool(constant_pool: std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>) -> Self {
         Self {
             bytecode: Vec::new(),
-            max_stack: 0,
-            max_locals: 0,
-            local_vars: Vec::new(),
+            stack_state: StackState::new(),
             labels: Vec::new(),
             next_label_id: 0,
             loop_stack: Vec::new(),
@@ -68,9 +63,7 @@ impl MethodWriter {
     pub fn new_with_constant_pool_and_class(constant_pool: std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>, class_name: String) -> Self {
         Self {
             bytecode: Vec::new(),
-            max_stack: 0,
-            max_locals: 0,
-            local_vars: Vec::new(),
+            stack_state: StackState::new(),
             labels: Vec::new(),
             next_label_id: 0,
             loop_stack: Vec::new(),
@@ -107,9 +100,6 @@ impl MethodWriter {
             self.generate_return(&void_type)?;
         }
         
-        // Update max stack and locals
-        self.update_stack_and_locals();
-        
         Ok(())
     }
     
@@ -117,42 +107,46 @@ impl MethodWriter {
     fn initialize_parameters(&mut self, method: &MethodDecl) -> Result<()> {
         // 'this' reference is always at index 0 for instance methods
         if !method.modifiers.contains(&Modifier::Static) {
-            let this_type = TypeRef {
-                name: "".to_string(),
-                type_args: Vec::new(),
-                array_dims: 0,
-                span: method.span,
-            };
-            self.local_vars.push(LocalVariable {
-                name: "this".to_string(),
-                var_type: this_type,
-                index: 0,
-                start_pc: 0,
-                length: 0,
-            });
-            self.max_locals = 1;
+            let this_type = LocalType::Reference(self.current_class_name.clone().unwrap_or_default());
+            self.stack_state.frame.allocate("this".to_string(), this_type);
         }
         
         // Add parameters
         for (i, param) in method.parameters.iter().enumerate() {
-            let index = if method.modifiers.contains(&Modifier::Static) {
+            // Note: index calculation is kept for future use in local variable management
+            let _index = if method.modifiers.contains(&Modifier::Static) {
                 i
             } else {
                 i + 1
             };
             
-            self.local_vars.push(LocalVariable {
-                name: param.name.clone(),
-                var_type: param.type_ref.clone(),
-                index: index as u16,
-                start_pc: 0,
-                length: 0,
-            });
-            
-            self.max_locals = self.max_locals.max((index + 1) as u16);
+            let local_type = self.convert_type_ref_to_local_type(&param.type_ref);
+            self.stack_state.frame.allocate(param.name.clone(), local_type);
         }
         
         Ok(())
+    }
+    
+    /// Convert AST TypeRef to LocalType
+    fn convert_type_ref_to_local_type(&self, type_ref: &TypeRef) -> LocalType {
+        if type_ref.array_dims > 0 {
+            let element_type = self.convert_type_ref_to_local_type(&TypeRef {
+                name: type_ref.name.clone(),
+                type_args: type_ref.type_args.clone(),
+                array_dims: 0,
+                span: type_ref.span,
+            });
+            LocalType::Array(Box::new(element_type))
+        } else {
+            match type_ref.name.as_str() {
+                "int" | "boolean" | "byte" | "short" | "char" => LocalType::Int,
+                "long" => LocalType::Long,
+                "float" => LocalType::Float,
+                "double" => LocalType::Double,
+                "void" => LocalType::Int, // void is represented as int in some contexts
+                _ => LocalType::Reference(type_ref.name.clone()),
+            }
+        }
     }
     
     /// Generate bytecode for a block
@@ -167,7 +161,9 @@ impl MethodWriter {
         // Exit scope: close locals (length=end-start)
         if let Some(scope) = self.scope_stack.pop() {
             let end_pc = self.bytecode.len() as u16;
-            for idx in scope.locals { self.set_local_length(idx, end_pc); }
+            for idx in scope.locals { 
+                self.stack_state.frame.update_lifetime(idx as u16, 0, end_pc);
+            }
         }
         Ok(())
     }
@@ -258,14 +254,16 @@ impl MethodWriter {
                         TryResource::Var { type_ref, name, initializer, .. } => {
                             self.generate_expression(initializer)?;
                             let local_index = self.allocate_local_variable(name, type_ref);
-                            self.store_local_variable(local_index, type_ref)?;
+                            let local_type = self.convert_type_ref_to_local_type(type_ref);
+                            self.store_local_variable(local_index, &local_type)?;
                             res_locals.push((local_index, type_ref.clone()));
                         }
                         TryResource::Expr { expr, .. } => {
                             self.generate_expression(expr)?;
                             let tref = TypeRef { name: "java/lang/AutoCloseable".to_string(), type_args: Vec::new(), array_dims: 0, span: try_stmt.span };
                             let local_index = self.allocate_local_variable(&format!("$res{}", idx), &tref);
-                            self.store_local_variable(local_index, &tref)?;
+                            let local_type = self.convert_type_ref_to_local_type(&tref);
+                            self.store_local_variable(local_index, &local_type)?;
                             res_locals.push((local_index, tref));
                         }
                     }
@@ -289,7 +287,8 @@ impl MethodWriter {
                 self.mark_label(handler);
                 let thr_t = TypeRef { name: "java/lang/Throwable".to_string(), type_args: Vec::new(), array_dims: 0, span: try_stmt.span };
                 let primary_exc = self.allocate_local_variable("$primary_exc", &thr_t);
-                self.store_local_variable(primary_exc, &thr_t)?;
+                let thr_local_type = self.convert_type_ref_to_local_type(&thr_t);
+                self.store_local_variable(primary_exc, &thr_local_type)?;
                 // Close with addSuppressed
                 for (local_index, _tref) in res_locals.iter().rev() {
                     let skip = self.create_label();
@@ -307,7 +306,7 @@ impl MethodWriter {
                     self.emit_instruction(opcodes::GOTO); self.emit_label_reference(inner_after);
                     self.mark_label(inner_handler);
                     let suppressed = self.allocate_local_variable("$suppressed", &thr_t);
-                    self.store_local_variable(suppressed, &thr_t)?;
+                    self.store_local_variable(suppressed, &thr_local_type)?;
                     self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(primary_exc as u8);
                     self.emit_opcode(self.opcode_generator.aload(0)); self.emit_byte(suppressed as u8);
                     self.emit_opcode(self.opcode_generator.invokevirtual(0));
@@ -1171,7 +1170,8 @@ impl MethodWriter {
             // Generate initializer if present
             if let Some(initializer) = &variable.initializer {
                 self.generate_expression(initializer)?;
-                self.store_local_variable(index, &var_decl.type_ref)?;
+                let local_type = self.convert_type_ref_to_local_type(&var_decl.type_ref);
+                self.store_local_variable(index, &local_type)?;
             }
         }
         Ok(())
@@ -1208,21 +1208,21 @@ impl MethodWriter {
     }
     
     /// Load a local variable
-    fn load_local_variable(&mut self, index: u16, var_type: &TypeRef) -> Result<()> {
-        match var_type.name.as_str() {
-            "int" | "boolean" | "byte" | "short" | "char" => {
+    fn load_local_variable(&mut self, index: u16, var_type: &LocalType) -> Result<()> {
+        match var_type {
+            LocalType::Int => {
                 self.emit_opcode(self.opcode_generator.iload(index));
             }
-            "long" => {
+            LocalType::Long => {
                 self.emit_opcode(self.opcode_generator.lload(index));
             }
-            "float" => {
+            LocalType::Float => {
                 self.emit_opcode(self.opcode_generator.fload(index));
             }
-            "double" => {
+            LocalType::Double => {
                 self.emit_opcode(self.opcode_generator.dload(index));
             }
-            _ => {
+            LocalType::Reference(_) | LocalType::Array(_) => {
                 // Reference type
                 self.emit_opcode(self.opcode_generator.aload(index));
             }
@@ -1232,9 +1232,9 @@ impl MethodWriter {
     }
     
     /// Store a local variable
-    fn store_local_variable(&mut self, index: u16, var_type: &TypeRef) -> Result<()> {
-        match var_type.name.as_str() {
-            "int" | "boolean" | "byte" | "short" | "char" => {
+    fn store_local_variable(&mut self, index: u16, var_type: &LocalType) -> Result<()> {
+        match var_type {
+            LocalType::Int => {
                 match index {
                     0 => self.emit_opcode(self.opcode_generator.istore(0)),
                     1 => self.emit_instruction(opcodes::ISTORE_1),
@@ -1246,7 +1246,7 @@ impl MethodWriter {
                     }
                 }
             }
-            "long" => {
+            LocalType::Long => {
                 match index {
                     0 => self.emit_instruction(opcodes::LSTORE_0),
                     1 => self.emit_instruction(opcodes::LSTORE_1),
@@ -1258,9 +1258,9 @@ impl MethodWriter {
                     }
                 }
             }
-            "float" => {
+            LocalType::Float => {
                 match index {
-                    0 => self.emit_instruction(opcodes::FSTORE_0),
+                    0 => self.emit_opcode(self.opcode_generator.fstore(0)),
                     1 => self.emit_instruction(opcodes::FSTORE_1),
                     2 => self.emit_instruction(opcodes::FSTORE_2),
                     3 => self.emit_instruction(opcodes::FSTORE_3),
@@ -1270,7 +1270,7 @@ impl MethodWriter {
                     }
                 }
             }
-            "double" => {
+            LocalType::Double => {
                 match index {
                     0 => self.emit_instruction(opcodes::DSTORE_0),
                     1 => self.emit_instruction(opcodes::DSTORE_1),
@@ -1282,7 +1282,7 @@ impl MethodWriter {
                     }
                 }
             }
-            _ => {
+            LocalType::Reference(_) | LocalType::Array(_) => {
                 // Reference type
                 match index {
                     0 => self.emit_instruction(opcodes::ASTORE_0),
@@ -1301,27 +1301,17 @@ impl MethodWriter {
     }
     
     /// Find a local variable by name
-    fn find_local_variable(&self, name: &str) -> Option<&LocalVariable> {
-        self.local_vars.iter().find(|var| var.name == name)
+    fn find_local_variable(&self, name: &str) -> Option<&LocalSlot> {
+        self.stack_state.frame.get_by_name(name)
     }
     
     /// Allocate a new local variable
     fn allocate_local_variable(&mut self, name: &str, var_type: &TypeRef) -> u16 {
-        let index = self.max_locals;
-        let lv = LocalVariable {
-            name: name.to_string(),
-            var_type: var_type.clone(),
-            index,
-            start_pc: self.bytecode.len() as u16,
-            length: 0,
-        };
-        let idx_in_vec = self.local_vars.len();
-        self.local_vars.push(lv);
+        let index = self.stack_state.frame.allocate(name.to_string(), self.convert_type_ref_to_local_type(var_type));
         // Track in current scope if any
         if let Some(scope) = self.scope_stack.last_mut() {
-            scope.locals.push(idx_in_vec);
+            scope.locals.push(index as usize);
         }
-        self.max_locals += 1;
         index
     }
     
@@ -1386,7 +1376,7 @@ impl MethodWriter {
     fn update_stack_and_locals(&mut self) {
         // TODO: Implement proper stack and locals tracking
         // For now, just increment max_stack
-        self.max_stack = self.max_stack.saturating_add(1);
+        self.stack_state.max_stack = self.stack_state.max_stack.saturating_add(1);
     }
     
     /// Add a class constant to the constant pool
@@ -1399,7 +1389,10 @@ impl MethodWriter {
     fn add_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         if let Some(cp) = &self.constant_pool {
             let mut cp_ref = cp.borrow_mut();
-            cp_ref.add_method_ref(class, name, descriptor)
+            match cp_ref.try_add_method_ref(class, name, descriptor) {
+                Ok(idx) => idx,
+                Err(_) => 1,
+            }
         } else {
             // Fallback for backward compatibility
             1
@@ -1410,7 +1403,10 @@ impl MethodWriter {
     fn add_field_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         if let Some(cp) = &self.constant_pool {
             let mut cp_ref = cp.borrow_mut();
-            cp_ref.add_field_ref(class, name, descriptor)
+            match cp_ref.try_add_field_ref(class, name, descriptor) {
+                Ok(idx) => idx,
+                Err(_) => 1,
+            }
         } else {
             // Fallback for backward compatibility
             1
@@ -1421,7 +1417,7 @@ impl MethodWriter {
     pub fn get_bytecode(self) -> Vec<u8> { self.bytecode }
 
     /// Finalize and return code, max stack, max locals, and resolved exception table
-    pub(crate) fn finalize(self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>, Vec<LocalVariable>, Vec<(u16,u16)>) {
+    pub(crate) fn finalize(self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>, Vec<LocalSlot>, Vec<(u16,u16)>) {
         let mut exceptions: Vec<ExceptionTableEntry> = Vec::new();
         for pe in &self.pending_exception_entries {
             let start_pc = self.labels.iter().find(|l| l.id == pe.start_label).map(|l| l.position).unwrap_or(0);
@@ -1429,22 +1425,24 @@ impl MethodWriter {
             let handler_pc = self.labels.iter().find(|l| l.id == pe.handler_label).map(|l| l.position).unwrap_or(0);
             exceptions.push(ExceptionTableEntry::new(start_pc, end_pc, handler_pc, pe.catch_type));
         }
-        (self.bytecode, self.max_stack, self.max_locals, exceptions, self.local_vars, self.line_numbers)
+        (self.bytecode, self.stack_state.max_stack(), self.stack_state.max_locals(), exceptions, self.stack_state.frame.locals, self.line_numbers)
     }
     
     /// Get the maximum stack size
     pub fn get_max_stack(&self) -> u16 {
-        self.max_stack
+        self.stack_state.max_stack()
     }
     
     /// Get the maximum number of local variables
     pub fn get_max_locals(&self) -> u16 {
-        self.max_locals
+        self.stack_state.max_locals()
     }
 }
 
 /// Local variable information
+/// This struct is kept for potential future use in debugging or enhanced local variable tracking
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct LocalVariable {
     pub(crate) name: String,
     pub(crate) var_type: TypeRef,
@@ -1502,13 +1500,10 @@ impl MethodWriter {
         }
     }
 
-    fn set_local_length(&mut self, local_vec_index: usize, end_pc: u16) {
-        if let Some(lv) = self.local_vars.get_mut(local_vec_index) {
-            if lv.length == 0 {
-                // length is end - start
-                lv.length = end_pc.saturating_sub(lv.start_pc);
-            }
-        }
+    #[allow(dead_code)]
+    fn set_local_length(&mut self, _local_vec_index: usize, _end_pc: u16) {
+        // This function is no longer needed as lifetimes are managed by StackState
+        // Kept for potential future use or API compatibility
     }
 
     fn record_line_number(&mut self, line: u16) {

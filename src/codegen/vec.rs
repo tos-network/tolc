@@ -136,6 +136,15 @@ impl<T> From<Vec<T>> for JvmVecU2<T> {
     }
 }
 
+impl<T> JvmVecU2<T> {
+    pub fn from_vec_checked(vec: Vec<T>) -> Result<Self, JvmVecError> {
+        if vec.len() > u16::MAX as usize {
+            return Err(JvmVecError::SizeLimitExceeded { current: vec.len(), max: u16::MAX as usize });
+        }
+        Ok(Self(vec))
+    }
+}
+
 impl<T> Into<Vec<T>> for JvmVecU2<T> {
     fn into(self) -> Vec<T> {
         self.0
@@ -235,6 +244,15 @@ impl<T> From<Vec<T>> for JvmVecU4<T> {
             panic!("Vector too large for JvmVecU4");
         }
         Self(vec)
+    }
+}
+
+impl<T> JvmVecU4<T> {
+    pub fn from_vec_checked(vec: Vec<T>) -> Result<Self, JvmVecError> {
+        if vec.len() > u32::MAX as usize {
+            return Err(JvmVecError::SizeLimitExceeded { current: vec.len(), max: u32::MAX as usize });
+        }
+        Ok(Self(vec))
     }
 }
 

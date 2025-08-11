@@ -10,7 +10,8 @@ use super::flag::access_flags;
 pub fn generate_annotation(annotation: &AnnotationDecl, class_file: &mut ClassFile) -> Result<()> {
     // Set annotation name and access flags
     let annotation_name = &annotation.name;
-    let this_class_index = class_file.constant_pool.add_class(annotation_name);
+    let this_class_index = class_file.constant_pool.try_add_class(annotation_name)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
     class_file.this_class = this_class_index;
 
     // Set access flags - annotations are always interfaces
@@ -21,7 +22,8 @@ pub fn generate_annotation(annotation: &AnnotationDecl, class_file: &mut ClassFi
     class_file.access_flags = access_flags;
 
     // Set superclass to java.lang.annotation.Annotation
-    let super_class_index = class_file.constant_pool.add_class("java/lang/annotation/Annotation");
+    let super_class_index = class_file.constant_pool.try_add_class("java/lang/annotation/Annotation")
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
     class_file.super_class = super_class_index;
 
     // Generate annotation members
@@ -37,9 +39,11 @@ fn generate_annotation_member(member: &AnnotationMember, class_file: &mut ClassF
     // Annotation members are implicitly public and abstract methods
     let method_flags = access_flags::ACC_PUBLIC | access_flags::ACC_ABSTRACT;
 
-    let name_index = class_file.constant_pool.add_utf8(&member.name);
+    let name_index = class_file.constant_pool.try_add_utf8(&member.name)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
     let descriptor = type_to_descriptor(&member.type_ref);
-    let descriptor_index = class_file.constant_pool.add_utf8(&descriptor);
+    let descriptor_index = class_file.constant_pool.try_add_utf8(&descriptor)
+        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
 
     let method_info = MethodInfo {
         access_flags: method_flags,

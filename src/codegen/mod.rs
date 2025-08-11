@@ -2,41 +2,49 @@
 //! 
 //! This module handles the conversion of AST nodes into Java bytecode (.class files).
 
-mod bytecode;
-mod class_writer;
-mod method_writer;
-mod constpool;
-mod descriptor;
-mod flag;
-mod attribute;
-mod class;
-mod field;
-mod method;
-mod defs;
-mod frame;
-mod writer;
-mod annotation;
-mod error;
-mod vec;
-mod typed_index;
-mod opcodor;
+pub mod annotation;
+pub mod attribute;
+pub mod bytecode;
+pub mod class;
+pub mod class_writer;
+pub mod constpool;
+pub mod defs;
+pub mod descriptor;
+pub mod error;
+pub mod field;
+pub mod flag;
+pub mod frame;
+pub mod method;
+pub mod method_writer;
+pub mod opcodes;
+pub mod opcodor;
+pub mod typed_index;
+pub mod vec;
+pub mod writer;
 
-pub use bytecode::*;
-pub use class_writer::*;
-pub use method_writer::*;
-pub use descriptor::*;
-pub use flag::*;
-pub use attribute::*;
+
+// Re-export commonly used types
 pub use class::*;
-pub use field::*;
+pub use class_writer::*;
+pub use constpool::{ConstantPool, Constant, ConstPoolError};
+pub use error::{ClassGenerationError, CodeGenResult};
 pub use method::*;
-pub use defs::*;
-pub use frame::*;
-pub use writer::*;
-pub use error::*;
+pub use method_writer::*;
+pub use opcodor::*;
+
 pub use vec::*;
-pub use typed_index::*;
-pub use constpool::*;
+pub use writer::*;
+
+// Re-export specific types from bytecode and typed_index to avoid conflicts
+pub use bytecode::{StackState, StackFrame, LocalSlot, LocalType, StackError, BytecodeBuilder, ExceptionTableEntry};
+pub use typed_index::{
+    ConstPoolIndex, RawConstPoolIndex, ConstPoolEntryInfo,
+    ClassIndex, StringIndex, NameAndTypeIndex, FieldRefIndex, MethodRefIndex,
+    InterfaceMethodRefIndex, MethodHandleIndex, MethodTypeIndex, DynamicIndex, InvokeDynamicIndex
+};
+
+// Re-export the class_file_to_bytes function for convenience
+pub use writer::class_file_to_bytes;
 
 use crate::ast::*;
 use crate::error::Result;
@@ -146,17 +154,17 @@ fn modifiers_to_flags(modifiers: &[Modifier]) -> u16 {
     
     for modifier in modifiers {
         match modifier {
-            Modifier::Public => flags |= access_flags::ACC_PUBLIC,
-            Modifier::Private => flags |= access_flags::ACC_PRIVATE,
-            Modifier::Protected => flags |= access_flags::ACC_PROTECTED,
-            Modifier::Static => flags |= access_flags::ACC_STATIC,
-            Modifier::Final => flags |= access_flags::ACC_FINAL,
-            Modifier::Abstract => flags |= access_flags::ACC_ABSTRACT,
-            Modifier::Native => flags |= access_flags::ACC_NATIVE,
-            Modifier::Synchronized => flags |= access_flags::ACC_SYNCHRONIZED,
-            Modifier::Transient => flags |= access_flags::ACC_TRANSIENT,
-            Modifier::Volatile => flags |= access_flags::ACC_VOLATILE,
-            Modifier::Strictfp => flags |= access_flags::ACC_STRICT,
+            Modifier::Public => flags |= flag::access_flags::ACC_PUBLIC,
+            Modifier::Private => flags |= flag::access_flags::ACC_PRIVATE,
+            Modifier::Protected => flags |= flag::access_flags::ACC_PROTECTED,
+            Modifier::Static => flags |= flag::access_flags::ACC_STATIC,
+            Modifier::Final => flags |= flag::access_flags::ACC_FINAL,
+            Modifier::Abstract => flags |= flag::access_flags::ACC_ABSTRACT,
+            Modifier::Native => flags |= flag::access_flags::ACC_NATIVE,
+            Modifier::Synchronized => flags |= flag::access_flags::ACC_SYNCHRONIZED,
+            Modifier::Transient => flags |= flag::access_flags::ACC_TRANSIENT,
+            Modifier::Volatile => flags |= flag::access_flags::ACC_VOLATILE,
+            Modifier::Strictfp => flags |= flag::access_flags::ACC_STRICT,
         }
     }
     

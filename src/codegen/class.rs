@@ -1,7 +1,7 @@
 //! Core classfile structures: ClassFile, FieldInfo, MethodInfo
 
 use super::constpool::ConstantPool;
-use super::attribute::AttributeInfo;
+use super::attribute::NamedAttribute;
 use super::field::FieldInfo;
 use super::method::MethodInfo;
 use super::defs::{MAGIC, JAVA_1_8};
@@ -18,7 +18,7 @@ pub struct ClassFile {
     pub interfaces: Vec<u16>,
     pub fields: Vec<FieldInfo>,
     pub methods: Vec<MethodInfo>,
-    pub attributes: Vec<AttributeInfo>,
+    pub attributes: Vec<NamedAttribute>,
 }
 
 impl ClassFile {

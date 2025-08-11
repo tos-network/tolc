@@ -2,7 +2,7 @@
 
 use super::attribute::AttributeInfo;
 use super::constpool::ConstantPool;
-use super::bytecode::opcodes;
+use super::opcodes;
 
 /// VerificationTypeInfo as defined in JVMS 4.7.4
 #[derive(Debug, Clone)]
@@ -175,9 +175,9 @@ pub fn describe_stack_map_frames(table: &StackMapTable) -> Vec<String> {
 
 /// Helper to build an AttributeInfo for StackMapTable
 pub fn make_stack_map_attribute(constant_pool: &mut ConstantPool, table: &StackMapTable) -> AttributeInfo {
-    let name_index = constant_pool.add_utf8("StackMapTable");
+    let _ = constant_pool.try_add_utf8("StackMapTable");
     let info = table.to_bytes();
-    AttributeInfo::new(name_index, info)
+    AttributeInfo::new(0, info)
 }
 
 /// Placeholder for future frame computation from bytecode

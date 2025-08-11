@@ -2,12 +2,13 @@
 //! 
 //! This module provides methods for generating individual Java bytecode instructions.
 
-use super::bytecode::opcodes;
+use super::opcodes;
 use super::constpool::ConstantPool;
 use std::rc::Rc;
 use std::cell::RefCell;
 
 /// Opcode generator for Java bytecode instructions
+#[derive(Debug)]
 pub struct OpcodeGenerator {
     #[allow(dead_code)]
     constant_pool: Option<Rc<RefCell<ConstantPool>>>,

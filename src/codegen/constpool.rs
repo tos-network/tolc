@@ -1,4 +1,12 @@
-//! Constant pool and constants for Java class files
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ConstPoolError {
+    #[error("Constant pool size limit exceeded: current={current}, adding={adding}, max={max}")]
+    SizeLimitExceeded { current: usize, adding: usize, max: usize },
+}
+
+/// Constant pool and constants for Java class files
 
 #[derive(Debug, Clone)]
 pub enum Constant {
@@ -136,12 +144,38 @@ pub struct ConstantPool {
 impl ConstantPool {
     pub fn new() -> Self { Self { constants: Vec::new() } }
 
+    fn ensure_space(&self, adding: usize) -> Result<(), ConstPoolError> {
+        // constant_pool_count is u16 and equals constants.len() + 1
+        // Ensure after adding entries, count does not exceed u16::MAX
+        let count_after = self.constants.len() + adding + 1;
+        if count_after > u16::MAX as usize {
+            return Err(ConstPoolError::SizeLimitExceeded { current: self.constants.len(), adding, max: (u16::MAX as usize) - 1 });
+        }
+        Ok(())
+    }
+
+    pub fn try_add_utf8(&mut self, value: &str) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let constant = Constant::Utf8(value.to_string());
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_utf8(&mut self, value: &str) -> u16 {
         let constant = Constant::Utf8(value.to_string());
         self.constants.push(constant);
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_class(&mut self, name: &str) -> Result<u16, ConstPoolError> {
+        // add_utf8 + class
+        self.ensure_space(2)?;
+        let name_index = self.try_add_utf8(name)?;
+        let constant = Constant::Class(name_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_class(&mut self, name: &str) -> u16 {
         let name_index = self.add_utf8(name);
         let constant = Constant::Class(name_index);
@@ -149,6 +183,16 @@ impl ConstantPool {
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_name_and_type(&mut self, name: &str, descriptor: &str) -> Result<u16, ConstPoolError> {
+        // utf8 + utf8 + name_and_type
+        self.ensure_space(3)?;
+        let name_index = self.try_add_utf8(name)?;
+        let descriptor_index = self.try_add_utf8(descriptor)?;
+        let constant = Constant::NameAndType(name_index, descriptor_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_name_and_type(&mut self, name: &str, descriptor: &str) -> u16 {
         let name_index = self.add_utf8(name);
         let descriptor_index = self.add_utf8(descriptor);
@@ -157,6 +201,16 @@ impl ConstantPool {
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_field_ref(&mut self, class: &str, name: &str, descriptor: &str) -> Result<u16, ConstPoolError> {
+        // class(utf8+class) + name_and_type(utf8+utf8+nat) + field_ref
+        self.ensure_space(1)?; // field_ref itself; nested ensures within called fns
+        let class_index = self.try_add_class(class)?;
+        let name_and_type_index = self.try_add_name_and_type(name, descriptor)?;
+        let constant = Constant::FieldRef(class_index, name_and_type_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_field_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         let class_index = self.add_class(class);
         let name_and_type_index = self.add_name_and_type(name, descriptor);
@@ -165,6 +219,15 @@ impl ConstantPool {
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let class_index = self.try_add_class(class)?;
+        let name_and_type_index = self.try_add_name_and_type(name, descriptor)?;
+        let constant = Constant::MethodRef(class_index, name_and_type_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         let class_index = self.add_class(class);
         let name_and_type_index = self.add_name_and_type(name, descriptor);
@@ -173,6 +236,15 @@ impl ConstantPool {
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_interface_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let class_index = self.try_add_class(class)?;
+        let name_and_type_index = self.try_add_name_and_type(name, descriptor)?;
+        let constant = Constant::InterfaceMethodRef(class_index, name_and_type_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_interface_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         let class_index = self.add_class(class);
         let name_and_type_index = self.add_name_and_type(name, descriptor);
@@ -181,6 +253,14 @@ impl ConstantPool {
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_string(&mut self, value: &str) -> Result<u16, ConstPoolError> {
+        self.ensure_space(2)?; // utf8 + string
+        let utf8_index = self.try_add_utf8(value)?;
+        let constant = Constant::String(utf8_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_string(&mut self, value: &str) -> u16 {
         let utf8_index = self.add_utf8(value);
         let constant = Constant::String(utf8_index);
@@ -188,36 +268,79 @@ impl ConstantPool {
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_integer(&mut self, value: i32) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let constant = Constant::Integer(value);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_integer(&mut self, value: i32) -> u16 {
         let constant = Constant::Integer(value);
         self.constants.push(constant);
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_float(&mut self, value: f32) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let constant = Constant::Float(value);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_float(&mut self, value: f32) -> u16 {
         let constant = Constant::Float(value);
         self.constants.push(constant);
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_long(&mut self, value: i64) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let constant = Constant::Long(value);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_long(&mut self, value: i64) -> u16 {
         let constant = Constant::Long(value);
         self.constants.push(constant);
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_double(&mut self, value: f64) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let constant = Constant::Double(value);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_double(&mut self, value: f64) -> u16 {
         let constant = Constant::Double(value);
         self.constants.push(constant);
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_method_handle(&mut self, reference_kind: u8, reference_index: u16) -> Result<u16, ConstPoolError> {
+        self.ensure_space(1)?;
+        let constant = Constant::MethodHandle(reference_kind, reference_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_method_handle(&mut self, reference_kind: u8, reference_index: u16) -> u16 {
         let constant = Constant::MethodHandle(reference_kind, reference_index);
         self.constants.push(constant);
         self.constants.len() as u16  // 索引从1开始
     }
     
+    pub fn try_add_method_type(&mut self, descriptor: &str) -> Result<u16, ConstPoolError> {
+        self.ensure_space(2)?; // utf8 + method_type
+        let descriptor_index = self.try_add_utf8(descriptor)?;
+        let constant = Constant::MethodType(descriptor_index);
+        self.constants.push(constant);
+        Ok(self.constants.len() as u16)
+    }
+
     pub fn add_method_type(&mut self, descriptor: &str) -> u16 {
         let descriptor_index = self.add_utf8(descriptor);
         let constant = Constant::MethodType(descriptor_index);

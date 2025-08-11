@@ -295,7 +295,7 @@ impl ErrorRecovery {
         if self.errors.is_empty() {
             Ok(value)
         } else if self.errors.len() == 1 {
-            Err(self.errors.into_iter().next().unwrap())
+            Err(self.errors.into_iter().next().expect("no parse errors collected"))
         } else {
             Err(ParseError::MultipleErrors { errors: self.errors })
         }
