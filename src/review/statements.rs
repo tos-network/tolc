@@ -83,6 +83,143 @@ fn expr_is_boolean_true(e: &Expr) -> bool {
     } else { false }
 }
 
+fn expr_is_boolean_false(e: &Expr) -> bool {
+    if let Expr::Literal(l) = e {
+        matches!(l.value, crate::ast::Literal::Boolean(false))
+    } else { false }
+}
+
+// Evaluate a constant integral value for switch labels and expressions when possible.
+// Supports integer and char literals, unary +/- and bit-not, parentheses, casts to byte/short/char/int,
+// and binary ops (+,-,*,/,%, bit ops, shifts) when both sides are constant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstKind { Int32, Int64 }
+
+fn fits_i32(v: i64) -> bool { v >= i32::MIN as i64 && v <= i32::MAX as i64 }
+
+fn eval_const_int_kind(expr: &Expr) -> Option<(i64, ConstKind)> {
+    use crate::ast::{Expr as E, Literal as L, UnaryOp as U, BinaryOp as B};
+    fn narrow(kind: ConstKind, v: i64) -> (i64, ConstKind) {
+        match kind { ConstKind::Int32 => ((v as i32) as i64, ConstKind::Int32), ConstKind::Int64 => (v, ConstKind::Int64) }
+    }
+    fn narrow_to_target(ty: &str, v: i64) -> (i64, ConstKind) {
+        match ty {
+            "byte" => (((v as i8) as i32) as i64, ConstKind::Int32),
+            "short" => (((v as i16) as i32) as i64, ConstKind::Int32),
+            "char" => { let u = (v as u16) as u32; (u as i64, ConstKind::Int32) },
+            "int" => ((v as i32) as i64, ConstKind::Int32),
+            "long" => (v, ConstKind::Int64),
+            _ => (v, ConstKind::Int64),
+        }
+    }
+    match expr {
+        E::Literal(l) => match &l.value {
+            L::Integer(i) => Some((*i, if fits_i32(*i) { ConstKind::Int32 } else { ConstKind::Int64 })),
+            L::Char(c) => Some((*c as i64, ConstKind::Int32)),
+            _ => None,
+        },
+        E::Parenthesized(inner) => eval_const_int_kind(inner),
+        E::Unary(u) => {
+            let (v, k) = eval_const_int_kind(&u.operand)?;
+            match u.operator {
+                U::Plus => Some((v, k)),
+                U::Minus => v.checked_neg().map(|nv| narrow(k, nv)),
+                U::BitNot => Some(narrow(k, !v)),
+                _ => None,
+            }
+        }
+        E::Binary(b) => {
+            let (lv, lk) = eval_const_int_kind(&b.left)?;
+            let (rv, rk) = eval_const_int_kind(&b.right)?;
+            let res_kind = if lk == ConstKind::Int64 || rk == ConstKind::Int64 { ConstKind::Int64 } else { ConstKind::Int32 };
+            let res = match b.operator {
+                B::Add => lv.checked_add(rv),
+                B::Sub => lv.checked_sub(rv),
+                B::Mul => lv.checked_mul(rv),
+                B::Div => if rv == 0 { None } else { Some(lv / rv) },
+                B::Mod => if rv == 0 { None } else { Some(lv % rv) },
+                B::And => Some(lv & rv),
+                B::Or => Some(lv | rv),
+                B::Xor => Some(lv ^ rv),
+                B::LShift => {
+                    let sh = (rv & if res_kind == ConstKind::Int64 { 0x3F } else { 0x1F }) as u32;
+                    Some(lv.wrapping_shl(sh))
+                }
+                B::RShift => {
+                    let sh = (rv & if res_kind == ConstKind::Int64 { 0x3F } else { 0x1F }) as u32;
+                    Some((lv as i64).wrapping_shr(sh))
+                }
+                B::URShift => {
+                    let sh = (rv & if res_kind == ConstKind::Int64 { 0x3F } else { 0x1F }) as u32;
+                    let lu = lv as u64; Some((lu.wrapping_shr(sh)) as i64)
+                }
+                _ => None,
+            }?;
+            Some(narrow(res_kind, res).into())
+        }
+        E::Cast(c) => {
+            let (v, _k) = eval_const_int_kind(&c.expr)?;
+            Some(narrow_to_target(c.target_type.name.as_str(), v))
+        }
+        _ => None,
+    }
+}
+
+fn fold_selector_value_for_int_switch(expr: &Expr) -> Option<i32> {
+    let (v, k) = eval_const_int_kind(expr)?;
+    match k { ConstKind::Int32 => Some(v as i32), ConstKind::Int64 => None }
+}
+
+fn fold_case_value_for_int_switch(expr: &Expr) -> Option<i32> {
+    let (v, k) = eval_const_int_kind(expr)?;
+    match k { ConstKind::Int32 => Some(v as i32), ConstKind::Int64 => None }
+}
+
+// Try fold enum selector to an ordinal by resolving identifier against an enum constant index in current compilation unit.
+fn fold_selector_value_for_enum_switch(ast: &crate::ast::Ast, expr: &Expr) -> Option<(String, usize)> {
+    use crate::ast::Expr as E;
+    if let E::FieldAccess(fa) = expr {
+        if let Some(target) = &fa.target {
+            if let E::Identifier(id) = &**target {
+                for td in &ast.type_decls {
+                    if let crate::ast::TypeDecl::Enum(e) = td {
+                        if e.name == id.name {
+                            for (idx, c) in e.constants.iter().enumerate() {
+                                if c.name == fa.name { return Some((e.name.clone(), idx)); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn fold_case_value_for_enum_switch(enum_name: &str, ast: &crate::ast::Ast, expr: &Expr) -> Option<usize> {
+    use crate::ast::Expr as E;
+    if let E::Identifier(id) = expr {
+        for td in &ast.type_decls {
+            if let crate::ast::TypeDecl::Enum(e) = td { if e.name == enum_name {
+                for (idx, c) in e.constants.iter().enumerate() { if c.name == id.name { return Some(idx); } }
+            }}
+        }
+    } else if let E::FieldAccess(fa) = expr {
+        if let Some(target) = &fa.target {
+            if let E::Identifier(id) = &**target {
+                if id.name == enum_name {
+                    for td in &ast.type_decls {
+                        if let crate::ast::TypeDecl::Enum(e) = td { if e.name == enum_name {
+                            for (idx, c) in e.constants.iter().enumerate() { if c.name == fa.name { return Some(idx); } }
+                        }}
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // Arity checking (subset): Walk statements and check simple call arity vs declared methods in the same class
 pub(crate) fn review_statement_arity(_current_type: &str, _stmt: &Stmt) -> ReviewResult<()> {
     // Placeholder: actual arity checks will need expression tree and a symbol table of methods
@@ -112,16 +249,44 @@ pub(crate) fn review_body_call_arity(
 }
 
 // Local variable duplicate detection and simple initializer compatibility in a single pass
-pub(crate) fn review_body_locals_and_inits(body: &Block, final_params: &HashSet<String>) -> ReviewResult<()> {
+pub(crate) fn review_body_locals_and_inits(
+    body: &Block,
+    final_params: &HashSet<String>,
+    global: Option<&crate::review::types::GlobalMemberIndex>,
+) -> ReviewResult<()> {
     let mut scope_stack: Vec<HashMap<String, bool>> = vec![HashMap::new()]; // bool: definitely assigned
-    walk_stmt_locals(body, &mut scope_stack, final_params, false)
+    walk_stmt_locals(body, &mut scope_stack, final_params, false, global)
 }
 
-fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, final_params: &HashSet<String>, inside_loop: bool) -> ReviewResult<()> {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EnumIndex {
+    pub map: std::collections::HashMap<String, std::collections::HashMap<String, usize>>, // enum -> const -> ordinal
+}
+
+pub(crate) fn build_enum_index(ast: &crate::ast::Ast) -> EnumIndex {
+    use std::collections::HashMap;
+    let mut idx = EnumIndex { map: HashMap::new() };
+    for td in &ast.type_decls {
+        if let crate::ast::TypeDecl::Enum(e) = td {
+            let mut inner = HashMap::new();
+            for (i, c) in e.constants.iter().enumerate() { inner.insert(c.name.clone(), i); }
+            idx.map.insert(e.name.clone(), inner);
+        }
+    }
+    idx
+}
+
+fn walk_stmt_locals(
+    block: &Block,
+    scopes: &mut Vec<HashMap<String, bool>>,
+    final_params: &HashSet<String>,
+    inside_loop: bool,
+    global: Option<&crate::review::types::GlobalMemberIndex>,
+) -> ReviewResult<()> {
     scopes.push(HashMap::new());
     let mut terminated = false;
     for s in &block.statements {
-        if terminated { break; }
+        if terminated { return Err(ReviewError::UnreachableStatement); }
         match s {
             Stmt::Declaration(vd) => {
                 // Borrow current scope immutably for checks, then mutate after
@@ -155,15 +320,15 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
                     }
                 }
             }
-            Stmt::Block(b) => { walk_stmt_locals(b, scopes, final_params, inside_loop)?; }
+            Stmt::Block(b) => { walk_stmt_locals(b, scopes, final_params, inside_loop, global)?; }
             Stmt::If(ifstmt) => {
                 // Merge DA across branches: assigned only if assigned in both branches
                 let current_names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
                 let mut then_scopes = scopes.clone();
                 let mut else_scopes = scopes.clone();
-                walk_stmt_locals(&Block { statements: vec![(*ifstmt.then_branch.clone())], span: ifstmt.span }, &mut then_scopes, final_params, inside_loop)?;
+                walk_stmt_locals(&Block { statements: vec![(*ifstmt.then_branch.clone())], span: ifstmt.span }, &mut then_scopes, final_params, inside_loop, global)?;
                 if let Some(else_b) = &ifstmt.else_branch {
-                    walk_stmt_locals(&Block { statements: vec![(**else_b).clone()], span: ifstmt.span }, &mut else_scopes, final_params, inside_loop)?;
+                    walk_stmt_locals(&Block { statements: vec![(**else_b).clone()], span: ifstmt.span }, &mut else_scopes, final_params, inside_loop, global)?;
                 }
                 let then_top = then_scopes.last().unwrap();
                 let else_top = else_scopes.last().unwrap();
@@ -171,9 +336,7 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
                 for name in current_names {
                     let t = then_top.get(&name).copied().unwrap_or(false);
                     let e = if ifstmt.else_branch.is_some() { else_top.get(&name).copied().unwrap_or(false) } else { false };
-                    if t && e {
-                        cur_top.insert(name, true);
-                    }
+                    if t && e { cur_top.insert(name, true); }
                 }
             }
             Stmt::While(w) => {
@@ -188,7 +351,7 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
                     } else {
                         // Fallback to conservative propagation via body analysis
                         let mut then_scopes = scopes.clone();
-                        walk_stmt_locals(&Block { statements: vec![(*w.body.clone())], span: w.span }, &mut then_scopes, final_params, true)?;
+                        walk_stmt_locals(&Block { statements: vec![(*w.body.clone())], span: w.span }, &mut then_scopes, final_params, true, global)?;
                         let then_top = then_scopes.last().unwrap();
                         let cur_top = scopes.last_mut().unwrap();
                         for (name, assigned) in then_top.iter() { if *assigned { cur_top.insert(name.clone(), true); } }
@@ -208,7 +371,7 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
             Stmt::For(f) => {
                 if f.condition.is_none() {
                     let mut then_scopes = scopes.clone();
-                    walk_stmt_locals(&Block { statements: vec![(*f.body.clone())], span: f.span }, &mut then_scopes, final_params, true)?;
+                    walk_stmt_locals(&Block { statements: vec![(*f.body.clone())], span: f.span }, &mut then_scopes, final_params, true, global)?;
                     let then_top = then_scopes.last().unwrap();
                     let cur_top = scopes.last_mut().unwrap();
                     for (name, assigned) in then_top.iter() {
@@ -229,19 +392,19 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
                 let names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
                 // try
                 let mut try_scopes = scopes.clone();
-                walk_stmt_locals(&Block { statements: t.try_block.statements.clone(), span: t.try_block.span }, &mut try_scopes, final_params, inside_loop)?;
+                walk_stmt_locals(&Block { statements: t.try_block.statements.clone(), span: t.try_block.span }, &mut try_scopes, final_params, inside_loop, global)?;
                 let try_top = try_scopes.last().unwrap();
                 // catches
                 let mut catches_tops: Vec<std::collections::HashMap<String, bool>> = Vec::new();
                 for cc in &t.catch_clauses {
                     let mut c_scopes = scopes.clone();
-                    walk_stmt_locals(&Block { statements: cc.block.statements.clone(), span: cc.block.span }, &mut c_scopes, final_params, inside_loop)?;
+                    walk_stmt_locals(&Block { statements: cc.block.statements.clone(), span: cc.block.span }, &mut c_scopes, final_params, inside_loop, global)?;
                     catches_tops.push(c_scopes.last().unwrap().clone());
                 }
                 // finally
                 let finally_top_opt = if let Some(fin) = &t.finally_block {
                     let mut f_scopes = scopes.clone();
-                    walk_stmt_locals(&Block { statements: fin.statements.clone(), span: fin.span }, &mut f_scopes, final_params, inside_loop)?;
+                    walk_stmt_locals(&Block { statements: fin.statements.clone(), span: fin.span }, &mut f_scopes, final_params, inside_loop, global)?;
                     Some(f_scopes.last().unwrap().clone())
                 } else { None };
                 // Merge rule (approx JVMS/JLS): DA_out = (DA_try) OR (intersection over all catches) OR (DA_finally)
@@ -261,22 +424,55 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
                 // Improved merge: model fall-through by concatenating statements from each starting case to the end
                 let names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
                 let has_default = sw.cases.iter().any(|c| c.labels.is_empty());
-                let mut exit_maps: Vec<std::collections::HashMap<String, bool>> = Vec::new();
-                for start in 0..sw.cases.len() {
-                    // Each labeled case start is a possible entry when its label matches
-                    if sw.cases[start].labels.is_empty() {
-                        // default is handled as a normal start too
+                // Basic diagnostics: multiple defaults and duplicate constant labels (with constant folding)
+                let mut default_count = 0usize;
+                let mut seen_labels: std::collections::HashSet<i32> = std::collections::HashSet::new();
+                for c in &sw.cases {
+                    if c.labels.is_empty() { default_count += 1; }
+                    for lab in &c.labels {
+                        if let Some(v) = fold_case_value_for_int_switch(lab) {
+                            if !seen_labels.insert(v) {
+                                return Err(ReviewError::DuplicateSwitchCaseLabel(format!("{}", v)));
+                            }
+                        }
                     }
-                    let mut stmts: Vec<Stmt> = Vec::new();
-                    for c in &sw.cases[start..] { stmts.extend(c.statements.clone()); }
-                    let block = Block { statements: stmts, span: sw.span };
-                    let mut c_scopes = scopes.clone();
-                    walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop)?;
-                    exit_maps.push(c_scopes.last().unwrap().clone());
                 }
-                // If no default, include the path that executes no case at all (falls through to after switch)
-                if !has_default {
-                    exit_maps.push(scopes.last().unwrap().clone());
+                if default_count > 1 { return Err(ReviewError::MultipleSwitchDefaults); }
+                let mut exit_maps: Vec<std::collections::HashMap<String, bool>> = Vec::new();
+                // If switch expression is a constant, evaluate the single reachable fallthrough path
+                let expr_val = fold_selector_value_for_int_switch(&sw.expression);
+                if let Some(v) = expr_val {
+                    let default_index = sw.cases.iter().position(|c| c.labels.is_empty());
+                    let mut match_index: Option<usize> = None;
+                    for (idx, c) in sw.cases.iter().enumerate() {
+                        if c.labels.iter().any(|lab| fold_case_value_for_int_switch(lab) == Some(v)) {
+                            match_index = Some(idx);
+                            break;
+                        }
+                    }
+                    if let Some(start) = match_index.or(default_index) {
+                        let mut stmts: Vec<Stmt> = Vec::new();
+                        for c in &sw.cases[start..] { stmts.extend(c.statements.clone()); }
+                        let block = Block { statements: stmts, span: sw.span };
+                        let mut c_scopes = scopes.clone();
+                        walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global)?;
+                        exit_maps.push(c_scopes.last().unwrap().clone());
+                    } else {
+                        // constant but no matching label and no default: no statements execute
+                        exit_maps.push(scopes.last().unwrap().clone());
+                    }
+                } else {
+                    // Non-constant: consider all possible case entry points with fallthrough
+                    for start in 0..sw.cases.len() {
+                        let mut stmts: Vec<Stmt> = Vec::new();
+                        for c in &sw.cases[start..] { stmts.extend(c.statements.clone()); }
+                        let block = Block { statements: stmts, span: sw.span };
+                        let mut c_scopes = scopes.clone();
+                        walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global)?;
+                        exit_maps.push(c_scopes.last().unwrap().clone());
+                    }
+                    // If no default, include the path that executes no case at all (falls through to after switch)
+                    if !has_default { exit_maps.push(scopes.last().unwrap().clone()); }
                 }
                 let cur_top = scopes.last_mut().unwrap();
                 for n in names {
@@ -284,13 +480,14 @@ fn walk_stmt_locals(block: &Block, scopes: &mut Vec<HashMap<String, bool>>, fina
                         cur_top.insert(n, true);
                     }
                 }
+                // Basic reachability diagnostic for obviously empty switch with default that throws/returns not present; if switch has default with no statements, nothing to diagnose; more precise case label reachability would require const folding.
             }
             Stmt::Labeled(ls) => {
                 // Evaluate labeled statement in a cloned scope but compare at the same scope depth
                 let base_index = scopes.len() - 1;
                 let names: Vec<String> = scopes[base_index].keys().cloned().collect();
                 let mut tmp_scopes = scopes.clone();
-                walk_stmt_locals(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, &mut tmp_scopes, final_params, inside_loop)?;
+                walk_stmt_locals(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, &mut tmp_scopes, final_params, inside_loop, global)?;
                 let nested_same_depth = &tmp_scopes[base_index];
                 let cur_top = scopes.last_mut().unwrap();
                 for n in names {
@@ -390,8 +587,15 @@ pub(crate) fn resolve_type_in_index<'a>(global: &'a crate::review::types::Global
 /// Treats `Object` as a universal super type.
 pub(crate) fn is_reference_assignable(global: &crate::review::types::GlobalMemberIndex, src: &str, dst: &str) -> bool {
     if dst == "Object" { return true; }
+    // array covariance and Object/Cloneable/Serializable
+    if src.ends_with("[]") && dst.ends_with("[]") {
+        let s = &src[..src.len()-2];
+        let d = &dst[..dst.len()-2];
+        return is_reference_assignable(global, s, d);
+    }
+    if src.ends_with("[]") && (dst == "Object" || dst == "Cloneable" || dst == "Serializable") { return true; }
     if src == dst { return true; }
-    // Walk up from src following super_name
+    // Walk up from src following super_name; also consider interfaces
     let mut cur_name = src.to_string();
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -401,6 +605,10 @@ pub(crate) fn is_reference_assignable(global: &crate::review::types::GlobalMembe
                 if !seen.insert(sup.clone()) { return false; }
                 cur_name = sup.clone();
                 continue;
+            }
+            // check interfaces implemented by current
+            for itf in &mt.interfaces {
+                if itf == dst { return true; }
             }
         }
         return false;
@@ -605,16 +813,8 @@ fn walk_expr(
                             let found_list: Vec<&str> = found_types.iter().map(|o| o.unwrap()).collect();
                             let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
                             for sig in cands {
-                                if sig.len() == found_list.len() {
-                                    let mut ok = true;
-                                    let mut cost: u32 = 0;
-                                    let mut convs: u32 = 0;
-                                    for (exp, f) in sig.iter().zip(found_list.iter()) {
-                                        if !is_assignable_primitive_or_string(exp.as_str(), f) { ok = false; break; }
-                                        if exp.as_str() != *f { convs += 1; }
-                                        cost += widening_cost(exp.as_str(), f);
-                                    }
-                                    if ok { applicable.push((sig, cost, convs)); }
+                                if let Some((cost, convs)) = calc_cost_with_varargs(sig, &found_list, varargs_min.get(&mc.name).copied()) {
+                                    applicable.push((sig, cost, convs));
                                 }
                             }
                             if applicable.is_empty() && !cands.is_empty() {
@@ -637,9 +837,12 @@ fn walk_expr(
                                     let min_cost = applicable.iter().map(|(_, c, _)| *c).min().unwrap();
                                     let tied: Vec<&Vec<String>> = applicable.iter().filter(|(_, c, _)| *c == min_cost).map(|(s, _, _)| *s).collect();
                                     if tied.len() > 1 {
-                                        let candidates = tied.iter().map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
-                                        let found = found_list.join(",");
-                                        return Err(ReviewError::AmbiguousMethod { name: mc.name.clone(), candidates, found });
+                                        let ok = break_specificity_tie(&tied, global);
+                                        if !ok {
+                                            let candidates = tied.iter().map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                            let found = found_list.join(",");
+                                            return Err(ReviewError::AmbiguousMethod { name: mc.name.clone(), candidates, found });
+                                        }
                                     }
                                 }
                             }
@@ -786,8 +989,10 @@ fn walk_expr(
                         for (i, targ) in c.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
                                 for b in bounds {
-                                    if !is_reference_assignable(g, &targ.name, b) {
-                                        return Err(ReviewError::GenericBoundViolation { typename: c.target_type.name.clone(), bound: b.clone(), found: targ.name.clone() });
+                                    if let Some(tname) = typearg_to_simple_name(targ) {
+                                        if !is_reference_assignable(g, &tname, b) {
+                                            return Err(ReviewError::GenericBoundViolation { typename: c.target_type.name.clone(), bound: b.clone(), found: tname });
+                                        }
                                     }
                                 }
                             }
@@ -807,8 +1012,10 @@ fn walk_expr(
                         for (i, targ) in io.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
                                 for b in bounds {
-                                    if !is_reference_assignable(g, &targ.name, b) {
-                                        return Err(ReviewError::GenericBoundViolation { typename: io.target_type.name.clone(), bound: b.clone(), found: targ.name.clone() });
+                                    if let Some(tname) = typearg_to_simple_name(targ) {
+                                        if !is_reference_assignable(g, &tname, b) {
+                                            return Err(ReviewError::GenericBoundViolation { typename: io.target_type.name.clone(), bound: b.clone(), found: tname });
+                                        }
                                     }
                                 }
                             }
@@ -898,8 +1105,10 @@ fn walk_expr(
                         for (i, targ) in n.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
                                 for b in bounds {
-                                    if !is_reference_assignable(g, &targ.name, b) {
-                                        return Err(ReviewError::GenericBoundViolation { typename: n.target_type.name.clone(), bound: b.clone(), found: targ.name.clone() });
+                                    if let Some(tname) = typearg_to_simple_name(targ) {
+                                        if !is_reference_assignable(g, &tname, b) {
+                                            return Err(ReviewError::GenericBoundViolation { typename: n.target_type.name.clone(), bound: b.clone(), found: tname });
+                                        }
                                     }
                                 }
                             }
@@ -999,6 +1208,90 @@ fn is_assignable_primitive_or_string(expected: &str, found: &str) -> bool {
         "int" => matches!(found, "char"),
         "String" => found == "String",
         _ => false,
+    }
+}
+
+fn is_wrapper_type(t: &str) -> bool {
+    matches!(t, "Integer"|"Long"|"Float"|"Double"|"Boolean"|"Character"|"String")
+}
+
+fn is_primitive_type(t: &str) -> bool {
+    matches!(t, "int"|"long"|"float"|"double"|"boolean"|"char")
+}
+
+fn boxing_partner_of(prim: &str) -> Option<&'static str> {
+    match prim {
+        "int" => Some("Integer"),
+        "long" => Some("Long"),
+        "float" => Some("Float"),
+        "double" => Some("Double"),
+        "boolean" => Some("Boolean"),
+        "char" => Some("Character"),
+        _ => None,
+    }
+}
+
+fn unboxing_partner_of(wrapper: &str) -> Option<&'static str> {
+    match wrapper {
+        "Integer" => Some("int"),
+        "Long" => Some("long"),
+        "Float" => Some("float"),
+        "Double" => Some("double"),
+        "Boolean" => Some("boolean"),
+        "Character" => Some("char"),
+        _ => None,
+    }
+}
+
+// Return Some(cost) if convertible, None if not applicable. Lower cost preferred.
+fn conversion_cost_with_boxing(expected: &str, found: &str) -> Option<u32> {
+    // exact
+    if expected == found { return Some(0); }
+    // null to reference/wrapper/String
+    if found == "null" {
+        if !is_primitive_type(expected) { return Some(1); } else { return None; }
+    }
+    // primitive widening
+    if is_primitive_type(expected) && is_primitive_type(found) {
+        if is_assignable_primitive_or_string(expected, found) { return Some(widening_cost(expected, found)); } else { return None; }
+    }
+    // boxing: expected wrapper, found primitive
+    if let Some(p) = unboxing_partner_of(expected) {
+        if p == found { return Some(2); }
+        // primitive -> wrapper with widening then boxing is not standard; treat as incompatible here
+    }
+    // unboxing: expected primitive, found wrapper
+    if is_primitive_type(expected) {
+        if let Some(p) = unboxing_partner_of(found) {
+            if p == expected { return Some(2); }
+            // wrapper -> primitive with unboxing and widening
+            if is_assignable_primitive_or_string(expected, p) { return Some(3); }
+        }
+    }
+    // reference equality for String covered by exact; simple fallback: allow String exact only
+    if expected == "String" && found == "String" { return Some(0); }
+    None
+}
+
+fn is_more_specific_primitive(a: &str, b: &str) -> bool {
+    // a is more specific than b if a can convert to b but not vice versa
+    match (a, b) {
+        ("char", "int") => true,
+        ("int", "long") => true,
+        ("long", "float") => true,
+        ("float", "double") => true,
+        (x, y) if x == y => false,
+        _ => false,
+    }
+}
+
+fn typearg_to_simple_name(ta: &crate::ast::TypeArg) -> Option<String> {
+    match ta {
+        crate::ast::TypeArg::Type(t) => Some(t.name.clone()),
+        crate::ast::TypeArg::Wildcard(w) => {
+            // wildcard erases to Object for upper-bound, or to bound's erasure; simplified:
+            if let Some((_bk, tr)) = &w.bound { Some(tr.name.clone()) } else { Some("Object".to_string()) }
+        }
     }
 }
 
@@ -1138,6 +1431,84 @@ fn widening_cost(expected: &str, found: &str) -> u32 {
         ("String", "String") => 0,
         _ => 5,
     }
+}
+
+fn calc_cost_with_varargs(sig: &Vec<String>, found_list: &Vec<&str>, varargs_min: Option<usize>) -> Option<(u32, u32)> {
+    let fixed_len = sig.len();
+    let has_varargs = varargs_min.is_some() && fixed_len > 0;
+    let min_arity = if has_varargs { fixed_len - 1 } else { fixed_len };
+    if found_list.len() < min_arity { return None; }
+    if !has_varargs && found_list.len() != fixed_len { return None; }
+    let mut cost: u32 = 0;
+    let mut convs: u32 = 0;
+    // fixed part
+    for i in 0..(fixed_len.saturating_sub(if has_varargs {1} else {0})) {
+        let exp = sig.get(i).unwrap();
+        let f = *found_list.get(i).unwrap_or(&"");
+        if let Some(cc) = conversion_cost_with_boxing(exp.as_str(), f) {
+            if cc > 0 { convs += 1; }
+            cost += cc;
+        } else { return None; }
+    }
+    if has_varargs {
+        let var_t = sig.last().unwrap();
+        for j in (fixed_len - 1)..found_list.len() {
+            let f = found_list[j];
+            if let Some(cc) = conversion_cost_with_boxing(var_t.as_str(), f) {
+                if cc > 0 { convs += 1; }
+                cost += cc;
+            } else { return None; }
+        }
+    } else if found_list.len() != fixed_len { return None; }
+    Some((cost, convs))
+}
+
+fn break_specificity_tie(cands: &[&Vec<String>], global: Option<&crate::review::types::GlobalMemberIndex>) -> bool {
+    if cands.is_empty() { return false; }
+    // pairwise reduction: keep a candidate that is not less specific than others and strictly more specific for at least one position
+    let mut idx_best = 0usize;
+    let mut improved = false;
+    for i in 1..cands.len() {
+        let a = cands[idx_best];
+        let b = cands[i];
+        let mut a_better_any = false;
+        let mut b_better_any = false;
+        let mut comparable_all = true;
+        for (ta, tb) in a.iter().zip(b.iter()) {
+            match more_specific_type(ta, tb, global) {
+                Some(true) => a_better_any = true,
+                Some(false) => b_better_any = true,
+                None => { /* incomparable */ }
+            }
+        }
+        // require not-worse and at least one strictly better
+        if a_better_any && !b_better_any { improved = true; continue; }
+        if b_better_any && !a_better_any { idx_best = i; improved = true; continue; }
+        // otherwise incomparable; keep existing
+        let _ = comparable_all;
+    }
+    improved
+}
+
+fn more_specific_type(a: &str, b: &str, global: Option<&crate::review::types::GlobalMemberIndex>) -> Option<bool> {
+    // return Some(true) if a < b (a is more specific), Some(false) if b < a, None if incomparable
+    // primitives chain
+    if is_primitive_type(a) && is_primitive_type(b) {
+        if is_more_specific_primitive(a, b) { return Some(true); }
+        if is_more_specific_primitive(b, a) { return Some(false); }
+        return None;
+    }
+    // wrapper vs Object
+    if a == "Object" && b != "Object" { return Some(false); }
+    if b == "Object" && a != "Object" { return Some(true); }
+    // reference assignability via global
+    if let Some(g) = global {
+        let a_to_b = is_reference_assignable(g, a, b);
+        let b_to_a = is_reference_assignable(g, b, a);
+        if a_to_b && !b_to_a { return Some(true); }
+        if b_to_a && !a_to_b { return Some(false); }
+    }
+    None
 }
 
 

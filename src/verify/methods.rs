@@ -1,5 +1,6 @@
 use crate::codegen::class::ClassFile;
 use crate::codegen::constpool::Constant;
+use crate::codegen::frame::VerificationType;
 use super::method_access_flags;
 use crate::codegen::opcodes;
 use crate::codegen::attribute::AttributeInfo;
@@ -175,6 +176,21 @@ fn verify_method_attributes(class_file: &ClassFile, method: &crate::codegen::met
                                 if stack_len > code_attr.max_stack as usize {
                                     return Err(MethodVerifyError::InvalidMethodAttribute("StackMapTable stack exceed max_stack".to_string()));
                                 }
+                                // Basic verification_type_info validation
+                                match f.clone() {
+                                    StackMapFrame::Full { locals, stack, .. } => {
+                                        validate_verification_types(class_file, &locals)?;
+                                        validate_verification_types(class_file, &stack)?;
+                                    }
+                                    StackMapFrame::Append { locals, .. } => {
+                                        validate_verification_types(class_file, &locals)?;
+                                    }
+                                    StackMapFrame::SameLocals1StackItem { stack, .. }
+                                    | StackMapFrame::SameLocals1StackItemExtended { stack, .. } => {
+                                        validate_verification_types(class_file, &vec![stack])?;
+                                    }
+                                    _ => {}
+                                }
                                 prev_locals_len = Some(locals_len);
                                 prev_pc = current_pc;
                             }
@@ -339,6 +355,32 @@ fn cp_utf8(class_file: &ClassFile, idx_u16: u16) -> Result<String> {
         None => Err(MethodVerifyError::InvalidConstantPoolIndex(idx_u16)),
         _ => Err(MethodVerifyError::InvalidConstantPoolIndexType(idx_u16)),
     }
+}
+
+fn validate_verification_types(class_file: &ClassFile, types: &Vec<VerificationType>) -> Result<()> {
+    for t in types {
+        match t {
+            VerificationType::Top
+            | VerificationType::Integer
+            | VerificationType::Float
+            | VerificationType::Double
+            | VerificationType::Long
+            | VerificationType::Null
+            | VerificationType::UninitializedThis => {}
+            VerificationType::Object(idx) => {
+                let i = (*idx as usize).saturating_sub(1);
+                match class_file.constant_pool.constants.get(i) {
+                    Some(Constant::Class(_)) => {}
+                    None => return Err(MethodVerifyError::InvalidConstantPoolIndex(*idx)),
+                    _ => return Err(MethodVerifyError::InvalidConstantPoolIndexType(*idx)),
+                }
+            }
+            VerificationType::Uninitialized(_off) => {
+                // Could check that offset corresponds to a new instruction; skipped for now.
+            }
+        }
+    }
+    Ok(())
 }
 
 

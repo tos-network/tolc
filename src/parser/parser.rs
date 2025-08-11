@@ -4,6 +4,7 @@
 
 use super::{lexer::{Lexer, LexicalToken, Token}, error::ParseError};
 use crate::ast::*;
+use crate::ast::{TypeArg, BoundKind};
 use crate::error::Result;
 
 /// Parser for Terminos Language
@@ -454,25 +455,6 @@ impl Parser {
                 let tok = self.advance();
                 tok.lexeme().to_string()
             }
-            Token::Question => {
-                let _q = self.advance();
-                let mut wildcard_name = "?".to_string();
-                if self.match_token(&Token::Extends) {
-                    let bound = self.parse_type_ref()?;
-                    wildcard_name = "?extends".to_string();
-                    let end_span = self.previous_span();
-                    let span = Span::new(start_span.start, end_span.end);
-                    return Ok(TypeRef { name: wildcard_name, type_args: vec![bound], array_dims: 0, span });
-                } else if self.match_token(&Token::Super) {
-                    let bound = self.parse_type_ref()?;
-                    wildcard_name = "?super".to_string();
-                    let end_span = self.previous_span();
-                    let span = Span::new(start_span.start, end_span.end);
-                    return Ok(TypeRef { name: wildcard_name, type_args: vec![bound], array_dims: 0, span });
-                } else {
-                    return Ok(TypeRef { name: wildcard_name, type_args: Vec::new(), array_dims: 0, span: start_span });
-                }
-            }
             Token::Identifier => self.parse_qualified_name()?,
             _ => {
                 let current = self.peek();
@@ -485,7 +467,7 @@ impl Parser {
         };
         
         let type_args = if self.check(&Token::Lt) {
-            self.parse_type_arguments()?
+            self.parse_type_arguments_typearg()?
         } else {
             Vec::new()
         };
@@ -507,20 +489,31 @@ impl Parser {
         })
     }
     
-    fn parse_type_arguments(&mut self) -> Result<Vec<TypeRef>> {
+    fn parse_type_arguments(&mut self) -> Result<Vec<TypeRef>> { unreachable!("legacy parse_type_arguments should not be called") }
+
+    fn parse_type_arguments_typearg(&mut self) -> Result<Vec<TypeArg>> {
         self.consume(&Token::Lt, "Expected '<' for type arguments")?;
-        
         let mut args = Vec::new();
         loop {
-            args.push(self.parse_type_ref()?);
-            
-            if !self.match_token(&Token::Comma) {
-                break;
+            if self.check(&Token::Question) {
+                let loc = self.advance().location();
+                let mut bound = None;
+                if self.match_token(&Token::Extends) {
+                    let tr = self.parse_type_ref()?;
+                    bound = Some((BoundKind::Extends, tr));
+                } else if self.match_token(&Token::Super) {
+                    let tr = self.parse_type_ref()?;
+                    bound = Some((BoundKind::Super, tr));
+                }
+                let sp = crate::ast::Span::new(loc, loc);
+                args.push(TypeArg::Wildcard(WildcardType { bound, span: sp }));
+            } else {
+                let tr = self.parse_type_ref()?;
+                args.push(TypeArg::Type(tr));
             }
+            if !self.match_token(&Token::Comma) { break; }
         }
-        
         self.consume_generic_gt()?;
-        
         Ok(args)
     }
     
@@ -1881,7 +1874,7 @@ impl Parser {
         };
 
         // Optional type arguments: either diamond operator <> or explicit <T,...>
-        let mut type_args: Vec<TypeRef> = Vec::new();
+        let mut type_args: Vec<TypeArg> = Vec::new();
         if self.check(&Token::Lt) {
             // Lookahead one token to see if it's a diamond operator
             let save = self.current;
@@ -1892,7 +1885,7 @@ impl Parser {
             } else {
                 // Not diamond; rewind and parse full type arguments
                 self.current = save;
-                type_args = self.parse_type_arguments()?;
+                type_args = self.parse_type_arguments_typearg()?;
             }
         }
 

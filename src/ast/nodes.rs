@@ -194,7 +194,7 @@ pub enum AnnotationArg {
 #[derive(Debug, Clone)]
 pub struct TypeRef {
     pub name: String,
-    pub type_args: Vec<TypeRef>,
+    pub type_args: Vec<TypeArg>,
     pub array_dims: usize,
     pub span: Span,
 }
@@ -208,6 +208,21 @@ impl AstNode for TypeRef {
         visitor.visit_type_ref(self)
     }
 }
+
+#[derive(Debug, Clone)]
+pub enum TypeArg {
+    Type(TypeRef),
+    Wildcard(WildcardType),
+}
+
+#[derive(Debug, Clone)]
+pub struct WildcardType {
+    pub bound: Option<(BoundKind, TypeRef)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BoundKind { Extends, Super }
 
 #[derive(Debug, Clone)]
 pub struct TypeParam {

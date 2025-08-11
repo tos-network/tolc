@@ -16,6 +16,7 @@ pub(crate) struct MemberTables {
     pub type_param_count: usize,
     pub type_param_bounds: Vec<Vec<String>>, // simple names of bounds per type parameter
     pub super_name: Option<String>,
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -27,10 +28,11 @@ pub(crate) struct GlobalMemberIndex {
     // Static imports
     pub static_explicit: HashMap<String, String>, // member name -> type name
     pub static_wildcard: Vec<String>,             // type names providing *
+    pub enum_index: HashMap<String, HashMap<String, usize>>, // enum -> const -> ordinal
 }
 
 fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
-    let mut idx = GlobalMemberIndex { by_type: HashMap::new(), imports: Vec::new(), package: None, wildcard_imports: Vec::new(), static_explicit: HashMap::new(), static_wildcard: Vec::new() };
+    let mut idx = GlobalMemberIndex { by_type: HashMap::new(), imports: Vec::new(), package: None, wildcard_imports: Vec::new(), static_explicit: HashMap::new(), static_wildcard: Vec::new(), enum_index: HashMap::new() };
     // record package
     idx.package = ast.package_decl.as_ref().map(|p| p.name.clone());
     // record simple imports
@@ -107,6 +109,8 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             for v in mt.ctors_arities.values_mut() { v.sort_unstable(); v.dedup(); }
             // record immediate superclass simple name if present
             if let Some(ext) = &c.extends { mt.super_name = Some(ext.name.clone()); } else { mt.super_name = None; }
+            // record implemented interfaces
+            mt.interfaces = c.implements.iter().map(|t| t.name.clone()).collect();
             // insert by simple name
             idx.by_type.insert(c.name.clone(), mt.clone());
             // and fully qualified if package exists
@@ -117,6 +121,22 @@ fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                 // also echo simple for completeness
                 idx.by_type.insert(c.name.clone(), mt);
             }
+        } else if let TypeDecl::Interface(i) = td {
+            let mut mt = MemberTables::default();
+            mt.type_param_count = i.type_params.len();
+            mt.interfaces = i.extends.iter().map(|t| t.name.clone()).collect();
+            idx.by_type.insert(i.name.clone(), mt.clone());
+            if let Some(pkg) = &idx.package {
+                let fq = format!("{}.{}", pkg, i.name);
+                idx.by_type.insert(fq, mt);
+            } else {
+                idx.by_type.insert(i.name.clone(), mt);
+            }
+        } else if let TypeDecl::Enum(e) = td {
+            // record enum constants ordinals
+            let mut inner: HashMap<String, usize> = HashMap::new();
+            for (i, c) in e.constants.iter().enumerate() { inner.insert(c.name.clone(), i); }
+            idx.enum_index.insert(e.name.clone(), inner);
         }
     }
     idx

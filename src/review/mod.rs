@@ -62,6 +62,20 @@ pub enum ReviewError {
     IllegalEnumConstructorVisibility(String),
     #[error("illegal modifier combination for constructor '{0}'")]
     IllegalConstructorModifiers(String),
+    #[error("unreported checked exception '{0}' thrown")]
+    UnreportedCheckedException(String),
+    #[error("final field '{0}' must be assigned exactly once in each constructor path or have an initializer")]
+    FinalFieldNotAssigned(String),
+    #[error("final field '{0}' is assigned more than once in constructor")]
+    FinalFieldMultipleAssignment(String),
+    #[error("final field '{0}' already has an initializer; cannot assign again in constructor")]
+    FinalFieldAssignedInConstructorWithInitializer(String),
+    #[error("unreachable statement")]
+    UnreachableStatement,
+    #[error("duplicate switch case label '{0}'")]
+    DuplicateSwitchCaseLabel(String),
+    #[error("multiple default labels in switch")] 
+    MultipleSwitchDefaults,
 }
 
 /// AST-level review before codegen

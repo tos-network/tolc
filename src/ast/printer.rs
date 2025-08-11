@@ -832,7 +832,16 @@ impl AstVisitor for AstPrinter {
                 if i > 0 {
                     self.output.push_str(", ");
                 }
-                self.visit_type_ref(arg);
+                match arg {
+                    crate::ast::TypeArg::Type(t) => self.visit_type_ref(t),
+                    crate::ast::TypeArg::Wildcard(w) => {
+                        self.output.push('?');
+                        if let Some((bk, tr)) = &w.bound {
+                            match bk { crate::ast::BoundKind::Extends => self.output.push_str(" extends "), crate::ast::BoundKind::Super => self.output.push_str(" super "), }
+                            self.visit_type_ref(tr);
+                        }
+                    }
+                }
             }
             self.output.push('>');
         }
