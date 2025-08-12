@@ -44,14 +44,14 @@ Notes
 | Names/descriptors | Method/field name and descriptor indices must be Utf8 | ✓ | `verify/methods.rs`; `verify/fields.rs` | Attr | — |
 | Overload resolution | Ambiguity detection and “more specific” tie-break | ✓ | `review/statements.rs`; tests: `review_overload_resolution_tests.rs` | Resolve | Implemented tie-break order: exact conversions first; then minimal number of conversions; then minimal widening cost; then prefer fixed arity over varargs; otherwise report ambiguity. Reference assignability considered for specificity when available. |
 | Overload resolution | Arity match; varargs minimum arity | ✓ | `review/statements.rs` | Resolve | Local class/static imports |
-| Overload resolution | Literal-driven applicability (widen/box/unbox) and simple ranking | ◐ | `review/statements.rs` | Resolve/Attr | Primitive + String; boxing/unboxing and simple reference assignability via hierarchy; varargs handled with same conversion model; arity-only fallback in compat mode; simplified cost model |
+| Overload resolution | Literal-driven applicability (widen/box/unbox) and simple ranking | ✓ | review/statements.rs<br/>tests: review_overload_resolution_tests.rs | Resolve/Attr | Literal inference for primitives/String/null; applicability via widening/boxing/unboxing with cumulative cost; ranking by exact → minimal conversions → minimal widening cost → fixed-arity over varargs; compat-mode arity fallback retained. |
 | Packages/imports | Duplicate imports | ✓ | `review/imports.rs`; tests: `review_import_tests.rs` | Enter/Check | — |
 | Packages/imports | Non-empty package name when present | ✓ | `review/package.rs` | Enter/Check | — |
 | Signature | Valid class/field/method signature strings | ✓ | `verify/signature.rs`; `verify/attributes.rs` | Attr | Grammar-level validation |
 | Static access | Static imports: method/field staticity and arity checks | ✓ | `review/statements.rs`, `review/fields.rs`; tests | Resolve/Enter | — |
 | Static access | `TypeName.m(...)` / `TypeName.f` must be static | ✓ | `review/statements.rs`, `review/fields.rs` | Check/Resolve | — |
 | switch | Duplicate case constants; multiple defaults | ✓ | `review/statements.rs`; tests | Flow | int constant folding subset |
-| switch | Effect of default on DA | ◐ | `review/statements.rs`; tests | Flow | Subset |
+| switch | Effect of default on DA | ✓ | review/statements.rs (walk_stmt_locals: Switch), tests: switch_tests.rs | Flow | Default considered in DA merge: constant selector evaluates single fallthrough path; non-constant enumerates all case-entry fallthrough paths; if no default, include the empty path; DA after switch is the intersection across all exits. |
 | Types/declarations | Duplicate type names in a CU | ✓ | `review/types.rs` | Enter/Check | — |
 | Types/declarations | Empty type names rejected | ✓ | `review/types.rs` | Check | — |
 | Types/declarations | Interface cannot be final | ✓ | `verify/mod.rs` | Check | — |
