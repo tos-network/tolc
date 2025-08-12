@@ -601,7 +601,14 @@ impl AstVisitor for AstPrinter {
                 for catch in &try_stmt.catch_clauses {
                     self.write_indent();
                     self.output.push_str("catch (");
-                    self.visit_parameter(&catch.parameter);
+                    // print main type and alternatives if present
+                    self.visit_type_ref(&catch.parameter.type_ref);
+                    for alt in &catch.alt_types {
+                        self.output.push_str(" | ");
+                        self.visit_type_ref(alt);
+                    }
+                    self.output.push_str(" ");
+                    self.output.push_str(&catch.parameter.name);
                     self.output.push_str(") ");
                     self.visit_block(&catch.block);
                 }

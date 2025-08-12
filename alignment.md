@@ -9,6 +9,7 @@ Environment switches and harness
 Parser and AST
 - [👌] Explicit constructor invocation: parse and model `this(...)` / `super(...)` as `ExplicitCtorInvocation` (first-statement rule enforced).
 - [👌] Parameter array dimensions: support `T x[]` post-identifier array syntax and fold into the parameter type.
+- [👌] Method-level type parameters: support method headers that start with `<T ...>`; integrates with throws/bounds handling.
 
 Global member index and nested types
 - [👌] `GlobalMemberIndex` extended with: methods/ctors arities, signatures, throws-by-signature, method metadata (visibility, static, final, abstract, return), fields (static/final), type param counts and simple bounds, package name, `is_interface`, super and interfaces.
@@ -26,6 +27,8 @@ Checked exceptions and control flow
 - [👌] Throw typing and propagation: classify throw sites (new/identifier/call), propagate checked exceptions across local and cross-type methods/constructors, including static-imported members.
 - [👌] Unchecked exceptions: treat common `RuntimeException` subclasses and `Error` as unchecked; prefer hierarchy from classpath index when available; fallback list used in compat mode.
 - [👌] Try/catch/finally: modeled with basic merging. Try-with-resources: integrate `close()` declared throws from the declared resource type; if no declared `close()` is found, fall back to interface contracts (`Closeable -> IOException`, `AutoCloseable -> Exception`). Support multiple resources and catch/throws coverage.
+- [👌] Multi-catch and precise rethrow: support `catch (A | B)` coverage and precise rethrow of catch parameters constrained to checked exceptions thrown in the corresponding try.
+- [👌] Generic throws mapping: method/class type-variable `throws` map to their upper bounds for coverage (e.g., `<X extends IOException> void m() throws X` is treated as throwing `IOException`).
 - [👌] Must-return: treat `throw` as terminal; refine `if`/`switch`/`try` return guarantees; `finally` considered.
 
 Method resolution and arity
@@ -55,4 +58,4 @@ Diagnostics
 - [👌] `log::debug!` used widely; java suite enables Debug level by default.
 
 Pending and gaps
-- None
+- None (noting that exceptions coverage follows a practical Java 8 subset; remaining edge-cases will be added on demand)

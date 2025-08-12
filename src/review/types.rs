@@ -146,10 +146,40 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
                         let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
                         mt.methods_static.entry(m.name.clone()).or_insert(is_static);
-                        let throws: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                        // Map generic type-variable throws to erased upper bounds (best-effort)
+                        let throws: Vec<String> = m.throws.iter().map(|t| {
+                            let tn = &t.name;
+                            // If resolves as a known type, keep as is
+                            if idx.by_type.contains_key(tn) { return tn.clone(); }
+                            // Method type parameter match
+                            if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                                if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                // No bound: default to Object
+                                return "Object".to_string();
+                            }
+                            // Class type parameter match
+                            if let Some(tp) = c.type_params.iter().find(|tp| &tp.name == tn) {
+                                if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                return "Object".to_string();
+                            }
+                            // Unknown simple name: keep as is (compat)
+                            tn.clone()
+                        }).collect();
                         mt.methods_throws.entry(m.name.clone()).or_default().push((arity, throws));
                         let sig_keys: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
-                        let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                        let throws_vec: Vec<String> = m.throws.iter().map(|t| {
+                            let tn = &t.name;
+                            if idx.by_type.contains_key(tn) { return tn.clone(); }
+                            if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                                if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                return "Object".to_string();
+                            }
+                            if let Some(tp) = c.type_params.iter().find(|tp| &tp.name == tn) {
+                                if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                return "Object".to_string();
+                            }
+                            tn.clone()
+                        }).collect();
                         mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig_keys.clone(), throws_vec));
                         let meta = MethodMeta {
                             signature: sig_keys,
@@ -227,7 +257,20 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                     let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
                     mt.methods_static.entry(m.name.clone()).or_insert(is_static);
                     let sig: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
-                    let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                    // Map generic type-variable throws to erased upper bounds using method or interface bounds
+                    let throws_vec: Vec<String> = m.throws.iter().map(|t| {
+                        let tn = &t.name;
+                        if idx.by_type.contains_key(tn) { return tn.clone(); }
+                        if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                            if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                            return "Object".to_string();
+                        }
+                        if let Some(tp) = i.type_params.iter().find(|tp| &tp.name == tn) {
+                            if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                            return "Object".to_string();
+                        }
+                        tn.clone()
+                    }).collect();
                     let meta = MethodMeta {
                         signature: sig.clone(),
                         visibility: visibility_of(&m.modifiers),
@@ -319,10 +362,41 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                                 mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
                                 let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
                                 mt.methods_static.entry(m.name.clone()).or_insert(is_static);
-                                let throws: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                                // Map generic type-variable throws to erased upper bounds (best-effort),
+                                // mirroring the logic used in build_global_member_index
+                                let throws: Vec<String> = m.throws.iter().map(|t| {
+                                    let tn = &t.name;
+                                    // If resolves as a known type, keep as is
+                                    if idx.by_type.contains_key(tn) { return tn.clone(); }
+                                    // Method type parameter match
+                                    if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                                        if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                        // No bound: default to Object
+                                        return "Object".to_string();
+                                    }
+                                    // Class type parameter match
+                                    if let Some(tp) = c.type_params.iter().find(|tp| &tp.name == tn) {
+                                        if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                        return "Object".to_string();
+                                    }
+                                    // Unknown simple name: keep as is (compat)
+                                    tn.clone()
+                                }).collect();
                                 mt.methods_throws.entry(m.name.clone()).or_default().push((arity, throws));
                                 let sig_keys: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
-                                let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                                let throws_vec: Vec<String> = m.throws.iter().map(|t| {
+                                    let tn = &t.name;
+                                    if idx.by_type.contains_key(tn) { return tn.clone(); }
+                                    if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                                        if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                        return "Object".to_string();
+                                    }
+                                    if let Some(tp) = c.type_params.iter().find(|tp| &tp.name == tn) {
+                                        if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                        return "Object".to_string();
+                                    }
+                                    tn.clone()
+                                }).collect();
                                 mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig_keys.clone(), throws_vec));
                                 let meta = MethodMeta {
                                     signature: sig_keys,
@@ -349,7 +423,15 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                                 let throws: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
                                 mt.ctors_throws.entry(c.name.clone()).or_default().push((arity, throws));
                                 let ct_sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
-                                let ct_thr: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
+                        let ct_thr: Vec<String> = cons.throws.iter().map(|t| {
+                            let tn = &t.name;
+                            if idx.by_type.contains_key(tn) { return tn.clone(); }
+                            if let Some(tp) = c.type_params.iter().find(|tp| &tp.name == tn) {
+                                if let Some(b) = tp.bounds.first() { return b.name.clone(); }
+                                return "Object".to_string();
+                            }
+                            tn.clone()
+                        }).collect();
                                 mt.ctors_throws_by_sig.entry(c.name.clone()).or_default().push((ct_sig, ct_thr));
                             }
                             _ => {}

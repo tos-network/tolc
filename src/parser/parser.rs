@@ -566,7 +566,8 @@ impl Parser {
             }
         }
         
-        if self.check(&Token::Void) || self.is_type_start() || self.check(&Token::At) {
+        // Also consider a leading '<' as a possible start of a method (method-level type parameters)
+        if self.check(&Token::Void) || self.is_type_start() || self.check(&Token::At) || self.check(&Token::Lt) {
             if self.lookahead_is_method_signature() {
             let method = self.parse_method_decl(modifiers)?;
             Ok(ClassMember::Method(method))
@@ -2069,13 +2070,19 @@ impl Parser {
             self.consume(&Token::LParen, "Expected '(' after catch")?;
             let modifiers = self.parse_modifiers()?;
             let type_ref = self.parse_type_ref()?;
+            // Multi-catch: parse alternative types separated by '|'
+            let mut alt_types: Vec<TypeRef> = Vec::new();
+            while self.match_token(&Token::Pipe) {
+                let alt = self.parse_type_ref()?;
+                alt_types.push(alt);
+            }
             let name = self.parse_identifier()?;
             let param_span = self.previous_span();
             let parameter = Parameter { modifiers, annotations: Vec::new(), type_ref, name, varargs: false, span: param_span };
             self.consume(&Token::RParen, "Expected ')' after catch parameter")?;
             let block = self.parse_block()?;
             let catch_span = block.span;
-            catch_clauses.push(CatchClause { parameter, block: block.clone(), span: catch_span });
+            catch_clauses.push(CatchClause { parameter, alt_types, block: block.clone(), span: catch_span });
         }
         let finally_block = if self.check(&Token::Finally) { self.advance(); Some(self.parse_block()?) } else { None };
         let span = Span::new(start.start, self.previous_span().end);

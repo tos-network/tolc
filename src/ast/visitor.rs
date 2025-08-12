@@ -342,6 +342,7 @@ where
                 self.visit_block(&try_stmt.try_block);
                 for catch in &try_stmt.catch_clauses {
                     self.visit_parameter(&catch.parameter);
+                    for alt in &catch.alt_types { self.visit_type_ref(alt); }
                     self.visit_block(&catch.block);
                 }
                 if let Some(ref finally_block) = try_stmt.finally_block {

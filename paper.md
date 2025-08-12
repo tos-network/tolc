@@ -44,9 +44,11 @@ This document outlines of tolc's compilation
     - Cross-type calls/constructors resolved via classpath index (when enabled)
   - Generics:
     - Enforce type-argument count for new/cast/instanceof; minimal upper-bound checks when bounds are present
-  - Checked exceptions (basic):
+  - Checked exceptions:
     - Classify throw sites and propagate checked exceptions across local and cross-type calls; supports static-imported members
-    - Common RuntimeException subclasses treated as unchecked (fallback); prefer hierarchy via classpath index when available
+    - RuntimeException/Error and their subclasses treated as unchecked; prefer hierarchy via classpath index when available
+    - Multi-catch and precise rethrow: catch union coverage; rethrow constrained to checked exceptions thrown in try and assignable to the catch parameter types
+    - Generic throws mapping: method/class type-variable throws map to their upper bounds (e.g., `<X extends IOException> void m() throws X` -> `IOException`) for coverage
   - Control flow:
     - Must-return: treats throw as terminal; refined if/switch/try/finally coverage
     - DA/DR seed: use-before-init for locals; branch and loop heuristics; final parameters/locals single-assignment

@@ -477,6 +477,8 @@ pub struct TryStmt {
 #[derive(Debug, Clone)]
 pub struct CatchClause {
     pub parameter: Parameter,
+    // Additional alternatives for multi-catch: catch (A | B e)
+    pub alt_types: Vec<TypeRef>,
     pub block: Block,
     pub span: Span,
 }

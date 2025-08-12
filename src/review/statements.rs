@@ -454,6 +454,25 @@ pub(crate) fn review_body_checked_exceptions(
                         if sig == arg_sig { return thr.clone(); }
                     }
                 }
+                // Try partial match: among known signatures, keep those of same arity
+                if let Some(sigs) = mt.methods_signatures.get(name) {
+                    let candidates: Vec<Vec<String>> = sigs
+                        .iter()
+                        .filter(|sig| sig.len() == arity)
+                        .cloned()
+                        .filter(|sig| {
+                            // for each position i, if arg_types[i] exists, require equality
+                            sig.iter().zip(arg_sig.iter()).all(|(s, a)| !a.is_empty() && s == a)
+                        })
+                        .collect();
+                    if candidates.len() == 1 {
+                        if let Some(list) = mt.methods_throws_by_sig.get(name) {
+                            for (sig, thr) in list {
+                                if sig == &candidates[0] { return thr.clone(); }
+                            }
+                        }
+                    }
+                }
             }
             // Fallback by arity, union across entries for robustness
             let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -472,6 +491,23 @@ pub(crate) fn review_body_checked_exceptions(
                 if let Some(list) = mt.ctors_throws_by_sig.get(self_type) {
                     for (sig, thr) in list {
                         if sig == arg_sig { return thr.clone(); }
+                    }
+                }
+                if let Some(sigs) = mt.ctors_signatures.get(self_type) {
+                    let candidates: Vec<Vec<String>> = sigs
+                        .iter()
+                        .filter(|sig| sig.len() == arity)
+                        .cloned()
+                        .filter(|sig| {
+                            sig.iter().zip(arg_sig.iter()).all(|(s, a)| !a.is_empty() && s == a)
+                        })
+                        .collect();
+                    if candidates.len() == 1 {
+                        if let Some(list) = mt.ctors_throws_by_sig.get(self_type) {
+                            for (sig, thr) in list {
+                                if sig == &candidates[0] { return thr.clone(); }
+                            }
+                        }
                     }
                 }
             }
@@ -504,14 +540,59 @@ pub(crate) fn review_body_checked_exceptions(
                     if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
                         let arity = mc.arguments.len();
                         let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
-                        let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
+                        let mut thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
+                        // Always augment with AST scan mapped by method type param bounds to avoid index gaps
+                        let mut union_throws: HashSet<String> = HashSet::new();
+                        // Track throws that originate from method type parameters whose bound is exactly 'Exception'
+                        let mut skip_exact_exception: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        for member in &current_class.body {
+                            if let ClassMember::Method(m) = member {
+                                if m.name == mc.name && m.parameters.len() == arity {
+                                    for t in &m.throws {
+                                        let tn = &t.name;
+                                        if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                                            if let Some(b) = tp.bounds.first() {
+                                                union_throws.insert(b.name.clone());
+                                                if b.name == "Exception" { skip_exact_exception.insert("Exception".to_string()); }
+                                            } else {
+                                                union_throws.insert("Object".to_string());
+                                            }
+                                        } else {
+                                            union_throws.insert(tn.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        thr.extend(union_throws.into_iter());
                         super::debug_log(format!("call throws (local): {}.{}({}) -> {:?}", current_class.name, mc.name, arity, thr));
-                        for t in &thr { require(t)?; }
+                        for t in &thr {
+                            // Heuristic: do not require coverage for method-level generic throws whose erased bound is exactly 'Exception'
+                            if skip_exact_exception.contains(t) { continue; }
+                            require(t)?;
+                        }
                     } else {
-                        // Fallback to scanning current class AST
+                        // Fallback to scanning current class AST, mapping method type parameter throws
+                        // to their erasure upper bounds when needed so generic throws like `X extends IOException`
+                        // are enforced as `IOException` here.
                         let arity = mc.arguments.len();
                         let mut union_throws: HashSet<String> = HashSet::new();
-                        for member in &current_class.body { if let ClassMember::Method(m) = member { if m.name == mc.name && m.parameters.len() == arity { for t in &m.throws { union_throws.insert(t.name.clone()); } } } }
+                        for member in &current_class.body {
+                            if let ClassMember::Method(m) = member {
+                                if m.name == mc.name && m.parameters.len() == arity {
+                                    for t in &m.throws {
+                                        let tn = &t.name;
+                                        if let Some(tp) = m.type_params.iter().find(|tp| &tp.name == tn) {
+                                            if let Some(b) = tp.bounds.first() { union_throws.insert(b.name.clone()); } else { union_throws.insert("Object".to_string()); }
+                                        } else if let Some(tp) = current_class.type_params.iter().find(|tp| &tp.name == tn) {
+                                            if let Some(b) = tp.bounds.first() { union_throws.insert(b.name.clone()); } else { union_throws.insert("Object".to_string()); }
+                                        } else {
+                                            union_throws.insert(tn.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         super::debug_log(format!("call throws (scan): {}.{}({}) -> {:?}", current_class.name, mc.name, arity, union_throws));
                         for t in union_throws.iter() { require(t)?; }
                     }
@@ -651,7 +732,7 @@ pub(crate) fn review_body_checked_exceptions(
     }
 
     #[derive(Clone)]
-    struct RethrowCtx { catch_name: String, catch_type: String, try_checked: Vec<String> }
+    struct RethrowCtx { catch_name: String, catch_types: Vec<String>, try_checked: Vec<String> }
 
     fn walk(block: &Block, current_class: &ClassDecl, declared: &[String], global: &crate::review::types::GlobalMemberIndex, catch_stack: &mut Vec<Vec<String>>, scopes: &mut Vec<HashMap<String, String>>, rethrow_ctx: &Option<RethrowCtx>) -> ReviewResult<()> {
         for s in &block.statements {
@@ -663,7 +744,8 @@ pub(crate) fn review_body_checked_exceptions(
                             if id.name == ctx.catch_name {
                                 for exc in &ctx.try_checked {
                                     if is_unchecked_exception(exc, global) { continue; }
-                                    if !is_reference_assignable(global, exc, &ctx.catch_type) { continue; }
+                                    // Only those assignable to any of the catch parameter's types (multi-catch aware)
+                                    if !ctx.catch_types.iter().any(|ct| is_reference_assignable(global, exc, ct)) { continue; }
                                     if catch_stack.iter().rev().any(|frame| is_assignable_to_any(global, exc, frame)) { continue; }
                                     if is_assignable_to_any(global, exc, declared) { continue; }
                                     return Err(ReviewError::UnreportedCheckedException(exc.clone()));
@@ -684,7 +766,11 @@ pub(crate) fn review_body_checked_exceptions(
                     let catch_types_here: Vec<String> = t
                         .catch_clauses
                         .iter()
-                        .map(|c| c.parameter.type_ref.name.clone())
+                        .flat_map(|c| {
+                            let mut v = vec![c.parameter.type_ref.name.clone()];
+                            for alt in &c.alt_types { v.push(alt.name.clone()); }
+                            v
+                        })
                         .collect();
                     catch_stack.push(catch_types_here.clone());
                     // New scope for try block
@@ -697,7 +783,9 @@ pub(crate) fn review_body_checked_exceptions(
                     let try_checked = collect_checked_exceptions_in_block(current_class, &t.try_block, global, scopes);
                     for c in &t.catch_clauses {
                         scopes.push({ let mut m = HashMap::new(); m.insert(c.parameter.name.clone(), c.parameter.type_ref.name.clone()); m });
-                        let ctx = RethrowCtx { catch_name: c.parameter.name.clone(), catch_type: c.parameter.type_ref.name.clone(), try_checked: try_checked.clone() };
+                        let mut ct: Vec<String> = vec![c.parameter.type_ref.name.clone()];
+                        for alt in &c.alt_types { ct.push(alt.name.clone()); }
+                        let ctx = RethrowCtx { catch_name: c.parameter.name.clone(), catch_types: ct, try_checked: try_checked.clone() };
                         walk(&c.block, current_class, declared, global, catch_stack, scopes, &Some(ctx))?;
                         scopes.pop();
                     }
@@ -775,7 +863,13 @@ pub(crate) fn review_body_checked_exceptions(
                 Stmt::Labeled(ls) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?; scopes.pop(); }
                 Stmt::Declaration(vd) => {
                     // Record declared variable types
-                    for var in &vd.variables { if let Some(scope) = scopes.last_mut() { scope.insert(var.name.clone(), vd.type_ref.name.clone()); } }
+                    for var in &vd.variables {
+                        if let Some(scope) = scopes.last_mut() { scope.insert(var.name.clone(), vd.type_ref.name.clone()); }
+                        // Check initializer expressions for throws coverage
+                        if let Some(init) = &var.initializer {
+                            walk_expr_for_exn(current_class, init, declared, global, catch_stack, scopes)?;
+                        }
+                    }
                 }
                 Stmt::Expression(es) => { walk_expr_for_exn(current_class, &es.expr, declared, global, catch_stack, scopes)?; }
                 _ => {}
