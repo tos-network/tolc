@@ -1385,15 +1385,15 @@ pub(crate) fn is_reference_assignable(global: &crate::review::types::GlobalMembe
     let mut seen = std::collections::HashSet::new();
     loop {
         if let Some(mt) = resolve_type_in_index(global, &cur_name) {
+            // check interfaces implemented by current type at each step
+            for itf in &mt.interfaces {
+                if itf == dst { return true; }
+            }
             if let Some(sup) = &mt.super_name {
                 if sup == dst { return true; }
                 if !seen.insert(sup.clone()) { return false; }
                 cur_name = sup.clone();
                 continue;
-            }
-            // check interfaces implemented by current
-            for itf in &mt.interfaces {
-                if itf == dst { return true; }
             }
         }
         return false;
@@ -1811,17 +1811,17 @@ fn walk_expr(
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in c.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
-                                for b in bounds {
-                                    if let Some(tname) = typearg_to_simple_name(targ) {
+                                if let Some(tname) = typearg_to_simple_name(targ) {
+                                    for b in bounds {
                                         if !is_reference_assignable(g, &tname, b) {
-                                                super::debug_log(format!(
-                                                    "GenericBoundViolation (cast): type={} arg#{}={} not <: {}",
-                                                    c.target_type.name,
-                                                    i,
-                                                    tname,
-                                                    b
-                                                ));
-                                            return Err(ReviewError::GenericBoundViolation { typename: c.target_type.name.clone(), bound: b.clone(), found: tname });
+                                            super::debug_log(format!(
+                                                "GenericBoundViolation (cast): type={} arg#{}={} not <: {}",
+                                                c.target_type.name,
+                                                i,
+                                                tname,
+                                                b
+                                            ));
+                                            return Err(ReviewError::GenericBoundViolation { typename: c.target_type.name.clone(), bound: b.clone(), found: tname.clone() });
                                         }
                                     }
                                 }
@@ -1847,17 +1847,17 @@ fn walk_expr(
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in io.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
-                                for b in bounds {
-                                    if let Some(tname) = typearg_to_simple_name(targ) {
+                                if let Some(tname) = typearg_to_simple_name(targ) {
+                                    for b in bounds {
                                         if !is_reference_assignable(g, &tname, b) {
-                                                super::debug_log(format!(
-                                                    "GenericBoundViolation (instanceof): type={} arg#{}={} not <: {}",
-                                                    io.target_type.name,
-                                                    i,
-                                                    tname,
-                                                    b
-                                                ));
-                                            return Err(ReviewError::GenericBoundViolation { typename: io.target_type.name.clone(), bound: b.clone(), found: tname });
+                                            super::debug_log(format!(
+                                                "GenericBoundViolation (instanceof): type={} arg#{}={} not <: {}",
+                                                io.target_type.name,
+                                                i,
+                                                tname,
+                                                b
+                                            ));
+                                            return Err(ReviewError::GenericBoundViolation { typename: io.target_type.name.clone(), bound: b.clone(), found: tname.clone() });
                                         }
                                     }
                                 }
@@ -1965,10 +1965,10 @@ fn walk_expr(
                                 return Err(ReviewError::WildcardNotAllowedInNew);
                             }
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
-                                for b in bounds {
-                                    if let Some(tname) = typearg_to_simple_name(targ) {
+                                if let Some(tname) = typearg_to_simple_name(targ) {
+                                    for b in bounds {
                                         if !is_reference_assignable(g, &tname, b) {
-                                            return Err(ReviewError::GenericBoundViolation { typename: n.target_type.name.clone(), bound: b.clone(), found: tname });
+                                            return Err(ReviewError::GenericBoundViolation { typename: n.target_type.name.clone(), bound: b.clone(), found: tname.clone() });
                                         }
                                     }
                                 }

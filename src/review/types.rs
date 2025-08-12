@@ -38,6 +38,8 @@ pub(crate) struct MemberTables {
     pub ctors_throws_by_sig: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // keyed by type name (self)
     pub type_param_count: usize,
     pub type_param_bounds: Vec<Vec<String>>, // simple names of bounds per type parameter
+    pub type_param_names: Vec<String>, // parallel to type_param_bounds
+    pub type_param_name_to_bounds: HashMap<String, Vec<String>>, // convenience lookup
     pub super_name: Option<String>,
     pub interfaces: Vec<String>,
     pub package_name: Option<String>,
@@ -120,9 +122,16 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             // record simple upper bounds for generic parameters
             if c.type_params.is_empty() {
                 mt.type_param_bounds = Vec::new();
+                mt.type_param_names = Vec::new();
+                mt.type_param_name_to_bounds = HashMap::new();
             } else {
                 mt.type_param_bounds = c.type_params.iter().map(|tp| {
                     tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                }).collect();
+                mt.type_param_names = c.type_params.iter().map(|tp| tp.name.clone()).collect();
+                mt.type_param_name_to_bounds = c.type_params.iter().map(|tp| {
+                    let v = tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+                    (tp.name.clone(), v)
                 }).collect();
             }
             for member in &c.body {
@@ -240,6 +249,21 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             mt.package_name = idx.package.clone();
             mt.interfaces = i.extends.iter().map(|t| t.name.clone()).collect();
             mt.is_interface = true;
+            // interface type parameters (for bounds checks on type usage)
+            if i.type_params.is_empty() {
+                mt.type_param_bounds = Vec::new();
+                mt.type_param_names = Vec::new();
+                mt.type_param_name_to_bounds = HashMap::new();
+            } else {
+                mt.type_param_bounds = i.type_params.iter().map(|tp| {
+                    tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                }).collect();
+                mt.type_param_names = i.type_params.iter().map(|tp| tp.name.clone()).collect();
+                mt.type_param_name_to_bounds = i.type_params.iter().map(|tp| {
+                    let v = tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+                    (tp.name.clone(), v)
+                }).collect();
+            }
             // record interface methods metas and throws by signature
             for member in &i.body {
                 if let InterfaceMember::Method(m) = member {
@@ -336,9 +360,16 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                     mt.type_param_count = c.type_params.len();
                     if c.type_params.is_empty() {
                         mt.type_param_bounds = Vec::new();
+                        mt.type_param_names = Vec::new();
+                        mt.type_param_name_to_bounds = HashMap::new();
                     } else {
                         mt.type_param_bounds = c.type_params.iter().map(|tp| {
                             tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                        }).collect();
+                        mt.type_param_names = c.type_params.iter().map(|tp| tp.name.clone()).collect();
+                        mt.type_param_name_to_bounds = c.type_params.iter().map(|tp| {
+                            let v = tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+                            (tp.name.clone(), v)
                         }).collect();
                     }
                     for member in &c.body {
@@ -458,6 +489,20 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                     mt.package_name = local_pkg.clone();
                     mt.interfaces = i.extends.iter().map(|t| t.name.clone()).collect();
                     mt.is_interface = true;
+                    if i.type_params.is_empty() {
+                        mt.type_param_bounds = Vec::new();
+                        mt.type_param_names = Vec::new();
+                        mt.type_param_name_to_bounds = HashMap::new();
+                    } else {
+                        mt.type_param_bounds = i.type_params.iter().map(|tp| {
+                            tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                        }).collect();
+                        mt.type_param_names = i.type_params.iter().map(|tp| tp.name.clone()).collect();
+                        mt.type_param_name_to_bounds = i.type_params.iter().map(|tp| {
+                            let v = tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+                            (tp.name.clone(), v)
+                        }).collect();
+                    }
                     for member in &i.body {
                         if let InterfaceMember::Method(m) = member {
                             let arity = m.parameters.len();

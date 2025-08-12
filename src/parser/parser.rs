@@ -436,7 +436,8 @@ impl Parser {
         let name = self.parse_identifier()?;
         
         let bounds = if self.match_token(&Token::Extends) {
-            self.parse_type_list()?
+            // Java uses '&' for intersection bounds in type parameters: <T extends A & B>
+            self.parse_intersection_bounds()?
         } else {
             Vec::new()
         };
@@ -445,6 +446,16 @@ impl Parser {
         let span = Span::new(start_span.start, end_span.end);
         
         Ok(TypeParam { name, bounds, span })
+    }
+
+    // Parse intersection bounds list for type parameters: A (& B (& C)*)*
+    fn parse_intersection_bounds(&mut self) -> Result<Vec<TypeRef>> {
+        let mut types = Vec::new();
+        types.push(self.parse_type_ref()?);
+        while self.match_token(&Token::Amp) {
+            types.push(self.parse_type_ref()?);
+        }
+        Ok(types)
     }
     
     fn parse_type_ref(&mut self) -> Result<TypeRef> {
