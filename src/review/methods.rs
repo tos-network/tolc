@@ -9,10 +9,16 @@ struct MethodKey { name: String, param_types: Vec<String> }
 pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIndex) -> ReviewResult<()> {
     use std::collections::HashSet;
     let mut seen: HashSet<MethodKey> = HashSet::new();
+    // Collect declared methods of this class for later interface consistency checks
+    let mut declared_method_sigs: std::collections::HashMap<String, std::collections::HashSet<Vec<String>>> = std::collections::HashMap::new();
     // Detect multiple varargs constructors
     let mut varargs_ctor_count = 0usize;
     for member in &class.body {
         if let ClassMember::Method(m) = member {
+            declared_method_sigs
+                .entry(m.name.clone())
+                .or_default()
+                .insert(m.parameters.iter().map(|p| p.type_ref.name.clone()).collect());
             // visibility exclusivity: public/protected/private
             ensure_visibility_exclusive(&m.modifiers, &m.name)?;
             // basic illegal combos akin to Check.java subset
@@ -111,8 +117,8 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                     super::statements::review_body_checked_exceptions(class, body, &declared, global)?;
                 }
             }
-            // Override/visibility checks against direct superclass if known in index
-            // Override consistency across full super chain and interfaces
+            // Override/visibility checks across full super chain and interfaces,
+            // plus interface default/abstract consistency and diamond resolution.
             {
                 let sig_here: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
                 let mut queue: Vec<String> = Vec::new();
@@ -121,6 +127,8 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                 for itf in &class.implements { queue.push(itf.name.clone()); }
                 // BFS over type hierarchy
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut abstract_iface_sources: Vec<String> = Vec::new();
+                let mut default_iface_sources: Vec<(String, Visibility)> = Vec::new();
                 while let Some(tname) = queue.pop() {
                     if !seen.insert(tname.clone()) { continue; }
                     if let Some(mt) = global.by_type.get(&tname) {
@@ -150,6 +158,13 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                                                 log::debug!("override error: interface method implementation must be public: {}.{}", class.name, m.name);
                                                 return Err(ReviewError::DuplicateMember(format!("method '{}' must be public to implement interface method", m.name)));
                                             }
+                                            // Track interface method kind (default vs abstract) for consistency checks
+                                            if meta.is_abstract {
+                                                abstract_iface_sources.push(tname.clone());
+                                            } else {
+                                                // treat non-abstract, non-static interface method with a body as default; we approximate via not abstract here
+                                                default_iface_sources.push((tname.clone(), meta.visibility));
+                                            }
                                         } else {
                                             let pkg_here = global.package.as_deref();
                                             let pkg_super = mt.package_name.as_deref();
@@ -163,7 +178,7 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                                             log::debug!("override error: final method: {}.{} overrides {}", class.name, m.name, tname);
                                             return Err(ReviewError::DuplicateMember(format!("cannot override final method '{}' in '{}'", m.name, tname)));
                                         }
-                                        // return type covariance (reference)
+                                        // return type covariance (reference + primitive boxing in compat mode)
                                         if let (Some(ret_here), Some(ret_super)) = (m.return_type.as_ref().map(|t| t.name.clone()), meta.return_type.clone()) {
                                             if ret_here != ret_super {
                                                 let prims = ["int","long","float","double","boolean","char","short","byte","void"];
@@ -175,6 +190,12 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                                                  };
                                                  // If super's return is a type parameter, accept any reference type here
                                                  if is_type_param_like(&ret_super) { continue; }
+                                                // Allow primitive boxing/unboxing match in compat mode
+                                                if crate::review::compat_mode() {
+                                                    let boxing = |p: &str| match p { "int"=>Some("Integer"),"long"=>Some("Long"),"float"=>Some("Float"),"double"=>Some("Double"),"boolean"=>Some("Boolean"),"char"=>Some("Character"),"byte"=>Some("Byte"),"short"=>Some("Short"), _=>None };
+                                                    if is_prim(&ret_here) { if let Some(b) = boxing(&ret_here) { if b == ret_super { continue; } } }
+                                                    if is_prim(&ret_super) { if let Some(b) = boxing(&ret_super) { if b == ret_here { continue; } } }
+                                                }
                                                 if is_prim(&ret_here) || is_prim(&ret_super) {
                                                     log::debug!("override error: primitive return mismatch: here={}, super={}", ret_here, ret_super);
                                                     return Err(ReviewError::DuplicateMember(format!("incompatible return type for override of '{}'", m.name)));
@@ -214,6 +235,17 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                         }
                     }
                 }
+                // After walking, enforce interface consistency:
+                // - If at least two distinct interfaces provide a conflicting default for the same signature
+                //   and the class does not provide its own implementation (m.body.is_none()), report error.
+                if default_iface_sources.len() > 1 && m.body.is_none() {
+                    // diamonds with differing defaults must be overridden
+                    return Err(ReviewError::ConflictingInterfaceDefaults(m.name.clone()));
+                }
+                // - If any interface in the hierarchy declares the method abstract, the class must implement it (unless it already does).
+                if !abstract_iface_sources.is_empty() && m.body.is_none() {
+                    return Err(ReviewError::MissingInterfaceMethodImplementation(m.name.clone()));
+                }
             }
         } else if let ClassMember::Constructor(c) = member {
             // Constructor visibility exclusivity and illegal flags
@@ -238,6 +270,87 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
         }
     }
     if varargs_ctor_count > 1 { return Err(ReviewError::MultipleVarargsConstructors); }
+
+    // After scanning members, enforce interface default/abstract consistency and diamond resolution
+    {
+        // Methods implemented by superclasses (concrete only)
+        let mut provided_by_super: std::collections::HashMap<String, std::collections::HashSet<Vec<String>>> = std::collections::HashMap::new();
+        let mut q: Vec<String> = Vec::new();
+        if let Some(sup) = class.extends.as_ref().map(|t| t.name.clone()) { q.push(sup); }
+        let mut seen_sup: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(tn) = q.pop() {
+            if !seen_sup.insert(tn.clone()) { continue; }
+            if let Some(mt) = global.by_type.get(&tn) {
+                if let Some(sup2) = &mt.super_name { q.push(sup2.clone()); }
+                for (name, metas) in &mt.methods_meta {
+                    for meta in metas {
+                        if !meta.is_static && !meta.is_abstract {
+                            provided_by_super.entry(name.clone()).or_default().insert(meta.signature.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Gather interface abstract requirements and default providers
+        let mut abstract_reqs: std::collections::HashMap<String, std::collections::HashSet<Vec<String>>> = std::collections::HashMap::new();
+        let mut default_providers: std::collections::HashMap<String, std::collections::HashMap<Vec<String>, std::collections::HashSet<String>>> = std::collections::HashMap::new();
+        let mut iq: Vec<String> = Vec::new();
+        for itf in &class.implements { iq.push(itf.name.clone()); }
+        let mut seen_itf: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(tn) = iq.pop() {
+            if !seen_itf.insert(tn.clone()) { continue; }
+            if let Some(mt) = global.by_type.get(&tn) {
+                for it in &mt.interfaces { iq.push(it.clone()); }
+                // For each method meta in this interface
+                for (name, metas) in &mt.methods_meta {
+                    for meta in metas {
+                        if meta.is_static { continue; }
+                        let sig = meta.signature.clone();
+                        if meta.is_abstract {
+                            abstract_reqs.entry(name.clone()).or_default().insert(sig);
+                        } else if mt.is_interface && meta.has_body {
+                            default_providers
+                                .entry(name.clone())
+                                .or_default()
+                                .entry(sig)
+                                .or_default()
+                                .insert(tn.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check conflicting defaults: more than one provider for same name+sig and no class/super impl
+        for (name, sig_map) in &default_providers {
+            for (sig, providers) in sig_map {
+                if providers.len() > 1 {
+                    let class_has = declared_method_sigs.get(name).map_or(false, |s| s.contains(sig));
+                    let super_has = provided_by_super.get(name).map_or(false, |s| s.contains(sig));
+                    if !class_has && !super_has {
+                        return Err(ReviewError::ConflictingInterfaceDefaults(name.clone()));
+                    }
+                }
+            }
+        }
+
+        // Check abstract requirements: must be implemented by class/super or satisfied by a default
+        for (name, sigs) in &abstract_reqs {
+            for sig in sigs {
+                let class_has = declared_method_sigs.get(name).map_or(false, |s| s.contains(sig));
+                let super_has = provided_by_super.get(name).map_or(false, |s| s.contains(sig));
+                let default_ok = default_providers
+                    .get(name)
+                    .and_then(|m| m.get(sig))
+                    .map(|set| !set.is_empty())
+                    .unwrap_or(false);
+                if !class_has && !super_has && !default_ok {
+                    return Err(ReviewError::MissingInterfaceMethodImplementation(name.clone()));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

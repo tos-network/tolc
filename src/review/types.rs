@@ -16,6 +16,7 @@ pub(crate) struct MethodMeta {
     pub is_static: bool,
     pub is_final: bool,
     pub is_abstract: bool,
+    pub has_body: bool,
     pub return_type: Option<String>,
 }
 
@@ -155,7 +156,8 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                             visibility: visibility_of(&m.modifiers),
                             is_static,
                             is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
-                            is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                            is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)) || m.body.is_none(),
+                            has_body: m.body.is_some(),
                             return_type: m.return_type.as_ref().map(|t| t.name.clone()),
                         };
                         mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
@@ -231,7 +233,8 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         visibility: visibility_of(&m.modifiers),
                         is_static: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static)),
                         is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
-                        is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                        is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)) || m.body.is_none(),
+                        has_body: m.body.is_some(),
                         return_type: m.return_type.as_ref().map(|t| t.name.clone()),
                     };
                     mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
@@ -326,7 +329,8 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                                     visibility: visibility_of(&m.modifiers),
                                     is_static,
                                     is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
-                                    is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                                    is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)) || m.body.is_none(),
+                                    has_body: m.body.is_some(),
                                     return_type: m.return_type.as_ref().map(|t| t.name.clone()),
                                 };
                                 mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
@@ -394,6 +398,7 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                                 is_static: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static)),
                                 is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
                                 is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                                has_body: m.body.is_some(),
                                 return_type: m.return_type.as_ref().map(|t| t.name.clone()),
                             };
                             mt.methods_meta.entry(m.name.clone()).or_default().push(meta);

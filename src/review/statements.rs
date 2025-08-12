@@ -441,8 +441,12 @@ pub(crate) fn review_body_checked_exceptions(
                 }
                 Stmt::Try(t) => {
                     // try-block sees current catches
-                    let frame: Vec<String> = t.catch_clauses.iter().map(|c| c.parameter.type_ref.name.clone()).collect();
-                    catch_stack.push(frame);
+                    let catch_types_here: Vec<String> = t
+                        .catch_clauses
+                        .iter()
+                        .map(|c| c.parameter.type_ref.name.clone())
+                        .collect();
+                    catch_stack.push(catch_types_here.clone());
                     // New scope for try block
                     scopes.push(HashMap::new());
                     walk(&t.try_block, current_class, declared, global, catch_stack, scopes)?;
@@ -453,6 +457,53 @@ pub(crate) fn review_body_checked_exceptions(
                         scopes.push({ let mut m = HashMap::new(); m.insert(c.parameter.name.clone(), c.parameter.type_ref.name.clone()); m });
                         walk(&c.block, current_class, declared, global, catch_stack, scopes)?; 
                         scopes.pop();
+                    }
+                    // try-with-resources: enforce close() declared throws
+                    if !t.resources.is_empty() {
+                        // Collect resource declared/static types
+                        let mut resource_types: Vec<String> = Vec::new();
+                        for r in &t.resources {
+                            match r {
+                                TryResource::Var { type_ref, .. } => resource_types.push(type_ref.name.clone()),
+                                TryResource::Expr { expr, .. } => {
+                                    if let Some(tn) = expr_static_type(expr, scopes) { resource_types.push(tn); }
+                                }
+                            }
+                        }
+                        // For each type, attempt to resolve close() throws using the declared type
+                        use std::collections::HashSet;
+                        let mut to_require_union: HashSet<String> = HashSet::new();
+                        for ty in resource_types {
+                            let mut req_for_ty: HashSet<String> = HashSet::new();
+                            let mut has_declared_close_method = false;
+                            if let Some(mt) = crate::review::types::resolve_type_in_index(global, &ty) {
+                                // direct method throws for close() on the declared type
+                                if let Some(list) = mt.methods_throws.get("close") {
+                                    for (arity, thr) in list {
+                                        if *arity == 0 {
+                                            has_declared_close_method = true;
+                                            for tname in thr { req_for_ty.insert(tname.clone()); }
+                                        }
+                                    }
+                                }
+                                // Only if the declared type does not declare close() at all, fall back to interface contracts
+                                if !has_declared_close_method {
+                                    if mt.interfaces.iter().any(|i| i == "Closeable") { req_for_ty.insert("IOException".to_string()); }
+                                    if mt.interfaces.iter().any(|i| i == "AutoCloseable") { req_for_ty.insert("Exception".to_string()); }
+                                }
+                            } else {
+                                // Fallback heuristics on simple names
+                                if ty == "Closeable" { req_for_ty.insert("IOException".to_string()); }
+                                if ty == "AutoCloseable" { req_for_ty.insert("Exception".to_string()); }
+                            }
+                            to_require_union.extend(req_for_ty.into_iter());
+                        }
+                        for exc in to_require_union {
+                            if !is_unchecked_exception(&exc, global)
+                                && !is_assignable_to_any(global, &exc, &catch_types_here)
+                                && !is_assignable_to_any(global, &exc, declared)
+                            { return Err(ReviewError::UnreportedCheckedException(exc)); }
+                        }
                     }
                     if let Some(fin) = &t.finally_block { scopes.push(HashMap::new()); walk(fin, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
                 }
@@ -1417,6 +1468,9 @@ fn walk_expr(
                     // Basic bounds check: if bounds recorded, ensure each argument type simple name matches or is assignable to the bound simple name
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in n.target_type.type_args.iter().enumerate() {
+                            if let crate::ast::TypeArg::Wildcard(_) = targ {
+                                return Err(ReviewError::WildcardNotAllowedInNew);
+                            }
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
                                 for b in bounds {
                                     if let Some(tname) = typearg_to_simple_name(targ) {

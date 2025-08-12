@@ -76,6 +76,12 @@ pub enum ReviewError {
     DuplicateSwitchCaseLabel(String),
     #[error("multiple default labels in switch")] 
     MultipleSwitchDefaults,
+    #[error("conflicting default methods for '{0}'; class must override to resolve")] 
+    ConflictingInterfaceDefaults(String),
+    #[error("class must implement interface method '{0}'")]
+    MissingInterfaceMethodImplementation(String),
+    #[error("wildcard type arguments are not allowed in object instantiation")]
+    WildcardNotAllowedInNew,
 }
 
 /// AST-level review before codegen

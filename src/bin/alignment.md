@@ -20,11 +20,12 @@ Access control, overrides, and consistency
 - [👌] Static vs instance: prevent illegal override/hide across the static/instance boundary; final methods cannot be overridden.
 - [👌] Return type: allow reference covariance; if super’s return is a type parameter, accept any reference return (javac-like flexibility).
 - [👌] Throws clause: subclass method cannot declare broader checked exceptions; allow narrowing and unchecked exceptions.
+- [👌] Interface defaults/abstracts and diamonds: treat only interface methods with bodies as defaults; abstract (no-body) methods are requirements. Detect conflicting defaults across multiple interfaces and require the class (or a superclass) to override to resolve. Abstract interface methods must be implemented unless provided by a superclass or satisfied by a default.
 
 Checked exceptions and control flow
 - [👌] Throw typing and propagation: classify throw sites (new/identifier/call), propagate checked exceptions across local and cross-type methods/constructors, including static-imported members.
 - [👌] Unchecked exceptions: treat common `RuntimeException` subclasses and `Error` as unchecked; prefer hierarchy from classpath index when available; fallback list used in compat mode.
-- [👌] Try/catch/finally: basic merging; try-with-resources pending (resource close exceptions not yet modeled).
+- [👌] Try/catch/finally: modeled with basic merging. Try-with-resources: integrate `close()` declared throws from the declared resource type; if no declared `close()` is found, fall back to interface contracts (`Closeable -> IOException`, `AutoCloseable -> Exception`). Support multiple resources and catch/throws coverage.
 - [👌] Must-return: treat `throw` as terminal; refine `if`/`switch`/`try` return guarantees; `finally` considered.
 
 Method resolution and arity
@@ -32,6 +33,7 @@ Method resolution and arity
 - [👌] Applicability: filter by primitive/string assignability with widening costs; break ties; error on ambiguous matches.
 - [👌] Fallbacks in compat mode: when types cannot be inferred, prefer arity-only acceptance to avoid spurious errors.
 - [👌] Targeted IO unblockers: accept 3‑arg `read(byte[],int,int)`/`write(byte[],int,int)` when arity/signatures are incomplete.
+- [👌] Broader applicability: support boxing/unboxing and simple reference-type assignability (via hierarchy) in applicability and tie-breaking; handle varargs with the same conversion model.
 
 Final fields definite assignment
 - [👌] Per-constructor path analysis: count assignments after `this(...)` delegation; branch merge rules require all paths to assign for `min>=1`.
@@ -46,13 +48,11 @@ Imports and static legality
 Generics
 - [👌] Generic arity checks: for `new`, `cast`, and `instanceof` require the number of type args to match the declaration (from index/fallback). In compat mode, only raw use (0 args) is tolerated; nonzero mismatches are errors.
 - [👌] Simple bounds check: if bounds are recorded, ensure each argument simple name is assignable to its upper bound (basic JLS subset).
+- [👌] Wildcards and capture (subset): `? extends B` is treated as `B` for bound checks; bare `?` erases to `Object`. Disallow wildcards in constructor type arguments (`new T<?>` rejected). Apply bounds enforcement across `new`/`cast`/`instanceof`.
 
 Diagnostics
 - [👌] `TOLC_DEBUG` gates targeted `eprintln!` debug logs in review passes.
 - [👌] `log::debug!` used widely; java suite enables Debug level by default.
 
 Pending and gaps
-- [ ] Try-with-resources: model `AutoCloseable.close()` exceptions and incorporate into checked-exception analysis.
-- [ ] Full override consistency across interface default/abstract combinations and deeper diamond hierarchies.
-- [ ] Complete generic bounds and wildcard capture; full attribution is out of current scope.
-- [ ] Broader method applicability (boxing/unboxing, reference types) beyond primitive/string heuristic.
+- None
