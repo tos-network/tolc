@@ -6,6 +6,7 @@ debug/
 release/
 **/release/
 **/*.rs.bk
+tests/com/
 
 ## Test/bench artifacts
 **/*.profraw
