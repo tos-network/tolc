@@ -59,11 +59,6 @@ Notes
 | Version | Reject classfile major > 52 | ✓ | `verify/mod.rs` | Target/Source | Locked to Java 8 |
 
 Summary
-- tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful Flow/Resolve/Generics subsets.
-- Remaining notable gaps vs javac (Java 8):
-  - Generic inference and capture (JLS 18) in full: inference variables, constraint solving, wildcard capture, complex intersection constraints across calls (current ranking and applicability use a simplified cost model for primitives/boxing).
-  - Some shadowing/aliasing corner cases in name resolution.
-  - Deeper Attr/Check semantics for annotations (repeatable/meta-annotation interactions, default values beyond current subset).
-  - Finer-grained definite unassignment (DU) and some extreme reachability corner cases not modeled.
+-
 
-
+ tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful Flow/Resolve/Generics subsets.
