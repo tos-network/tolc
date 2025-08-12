@@ -50,20 +50,42 @@ impl Parser {
             imports.push(self.parse_import_decl()?);
         }
         
-        // Parse type declarations
+        // Parse type declarations with an error budget to avoid infinite recovery loops
         let mut type_decls = Vec::new();
+        let mut error_budget: usize = std::env::var("TOLC_PARSE_MAX_ERRORS").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
+        let mut error_count: usize = 0;
+        let mut had_error: bool = false;
+        let mut last_progress_at: usize = self.current;
         while !self.is_at_end() {
             match self.parse_type_decl() {
                 Ok(type_decl) => {
                     type_decls.push(type_decl);
+                    last_progress_at = self.current;
                 }
-                Err(e) => {
+                Err(_e) => {
                     // Attempt error recovery at top-level and continue
-                    let _ = e; // keep error for potential diagnostics later
+                    had_error = true;
+                    error_count = error_count.saturating_add(1);
+                    if error_budget == 0 {
+                        return Err(super::error::ParseError::InvalidSyntax { message: "too many parse errors".to_string(), location: self.previous().location() }.into());
+                    }
+                    error_budget -= 1;
                     self.synchronize_toplevel();
+                    // Ensure forward progress; if no token advanced, step one to break potential stall
+                    if self.current == last_progress_at && !self.is_at_end() {
+                        self.advance();
+                    }
+                    last_progress_at = self.current;
                     continue;
                 }
             }
+        }
+        if had_error {
+            return Err(super::error::ParseError::InvalidSyntax {
+                message: format!("{} parse error(s)", error_count),
+                location: self.previous().location(),
+            }
+            .into());
         }
         
         let end_span = self.previous_span();

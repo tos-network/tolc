@@ -553,13 +553,27 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
             }
         }
     }
+    // Bounded scan to avoid hangs on huge classpaths. Defaults:
+    // - max files: 500 (override via TOLC_CLASSPATH_MAX_FILES)
+    // - max file size: 256 KiB (override via TOLC_CLASSPATH_MAX_FILE_SIZE)
+    let max_files: usize = std::env::var("TOLC_CLASSPATH_MAX_FILES").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
+    let max_size: u64 = std::env::var("TOLC_CLASSPATH_MAX_FILE_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(256 * 1024);
+    let mut processed: usize = 0;
     for entry in WalkDir::new(classpath_dir).into_iter().filter_map(Result::ok) {
+        if processed >= max_files { break; }
         let path = entry.path();
         if entry.file_type().is_file() && path.extension().map(|e| e == "java").unwrap_or(false) {
+            // Skip very large files
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.len() > max_size { continue; }
+            }
             if let Ok(source) = fs::read_to_string(path) {
+                // Additional size check in case metadata is unavailable
+                if source.len() as u64 > max_size { continue; }
                 if let Ok(ast) = crate::parser::parse_tol(&source) {
                     index_types_from_ast_into(&mut idx, &ast);
                 }
+                processed += 1;
             }
         }
     }
