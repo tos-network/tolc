@@ -8,7 +8,7 @@ Notes
 
 | Area | Check item | tolc | Where (source/tests) | javac component(s) | Notes / gaps |
 |---|---|---|---|---|---|
-| Access control | Cross-package/derived visibility and override access | ✓ | `review/types.rs`, `review/methods.rs` | Check/Resolve | Fully aligned: consider only inherited methods (public/protected; package-private only within same package; private never). Enforce no static/instance override/hide; no visibility reduction; interface implementations must be public; final non-overridable; return covariance; throws narrowing; interface defaults/abstracts and diamond conflicts handled. |
+| Access control | Cross-package/derived visibility and override access | ✓ | `review/types.rs`, `review/methods.rs`, `review/statements.rs`; tests: `accessibility_cross_package_tests.rs` | Check/Resolve | Fully aligned (methods and instance fields). Same-package: protected/package-private allowed; private rejected. Cross-package protected: allowed only in subclass code and only via `this`/subclass qualifier; unrelated qualifier rejected. Also enforces: no static/instance override/hide; no visibility reduction; interface implementations must be public; final non-overridable; return covariance; throws narrowing; interface defaults/abstracts and diamond conflicts handled. |
 | Annotations | Retention=Runtime must be in visible set | ✓ | `verify/attributes.rs`; tests | Attr | — |
 | Annotations | Type-annotation targets/context legality | ✓ | `verify/attributes.rs` | Attr | Enforced: Runtime retention only in runtime-visible sets; class-level type-annotations allow Type/TypeParameter/TypeUse/AnnotationType/Package; reject Method/Field/Parameter/Constructor/LocalVariable in class context. |
 | BootstrapMethods | At most one; indices sanity | ✓ | `verify/constant_pool.rs`; tests | JVMS | — |
@@ -60,6 +60,10 @@ Notes
 
 Summary
 - tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful Flow/Resolve/Generics subsets.
-- Remaining notable gaps vs javac: precise rethrow/multi-catch rules; nuanced protected/package rules across packages; complete overload ranking and generics inference/capture beyond the implemented subset.
+- Remaining notable gaps vs javac (Java 8):
+  - Generic inference and capture (JLS 18) in full: inference variables, constraint solving, wildcard capture, complex intersection constraints across calls (current ranking and applicability use a simplified cost model for primitives/boxing).
+  - Some shadowing/aliasing corner cases in name resolution.
+  - Deeper Attr/Check semantics for annotations (repeatable/meta-annotation interactions, default values beyond current subset).
+  - Finer-grained definite unassignment (DU) and some extreme reachability corner cases not modeled.
 
 

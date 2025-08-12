@@ -82,6 +82,8 @@ pub enum ReviewError {
     MissingInterfaceMethodImplementation(String),
     #[error("wildcard type arguments are not allowed in object instantiation")]
     WildcardNotAllowedInNew,
+    #[error("inaccessible member '{name}' in '{typename}'")]
+    InaccessibleMember { typename: String, name: String },
 }
 
 /// AST-level review before codegen

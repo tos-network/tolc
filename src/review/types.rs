@@ -31,6 +31,7 @@ pub(crate) struct MemberTables {
     pub methods_throws_by_sig: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // name -> list of (param types, throws)
     pub fields_static: HashMap<String, bool>,
     pub fields_final: HashMap<String, bool>,
+    pub fields_visibility: HashMap<String, Visibility>,
     pub ctors_arities: HashMap<String, Vec<usize>>, // keyed by type name (self)
     pub ctors_varargs_min: HashMap<String, usize>,
     pub ctors_signatures: HashMap<String, Vec<Vec<String>>>,
@@ -141,6 +142,7 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         mt.fields_static.entry(f.name.clone()).or_insert(is_static);
                         let is_final = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Final));
                         mt.fields_final.entry(f.name.clone()).or_insert(is_final);
+                        mt.fields_visibility.entry(f.name.clone()).or_insert(visibility_of(&f.modifiers));
                     }
                     ClassMember::Method(m) => {
                         let arity = m.parameters.len();
@@ -375,10 +377,11 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                     for member in &c.body {
                         match member {
                             ClassMember::Field(f) => {
-                                let is_static = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                        let is_static = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
                                 mt.fields_static.entry(f.name.clone()).or_insert(is_static);
                                 let is_final = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Final));
                                 mt.fields_final.entry(f.name.clone()).or_insert(is_final);
+                        mt.fields_visibility.entry(f.name.clone()).or_insert(visibility_of(&f.modifiers));
                             }
                             ClassMember::Method(m) => {
                                 let arity = m.parameters.len();

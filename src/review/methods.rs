@@ -1,5 +1,6 @@
 use super::{ReviewError, ReviewResult};
 use super::types::GlobalMemberIndex;
+use super::statements::enforce_member_access_in_block;
 use super::types::Visibility;
 use crate::ast::*;
 
@@ -121,6 +122,8 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                     super::statements::review_body_locals_and_inits(body, &final_params, Some(global))?;
                     // Enforce final field rules in method bodies
                     enforce_final_field_rules_in_block(body, &class.name, global)?;
+                    // Enforce member accessibility (fields) inside bodies
+                    enforce_member_access_in_block(body, &class.name, global)?;
                     // Checked exceptions: ensure throws are declared or caught (basic)
                     let declared: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
                     log::debug!("checked exceptions pass: {}.{} declared throws = {:?}", class.name, m.name, declared);

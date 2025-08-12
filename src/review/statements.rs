@@ -676,7 +676,76 @@ pub(crate) fn review_body_checked_exceptions(
             Expr::Unary(u) => walk_expr_for_exn(current_class, &u.operand, declared, global, catch_stack, scopes),
             Expr::Binary(b) => { walk_expr_for_exn(current_class, &b.left, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &b.right, declared, global, catch_stack, scopes) }
             Expr::ArrayAccess(a) => { walk_expr_for_exn(current_class, &a.array, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &a.index, declared, global, catch_stack, scopes) }
-            Expr::FieldAccess(f) => { if let Some(t) = &f.target { walk_expr_for_exn(current_class, t, declared, global, catch_stack, scopes)?; } Ok(()) }
+            Expr::FieldAccess(f) => {
+                // Enforce field visibility using static type of instance target when available
+                if let Some(t) = &f.target {
+                    // compute static type of target
+                    if let Some(tname) = expr_static_type(current_class, t, global, scopes) {
+                        // Find field and its declaring type by walking supers
+                        fn resolve_field_visibility_and_declaring(
+                            global: &crate::review::types::GlobalMemberIndex,
+                            type_name: &str,
+                            field: &str,
+                        ) -> Option<(crate::review::types::Visibility, String)> {
+                            let mut cur = Some(type_name.to_string());
+                            while let Some(tn) = cur {
+                                if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tn) {
+                                    if let Some(v) = mt.fields_visibility.get(field) { return Some((*v, tn)); }
+                                    cur = mt.super_name.clone();
+                                } else { break; }
+                            }
+                            None
+                        }
+                        fn is_same_or_subclass_of(
+                            global: &crate::review::types::GlobalMemberIndex,
+                            sub: &str,
+                            sup: &str,
+                        ) -> bool {
+                            if sub == sup { return true; }
+                            let mut cur = Some(sub.to_string());
+                            while let Some(tn) = cur {
+                                if tn == sup { return true; }
+                                if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tn) {
+                                    cur = mt.super_name.clone();
+                                } else { break; }
+                            }
+                            false
+                        }
+                        if let Some((vis, decl)) = resolve_field_visibility_and_declaring(global, &tname, &f.name) {
+                            // Compare declaring type's package vs current CU package
+                            let decl_pkg = crate::review::types::resolve_type_in_index(global, &decl).and_then(|m| m.package_name.clone());
+                            let same_package = decl_pkg.as_deref() == global.package.as_deref();
+                            match vis {
+                                crate::review::types::Visibility::Private => {
+                                    // Only within the declaring class
+                                    if current_class.name != decl {
+                                        return Err(ReviewError::InaccessibleMember { typename: decl, name: f.name.clone() });
+                                    }
+                                }
+                                crate::review::types::Visibility::Package => {
+                                    if !same_package {
+                                        return Err(ReviewError::InaccessibleMember { typename: decl, name: f.name.clone() });
+                                    }
+                                }
+                                crate::review::types::Visibility::Protected => {
+                                    if !same_package {
+                                        // Cross-package protected: only if current class is subclass of decl AND qualifier is this-class or subclass thereof
+                                        if !is_same_or_subclass_of(global, &current_class.name, &decl) {
+                                            return Err(ReviewError::InaccessibleMember { typename: decl, name: f.name.clone() });
+                                        }
+                                        if !is_same_or_subclass_of(global, &tname, &current_class.name) {
+                                            return Err(ReviewError::InaccessibleMember { typename: decl, name: f.name.clone() });
+                                        }
+                                    }
+                                }
+                                crate::review::types::Visibility::Public => {}
+                            }
+                        }
+                    }
+                    walk_expr_for_exn(current_class, t, declared, global, catch_stack, scopes)?;
+                }
+                Ok(())
+            }
             Expr::Conditional(c) => { walk_expr_for_exn(current_class, &c.condition, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &c.then_expr, declared, global, catch_stack, scopes)?; walk_expr_for_exn(current_class, &c.else_expr, declared, global, catch_stack, scopes) }
             Expr::Parenthesized(p) => walk_expr_for_exn(current_class, p, declared, global, catch_stack, scopes),
             _ => Ok(())
@@ -995,6 +1064,163 @@ pub(crate) fn review_body_locals_and_inits(
 ) -> ReviewResult<()> {
     let mut scope_stack: Vec<HashMap<String, bool>> = vec![HashMap::new()]; // bool: definitely assigned
     walk_stmt_locals(body, &mut scope_stack, final_params, false, global)
+}
+
+// Walk a block and enforce field accessibility for instance targets based on static type
+pub(crate) fn enforce_member_access_in_block(
+    body: &Block,
+    current_class_name: &str,
+    global: &crate::review::types::GlobalMemberIndex,
+) -> ReviewResult<()> {
+    // helper duplicated here for enforcement pass
+    fn expr_static_type(
+        current_class: &str,
+        expr: &Expr,
+        global: Option<&crate::review::types::GlobalMemberIndex>,
+        _scopes: &Vec<HashMap<String, bool>>,
+    ) -> Option<String> {
+        match expr {
+            Expr::New(n) => Some(n.target_type.name.clone()),
+            Expr::Identifier(id) => {
+                // local types are unknown in this pass; assume not resolvable
+                // allow 'this' shorthand: treat as current_class
+                if id.name == "this" { return Some(current_class.to_string()); }
+                None
+            }
+            Expr::FieldAccess(fa) => {
+                if let Some(t) = &fa.target {
+                    if let Some(tname) = expr_static_type(current_class, t, global, _scopes) {
+                        // try lookup field type from index signature table
+                        if let Some(g) = global { if let Some(mt) = crate::review::types::resolve_type_in_index(g, &tname) {
+                            // simplified: no field types table; return declaring type name as best effort
+                            return Some(tname);
+                        }}
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    fn resolve_field_visibility_and_declaring(
+        type_name: &str,
+        field: &str,
+        global: &crate::review::types::GlobalMemberIndex,
+    ) -> Option<(crate::review::types::Visibility, String)> {
+        let mut cur = Some(type_name.to_string());
+        while let Some(tn) = cur {
+            if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tn) {
+                if let Some(v) = mt.fields_visibility.get(field) {
+                    return Some((*v, tn));
+                }
+                cur = mt.super_name.clone();
+            } else { break; }
+        }
+        None
+    }
+    fn is_same_or_subclass_of(sub: &str, sup: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
+        if sub == sup { return true; }
+        let mut cur = Some(sub.to_string());
+        while let Some(tn) = cur {
+            if tn == sup { return true; }
+            if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tn) {
+                cur = mt.super_name.clone();
+            } else { break; }
+        }
+        false
+    }
+    fn walk(
+        current_class_name: &str,
+        stmt: &Stmt,
+        global: &crate::review::types::GlobalMemberIndex,
+    ) -> ReviewResult<()> {
+        match stmt {
+            Stmt::Block(b) => { for s in &b.statements { walk(current_class_name, s, global)?; } }
+            Stmt::Expression(es) => enforce_in_expr(current_class_name, &es.expr, global)?,
+            Stmt::If(i) => { enforce_in_expr(current_class_name, &i.condition, global)?; walk(current_class_name, &i.then_branch, global)?; if let Some(e) = &i.else_branch { walk(current_class_name, e, global)?; } }
+            Stmt::While(w) => { enforce_in_expr(current_class_name, &w.condition, global)?; walk(current_class_name, &w.body, global)?; }
+            Stmt::For(f) => {
+                for init in &f.init { enforce_in_stmt(current_class_name, init, global)?; }
+                if let Some(cond) = &f.condition { enforce_in_expr(current_class_name, cond, global)?; }
+                for upd in &f.update { enforce_in_expr(current_class_name, &upd.expr, global)?; }
+                walk(current_class_name, &f.body, global)?;
+            }
+            Stmt::Return(r) => { if let Some(e) = &r.value { enforce_in_expr(current_class_name, e, global)?; } }
+            Stmt::Throw(t) => { enforce_in_expr(current_class_name, &t.expr, global)?; }
+            Stmt::Switch(sw) => { enforce_in_expr(current_class_name, &sw.expression, global)?; for c in &sw.cases { for s in &c.statements { walk(current_class_name, s, global)?; } }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn enforce_in_stmt(
+        current_class_name: &str,
+        stmt: &Stmt,
+        global: &crate::review::types::GlobalMemberIndex,
+    ) -> ReviewResult<()> { walk(current_class_name, stmt, global) }
+    fn enforce_in_expr(
+        current_class_name: &str,
+        expr: &Expr,
+        global: &crate::review::types::GlobalMemberIndex,
+    ) -> ReviewResult<()> {
+        match expr {
+            Expr::FieldAccess(fa) => {
+                if let Some(t) = &fa.target {
+                    // get static type
+                    // no local scopes here; pass empty
+                    if let Some(tname) = expr_static_type(current_class_name, t, Some(global), &Vec::new()) {
+                        if let Some((vis, decl)) = resolve_field_visibility_and_declaring(&tname, &fa.name, global) {
+                            let decl_pkg = crate::review::types::resolve_type_in_index(global, &decl).and_then(|m| m.package_name.clone());
+                            let current_pkg = crate::review::types::resolve_type_in_index(global, current_class_name).and_then(|m| m.package_name.clone());
+                            let same_package = decl_pkg == current_pkg;
+                            match vis {
+                                crate::review::types::Visibility::Private => {
+                                    // Only code in declaring class can access
+                                    if current_class_name != decl {
+                                        return Err(ReviewError::InaccessibleMember { typename: decl, name: fa.name.clone() });
+                                    }
+                                }
+                                crate::review::types::Visibility::Package => {
+                                    if !same_package {
+                                        return Err(ReviewError::InaccessibleMember { typename: decl, name: fa.name.clone() });
+                                    }
+                                }
+                                crate::review::types::Visibility::Protected => {
+                                    if !same_package {
+                                        // Cross-package protected: only within subclass code AND qualifier must be this-class or its subclass
+                                        if !is_same_or_subclass_of(current_class_name, &decl, global) {
+                                            return Err(ReviewError::InaccessibleMember { typename: decl, name: fa.name.clone() });
+                                        }
+                                        if !is_same_or_subclass_of(&tname, current_class_name, global) {
+                                            return Err(ReviewError::InaccessibleMember { typename: decl, name: fa.name.clone() });
+                                        }
+                                    }
+                                }
+                                crate::review::types::Visibility::Public => {}
+                            }
+                        }
+                    }
+                    // Recurse
+                    enforce_in_expr(current_class_name, t, global)?;
+                }
+                Ok(())
+            }
+            Expr::MethodCall(mc) => {
+                if let Some(t) = &mc.target { enforce_in_expr(current_class_name, t, global)?; }
+                for a in &mc.arguments { enforce_in_expr(current_class_name, a, global)?; }
+                Ok(())
+            }
+            Expr::Assignment(a) => { enforce_in_expr(current_class_name, &a.target, global)?; enforce_in_expr(current_class_name, &a.value, global) }
+            Expr::Binary(b) => { enforce_in_expr(current_class_name, &b.left, global)?; enforce_in_expr(current_class_name, &b.right, global) }
+            Expr::Unary(u) => enforce_in_expr(current_class_name, &u.operand, global),
+            Expr::Conditional(c) => { enforce_in_expr(current_class_name, &c.condition, global)?; enforce_in_expr(current_class_name, &c.then_expr, global)?; enforce_in_expr(current_class_name, &c.else_expr, global) }
+            Expr::ArrayAccess(a) => { enforce_in_expr(current_class_name, &a.array, global)?; enforce_in_expr(current_class_name, &a.index, global) }
+            Expr::Parenthesized(p) => enforce_in_expr(current_class_name, p, global),
+            _ => Ok(())
+        }
+    }
+    for s in &body.statements { walk(current_class_name, s, global)?; }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1914,7 +2140,7 @@ fn walk_expr(
         Expr::Conditional(c) => { walk_expr(current_class_name, &c.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &c.then_expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &c.else_expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name) }
         Expr::ArrayAccess(acc) => { walk_expr(current_class_name, &acc.array, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &acc.index, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name) }
         Expr::FieldAccess(fa) => {
-            // Qualified static field: TypeName.field
+            // Qualified field access: check static legality and accessibility
             if let Some(t) = &fa.target {
                 if let Expr::Identifier(id) = &**t {
                     if let Some(g) = global {
@@ -1922,6 +2148,27 @@ fn walk_expr(
                             if let Some(is_static) = mt.fields_static.get(&fa.name) {
                                 if !*is_static {
                                     return Err(ReviewError::IllegalStaticCall { typename: id.name.clone(), name: fa.name.clone() });
+                                }
+                            }
+                            // Accessibility: private/package/protected/public
+                            if let Some(vis) = mt.fields_visibility.get(&fa.name) {
+                                let same_package = mt.package_name.as_deref() == g.package.as_deref();
+                                match vis {
+                                    super::types::Visibility::Private => {
+                                        return Err(ReviewError::InaccessibleMember { typename: id.name.clone(), name: fa.name.clone() });
+                                    }
+                                    super::types::Visibility::Package => {
+                                        if !same_package {
+                                            return Err(ReviewError::InaccessibleMember { typename: id.name.clone(), name: fa.name.clone() });
+                                        }
+                                    }
+                                    super::types::Visibility::Protected => {
+                                        if !same_package {
+                                            // Simple protected rule: require same package (approx). Full JLS allows subclasses; left for future.
+                                            return Err(ReviewError::InaccessibleMember { typename: id.name.clone(), name: fa.name.clone() });
+                                        }
+                                    }
+                                    super::types::Visibility::Public => {}
                                 }
                             }
                         }
