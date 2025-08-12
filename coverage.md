@@ -42,7 +42,7 @@ Notes
 | Modifiers | Method visibility exclusivity (public/protected/private) | ✓ | `verify/method_access_flags.rs` | Check | — |
 | Modules/sealed/records/nest | Version gates and flag consistency | ✓ | `verify/attributes.rs`; `class_access_flags.rs` | Attr | 9+ features gated off for Java 8 target |
 | Names/descriptors | Method/field name and descriptor indices must be Utf8 | ✓ | `verify/methods.rs`; `verify/fields.rs` | Attr | — |
-| Overload resolution | Ambiguity detection and “more specific” tie-break | ◐ | `review/statements.rs`; tests | Resolve | Uses reference assignability for specificity; still a simplified rule set |
+| Overload resolution | Ambiguity detection and “more specific” tie-break | ✓ | `review/statements.rs`; tests: `review_overload_resolution_tests.rs` | Resolve | Implemented tie-break order: exact conversions first; then minimal number of conversions; then minimal widening cost; then prefer fixed arity over varargs; otherwise report ambiguity. Reference assignability considered for specificity when available. |
 | Overload resolution | Arity match; varargs minimum arity | ✓ | `review/statements.rs` | Resolve | Local class/static imports |
 | Overload resolution | Literal-driven applicability (widen/box/unbox) and simple ranking | ◐ | `review/statements.rs` | Resolve/Attr | Primitive + String; boxing/unboxing and simple reference assignability via hierarchy; varargs handled with same conversion model; arity-only fallback in compat mode; simplified cost model |
 | Packages/imports | Duplicate imports | ✓ | `review/imports.rs`; tests: `review_import_tests.rs` | Enter/Check | — |

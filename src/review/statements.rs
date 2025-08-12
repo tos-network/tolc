@@ -1633,17 +1633,58 @@ fn walk_expr(
                         }
                     }
                     if !cands_acc.is_empty() {
+                        // Deduplicate signatures
+                        let mut cands_unique: Vec<Vec<String>> = Vec::new();
+                        for s in &cands_acc {
+                            if !cands_unique.iter().any(|t| *t == *s) { cands_unique.push((*s).clone()); }
+                        }
                         let found_types: Vec<Option<&'static str>> = mc.arguments.iter().map(|a| infer_expr_primitive_or_string(a)).collect();
                         if found_types.iter().all(|o| o.is_some()) {
                             let found_list: Vec<&str> = found_types.iter().map(|o| o.unwrap()).collect();
                             let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
-                            for sig in &cands_acc {
+                            for sig in &cands_unique {
                                 if let Some((cost, convs)) = calc_cost_with_varargs(sig, &found_list, varargs_min_here) { applicable.push((sig, cost, convs)); }
                             }
                             if applicable.is_empty() {
-                                let expected = cands_acc.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                let expected = cands_unique.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
                                 let found = found_list.join(",");
                                 return Err(ReviewError::InapplicableMethod { name: mc.name.clone(), expected, found });
+                            } else if applicable.len() > 1 {
+                                // Tie-breaks:
+                                // 1) Prefer exact conversions (zero convs)
+                                let exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
+                                if exact.len() > 1 {
+                                    // 2) Prefer fixed-arity matches (signature length equals found args length)
+                                    let mut fixed_exact: Vec<&Vec<String>> = exact.iter().map(|(s, _, _)| *s).filter(|s| s.len() == found_list.len()).collect();
+                                    if fixed_exact.len() == 1 {
+                                        // resolved uniquely; keep single
+                                        applicable.retain(|(s, _, _)| *s == fixed_exact[0]);
+                                    } else {
+                                        // 3) Still ambiguous among exact conversions
+                                        let candidates = exact.iter().map(|(s, _, _)| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                        let found = found_list.join(",");
+                                        return Err(ReviewError::AmbiguousMethod { name: mc.name.clone(), candidates, found });
+                                    }
+                                } else if exact.len() == 1 {
+                                    applicable.retain(|(s, _, _)| *s == exact[0].0);
+                                } else {
+                                    // 4) Prefer minimal conversions, then minimal cost
+                                    let min_convs = applicable.iter().map(|(_, _, k)| *k).min().unwrap();
+                                    applicable.retain(|(_, _, k)| *k == min_convs);
+                                    let min_cost = applicable.iter().map(|(_, c, _)| *c).min().unwrap();
+                                    applicable.retain(|(_, c, _)| *c == min_cost);
+                                    if applicable.len() > 1 {
+                                        // 5) Prefer fixed-arity over varargs when both applicable
+                                        let mut fixed_only: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s).filter(|s| s.len() == found_list.len()).collect();
+                                        if fixed_only.len() == 1 {
+                                            applicable.retain(|(s, _, _)| *s == fixed_only[0]);
+                                        } else {
+                                            let candidates = applicable.iter().map(|(s, _, _)| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                            let found = found_list.join(",");
+                                            return Err(ReviewError::AmbiguousMethod { name: mc.name.clone(), candidates, found });
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             // Unknown arg types: if any candidate matches arity (including varargs), accept
@@ -1738,11 +1779,13 @@ fn walk_expr(
                                     return Err(ReviewError::MethodCallArityMismatch { name: format!("{}::{}", id.name, mc.name), expected, found: found_arity });
                                 }
                     if let Some(cands) = mt.methods_signatures.get(&mc.name) {
+                                    let mut cands_unique: Vec<Vec<String>> = Vec::new();
+                                    for s in cands { if !cands_unique.iter().any(|t| t == s) { cands_unique.push(s.clone()); } }
                                     let found_types: Vec<Option<&'static str>> = mc.arguments.iter().map(|a| infer_expr_primitive_or_string(a)).collect();
                                     if found_types.iter().all(|o| o.is_some()) {
                                         let found_list: Vec<&str> = found_types.iter().map(|o| o.unwrap()).collect();
                                         let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
-                                        for sig in cands {
+                                        for sig in &cands_unique {
                                             if sig.len() == found_list.len() {
                                                 let mut ok = true;
                                                 let mut cost: u32 = 0;
@@ -1755,8 +1798,8 @@ fn walk_expr(
                                                 if ok { applicable.push((sig, cost, convs)); }
                                             }
                                         }
-                                        if applicable.is_empty() && !cands.is_empty() {
-                                            let expected = cands.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                        if applicable.is_empty() && !cands_unique.is_empty() {
+                                            let expected = cands_unique.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
                                             let found = found_list.join(",");
                                     return Err(ReviewError::InapplicableMethod { name: format!("{}::{}", id.name, mc.name), expected, found });
                                         } else if applicable.len() > 1 {

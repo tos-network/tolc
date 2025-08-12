@@ -46,10 +46,20 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                     }
                 }
             }
-            // Include arity in key to distinguish overloads with the same simple parameter type names due to imports/aliasing
+            // Include arity in key to distinguish overloads; also encode varargs on the last parameter so
+            // that `m(int)` and `m(int...)` are not treated as duplicates.
             let key = MethodKey {
                 name: m.name.clone(),
-                param_types: m.parameters.iter().map(|p| super::types::type_ref_signature_name(&p.type_ref)).collect(),
+                param_types: m
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let mut s = super::types::type_ref_signature_name(&p.type_ref);
+                        if p.varargs && i == m.parameters.len().saturating_sub(1) { s.push_str("..."); }
+                        s
+                    })
+                    .collect(),
             };
             super::debug_log(format!(
                 "method seen candidate: {}.{}({}) @lines {}..{}",
