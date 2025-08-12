@@ -37,15 +37,15 @@ Notes
 | switch | Duplicate case constants; multiple defaults | ✓ | `review/statements.rs`; tests | Flow | int constant folding subset |
 | switch | Effect of default on DA | ◐ | `review/statements.rs`; tests | Flow | Subset |
 | Overload resolution | Arity match; varargs minimum arity | ✓ | `review/statements.rs` | Resolve | Local class/static imports |
-| Overload resolution | Literal-driven applicability (widen/box/unbox) and simple ranking | ◐ | `review/statements.rs` | Resolve/Attr | Primitive + String; simplified cost model; arity-only fallback in compat mode |
-| Overload resolution | Ambiguity detection and “more specific” tie-break | ◐ | `review/statements.rs`; tests | Resolve | Simplified rules |
+| Overload resolution | Literal-driven applicability (widen/box/unbox) and simple ranking | ◐ | `review/statements.rs` | Resolve/Attr | Primitive + String; boxing/unboxing and simple reference assignability via hierarchy; varargs handled with same conversion model; arity-only fallback in compat mode; simplified cost model |
+| Overload resolution | Ambiguity detection and “more specific” tie-break | ◐ | `review/statements.rs`; tests | Resolve | Uses reference assignability for specificity; still a simplified rule set |
 | Static access | Static imports: method/field staticity and arity checks | ✓ | `review/statements.rs`, `review/fields.rs`; tests | Resolve/Enter | — |
 | Static access | `TypeName.m(...)` / `TypeName.f` must be static | ✓ | `review/statements.rs`, `review/fields.rs` | Check/Resolve | — |
 | Generics | Type-argument count in new/cast/instanceof | ✓ | `review/statements.rs`; tests | Attr | Strict match; in compat mode only raw (0 args) usage is tolerated |
-| Generics | Upper-bound checks (local index/explicit imports) | ◐ | `review/types.rs`, `review/statements.rs` | Attr | Bounds validated when present; full capture/inference out of scope |
-| Exceptions | Checked exceptions report (throws/catch coverage) | ◐ | `review/statements.rs`; tests: `review_exceptions_tests.rs` | Flow/Attr | Throw typing (new/identifier/cast); call-site propagation for local and cross-type methods/ctors (incl. static-imported). Uses classpath index when `TOLC_CLASSPATH` is set. Gaps: try-with-resources close(), precise rethrow/multi-catch rules. |
-| Access control | Cross-package/derived visibility and override access | ◐ | `review/types.rs`, `review/methods.rs` | Check/Resolve | Enforced across full super chain and interfaces: no static/instance override/hide; no visibility reduction; interface implementations must be public; final cannot be overridden. Gaps: nuanced protected/package edge cases across packages. |
-| Overrides | Return/throws/override-consistency | ◐ | `review/types.rs`, `review/methods.rs` | Check/Resolve/Attr | Enforced across full super chain and interfaces: static/instance rules; final; visibility (incl. package); return covariance (incl. type-parameter super returns); throws narrowing (basic). Gaps: full throws subtyping matrix and corner cases. |
+| Generics | Upper-bound checks (local index/explicit imports) | ◐ | `review/types.rs`, `review/statements.rs` | Attr | Bounds validated across new/cast/instanceof; wildcard capture subset: `? extends B` treated as `B`, bare `?` as `Object`; wildcards disallowed in constructor type args; full capture/inference out of scope |
+| Exceptions | Checked exceptions report (throws/catch coverage) | ◐ | `review/statements.rs`; tests: `review_exceptions_tests.rs`, `review_try_with_resources_tests.rs` | Flow/Attr | Throw typing (new/identifier/call); call-site propagation for local and cross-type methods/ctors (incl. static-imported). Try-with-resources integrates `close()` declared throws from declared resource type; falls back to `Closeable`/`AutoCloseable` contracts. Gaps: precise rethrow/multi-catch rules. |
+| Access control | Cross-package/derived visibility and override access | ◐ | `review/types.rs`, `review/methods.rs` | Check/Resolve | Enforced across full super chain and interfaces: no static/instance override/hide; no visibility reduction; interface implementations must be public; final cannot be overridden; interface defaults/abstracts and diamond conflicts handled. Gaps: nuanced protected/package edge cases across packages. |
+| Overrides | Return/throws/override-consistency | ◐ | `review/types.rs`, `review/methods.rs` | Check/Resolve/Attr | Enforced across full super chain and interfaces: static/instance rules; final; visibility (incl. package); return covariance (incl. type-parameter super returns); throws narrowing (basic); conflicting interface defaults require class override. Gaps: full throws subtyping matrix and corner cases. |
 | Annotations | Retention=Runtime must be in visible set | ✓ | `verify/attributes.rs`; tests | Attr | — |
 | Annotations | Type-annotation targets/context legality | ◐ | `verify/attributes.rs` | Attr | Basic validation only |
 | Constant pool | Indices and kinds validation | ✓ | `verify/constant_pool.rs` | JVMS | — |
@@ -60,7 +60,7 @@ Notes
 | Version | Reject classfile major > 52 | ✓ | `verify/mod.rs` | Target/Source | Locked to Java 8 |
 
 Summary
-- tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful FLOW/overload subsets.
-- Major gaps vs javac: checked exceptions, full cross-type symbol/visibility and override checks, complete overload and generics inference rules.
+- tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful Flow/Resolve/Generics subsets.
+- Remaining notable gaps vs javac: precise rethrow/multi-catch rules; nuanced protected/package rules across packages; complete overload ranking and generics inference/capture beyond the implemented subset.
 
 
