@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) fn review_method_body_return(m: &MethodDecl) -> ReviewResult<()> {
     if m.return_type.is_none() { return Ok(()); } // void
     if let Some(body) = &m.body {
-        if block_guarantees_return(body) { return Ok(()); }
+        if block_guarantees_return(body) || block_cannot_complete_normally(body) { return Ok(()); }
         return Err(ReviewError::DuplicateType(format!(
             "non-void method '{}' may not return on all paths (basic check)",
             m.name
@@ -34,6 +34,53 @@ fn block_guarantees_return(block: &Block) -> bool {
     false
 }
 
+// Returns true if the block is guaranteed to not complete normally (e.g., ends in an infinite loop,
+// unconditional return/throw on all paths). Used to satisfy non-void must-return via non-termination.
+fn block_cannot_complete_normally(block: &Block) -> bool {
+    for s in &block.statements {
+        if stmt_cannot_complete_normally(s) { return true; }
+    }
+    false
+}
+
+fn stmt_cannot_complete_normally(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) => true,
+        Stmt::Throw(_) => true,
+        Stmt::Block(b) => block_cannot_complete_normally(b),
+        Stmt::If(ifstmt) => {
+            if let Some(else_b) = &ifstmt.else_branch {
+                stmt_cannot_complete_normally(&ifstmt.then_branch) && stmt_cannot_complete_normally(else_b)
+            } else { false }
+        }
+        Stmt::While(w) => {
+            if expr_is_boolean_true(&w.condition) {
+                // Infinite loop without a break that exits the loop cannot complete normally
+                !has_top_level_break(&w.body)
+            } else { false }
+        }
+        Stmt::For(f) => {
+            if f.condition.is_none() {
+                // for(;;) infinite without a break that exits cannot complete normally
+                !has_top_level_break(&f.body)
+            } else { false }
+        }
+        Stmt::Try(t) => {
+            if let Some(fin) = &t.finally_block {
+                if block_cannot_complete_normally(fin) { return true; }
+            }
+            let try_ccn = block_cannot_complete_normally(&t.try_block);
+            let mut catches_ccn = !t.catch_clauses.is_empty();
+            for cc in &t.catch_clauses {
+                if !block_cannot_complete_normally(&cc.block) { catches_ccn = false; break; }
+            }
+            try_ccn && catches_ccn
+        }
+        Stmt::Labeled(ls) => stmt_cannot_complete_normally(&ls.statement),
+        _ => false,
+    }
+}
+
 fn stmt_guarantees_return(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(_) => true,
@@ -49,16 +96,17 @@ fn stmt_guarantees_return(stmt: &Stmt) -> bool {
         }
         Stmt::Switch(sw) => switch_guarantees_return(sw),
         Stmt::While(w) => {
-            // trivial terminal: while (true) { body guarantees return }
+            // while (true): loop guarantees return only if body guarantees return
+            // and there is no top-level break in the loop body that exits the loop
             if expr_is_boolean_true(&w.condition) {
-                stmt_guarantees_return(&w.body)
+                stmt_guarantees_return(&w.body) && !has_top_level_break(&w.body)
             } else {
                 false
             }
         }
         Stmt::For(f) => {
-            // heuristic: for(;;) ... == while(true)
-            if f.condition.is_none() { return stmt_guarantees_return(&f.body); }
+            // for(;;): same rule as while(true)
+            if f.condition.is_none() { return stmt_guarantees_return(&f.body) && !has_top_level_break(&f.body); }
             false
         }
         Stmt::Try(t) => {
@@ -77,6 +125,74 @@ fn stmt_guarantees_return(stmt: &Stmt) -> bool {
         // break/continue/switch default: conservatively false in this basic pass
         _ => false,
     }
+}
+
+// Detect a top-level break within a single statement (block or single)
+fn has_top_level_break(stmt: &Stmt) -> bool {
+    use std::collections::HashSet;
+    let inner_labels = collect_inner_labels(stmt);
+    fn breaks_out(s: &Stmt, inner_labels: &HashSet<String>, loop_depth: usize, in_switch: bool) -> bool {
+        match s {
+            Stmt::Break(b) => {
+                if let Some(lab) = &b.label {
+                    // labeled break exits if it targets a label outside this body
+                    !inner_labels.contains(lab)
+                } else {
+                    // unlabeled break exits loop only if not inside a nested loop or a switch
+                    loop_depth == 0 && !in_switch
+                }
+            }
+            Stmt::Block(b) => b.statements.iter().any(|sub| breaks_out(sub, inner_labels, loop_depth, in_switch)),
+            Stmt::If(ifstmt) => {
+                breaks_out(&ifstmt.then_branch, inner_labels, loop_depth, in_switch)
+                    || if let Some(else_b) = &ifstmt.else_branch { breaks_out(else_b, inner_labels, loop_depth, in_switch) } else { false }
+            }
+            Stmt::Labeled(ls) => breaks_out(&ls.statement, inner_labels, loop_depth, in_switch),
+            Stmt::While(w) => breaks_out(&w.body, inner_labels, loop_depth + 1, in_switch),
+            Stmt::For(f) => breaks_out(&f.body, inner_labels, loop_depth + 1, in_switch),
+            Stmt::Switch(sw) => {
+                for c in &sw.cases {
+                    for st in &c.statements {
+                        if breaks_out(st, inner_labels, loop_depth, true) { return true; }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+    breaks_out(stmt, &inner_labels, 0, false)
+}
+
+// Collect all label names declared inside this statement tree
+fn collect_inner_labels(stmt: &Stmt) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    fn walk(s: &Stmt, acc: &mut HashSet<String>) {
+        match s {
+            Stmt::Labeled(ls) => {
+                acc.insert(ls.label.clone());
+                walk(&ls.statement, acc);
+            }
+            Stmt::Block(b) => {
+                for sub in &b.statements { walk(sub, acc); }
+            }
+            Stmt::If(ifstmt) => {
+                walk(&ifstmt.then_branch, acc);
+                if let Some(else_b) = &ifstmt.else_branch { walk(else_b, acc); }
+            }
+            Stmt::While(w) => walk(&w.body, acc),
+            Stmt::For(f) => walk(&f.body, acc),
+            Stmt::Switch(sw) => {
+                for c in &sw.cases {
+                    for st in &c.statements { walk(st, acc); }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut set = HashSet::new();
+    walk(stmt, &mut set);
+    set
 }
 
 fn switch_guarantees_return(sw: &SwitchStmt) -> bool {
@@ -264,6 +380,33 @@ pub(crate) fn review_body_call_arity(
     Ok(())
 }
 
+// Helper: determine if an exception type name is unchecked (RuntimeException/Error or their subclasses)
+fn is_unchecked_exception(name: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
+    if name == "RuntimeException" || name == "Error" { return true; }
+    if crate::review::compat_mode() {
+        // Common RuntimeException subclasses treated as unchecked when hierarchy is missing
+        match name {
+            "ArithmeticException" | "NullPointerException" | "ClassCastException" |
+            "ArrayIndexOutOfBoundsException" | "NegativeArraySizeException" |
+            "IllegalArgumentException" | "IllegalStateException" |
+            "UnsupportedOperationException" | "NoSuchElementException" => { return true; }
+            _ => {}
+        }
+    }
+    if let Some(mt) = crate::review::statements::resolve_type_in_index(global, name) {
+        let mut cur = mt.super_name.clone();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(sup) = cur {
+            if sup == "RuntimeException" || sup == "Error" { super::debug_log(format!("unchecked via super: {} <: {}", name, sup)); return true; }
+            if !seen.insert(sup.clone()) { break; }
+            cur = crate::review::statements::resolve_type_in_index(global, &sup).and_then(|m| m.super_name.clone());
+        }
+    } else {
+        super::debug_log(format!("cannot resolve exception type '{}'; treating as checked", name));
+    }
+    false
+}
+
 // Checked exceptions: report unhandled checked exceptions unless caught or declared
 pub(crate) fn review_body_checked_exceptions(
     current_class: &ClassDecl,
@@ -271,31 +414,6 @@ pub(crate) fn review_body_checked_exceptions(
     declared_throws: &[String],
     global: &crate::review::types::GlobalMemberIndex,
 ) -> ReviewResult<()> {
-    fn is_unchecked_exception(name: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
-        if name == "RuntimeException" || name == "Error" { return true; }
-        if crate::review::compat_mode() {
-            // Common RuntimeException subclasses treated as unchecked when hierarchy is missing
-            match name {
-                "ArithmeticException" | "NullPointerException" | "ClassCastException" |
-                "ArrayIndexOutOfBoundsException" | "NegativeArraySizeException" |
-                "IllegalArgumentException" | "IllegalStateException" |
-                "UnsupportedOperationException" | "NoSuchElementException" => { return true; }
-                _ => {}
-            }
-        }
-        if let Some(mt) = crate::review::statements::resolve_type_in_index(global, name) {
-            let mut cur = mt.super_name.clone();
-            let mut seen = std::collections::HashSet::new();
-            while let Some(sup) = cur {
-                if sup == "RuntimeException" || sup == "Error" { super::debug_log(format!("unchecked via super: {} <: {}", name, sup)); return true; }
-                if !seen.insert(sup.clone()) { break; }
-                cur = crate::review::statements::resolve_type_in_index(global, &sup).and_then(|m| m.super_name.clone());
-            }
-        } else {
-            super::debug_log(format!("cannot resolve exception type '{}'; treating as checked", name));
-        }
-        false
-    }
 
     fn is_assignable_to_any(global: &crate::review::types::GlobalMemberIndex, src: &str, dsts: &[String]) -> bool {
         for d in dsts { if crate::review::statements::is_reference_assignable(global, src, d) { return true; } }
@@ -310,6 +428,59 @@ pub(crate) fn review_body_checked_exceptions(
         catch_stack: &Vec<Vec<String>>, 
         scopes: &Vec<HashMap<String, String>>,
     ) -> ReviewResult<()> {
+        // Utility: collect simple static types for arguments when available
+        fn collect_arg_types(
+            current_class: &ClassDecl,
+            args: &Vec<Expr>,
+            global: &crate::review::types::GlobalMemberIndex,
+            scopes: &Vec<HashMap<String, String>>,
+        ) -> Option<Vec<String>> {
+            let mut out: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                if let Some(t) = expr_static_type(current_class, a, global, scopes) { out.push(t); } else { return None; }
+            }
+            Some(out)
+        }
+        fn select_method_throws(
+            mt: &crate::review::types::MemberTables,
+            name: &str,
+            arity: usize,
+            arg_types: Option<&Vec<String>>,
+        ) -> Vec<String> {
+            // Prefer by signature if arg types known
+            if let Some(arg_sig) = arg_types {
+                if let Some(list) = mt.methods_throws_by_sig.get(name) {
+                    for (sig, thr) in list {
+                        if sig == arg_sig { return thr.clone(); }
+                    }
+                }
+            }
+            // Fallback by arity, union across entries for robustness
+            let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Some(list) = mt.methods_throws.get(name) {
+                for (a, thr) in list { if *a == arity { for t in thr { out.insert(t.clone()); } } }
+            }
+            out.into_iter().collect()
+        }
+        fn select_ctor_throws(
+            mt: &crate::review::types::MemberTables,
+            self_type: &str,
+            arity: usize,
+            arg_types: Option<&Vec<String>>,
+        ) -> Vec<String> {
+            if let Some(arg_sig) = arg_types {
+                if let Some(list) = mt.ctors_throws_by_sig.get(self_type) {
+                    for (sig, thr) in list {
+                        if sig == arg_sig { return thr.clone(); }
+                    }
+                }
+            }
+            let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Some(list) = mt.ctors_throws.get(self_type) {
+                for (a, thr) in list { if *a == arity { for t in thr { out.insert(t.clone()); } } }
+            }
+            out.into_iter().collect()
+        }
         // Helper to enforce coverage for a thrown exception type name
         let require = |exc: &str| -> ReviewResult<()> {
             if !is_unchecked_exception(exc, global)
@@ -331,10 +502,11 @@ pub(crate) fn review_body_checked_exceptions(
                 if is_unqualified || is_self {
                     // Prefer GlobalMemberIndex recorded throws for current type if available
                     if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
-                        if let Some(list) = mt.methods_throws.get(&mc.name) {
-                            let arity = mc.arguments.len();
-                            for (a, thr) in list.iter() { if *a == arity { super::debug_log(format!("call throws (local): {}.{}({}) -> {:?}", current_class.name, mc.name, arity, thr)); for t in thr { require(t)?; } } }
-                        }
+                        let arity = mc.arguments.len();
+                        let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
+                        super::debug_log(format!("call throws (local): {}.{}({}) -> {:?}", current_class.name, mc.name, arity, thr));
+                        for t in &thr { require(t)?; }
                     } else {
                         // Fallback to scanning current class AST
                         let arity = mc.arguments.len();
@@ -344,15 +516,26 @@ pub(crate) fn review_body_checked_exceptions(
                         for t in union_throws.iter() { require(t)?; }
                     }
                 }
-                // Qualified cross-type calls: TypeName.m(...)
+                // Qualified target present
                 if let Some(t) = &mc.target {
-                    if let Expr::Identifier(id) = &**t {
+                    // First try treating target as an expression whose static type we can infer
+                    if let Some(tname) = expr_static_type(current_class, t, global, scopes) {
+                        if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tname) {
+                            let arity = mc.arguments.len();
+                            let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                            let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
+                            super::debug_log(format!("call throws (instance-target): {}.{}({}) -> {:?}", tname, mc.name, arity, thr));
+                            for t in &thr { require(t)?; }
+                        }
+                    } else if let Expr::Identifier(id) = &**t {
+                        // Fallback: TypeName.m(...) cross-type static or qualified calls
                         if id.name != current_class.name {
                             if let Some(mt) = crate::review::types::resolve_type_in_index(global, &id.name) {
-                                if let Some(list) = mt.methods_throws.get(&mc.name) {
-                                    let arity = mc.arguments.len();
-                                    for (a, thr) in list.iter() { if *a == arity { super::debug_log(format!("call throws (cross-type): {}.{}({}) -> {:?}", id.name, mc.name, arity, thr)); for t in thr { require(t)?; } } }
-                                }
+                                let arity = mc.arguments.len();
+                                let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                                let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
+                                super::debug_log(format!("call throws (cross-type): {}.{}({}) -> {:?}", id.name, mc.name, arity, thr));
+                                for t in &thr { require(t)?; }
                             }
                         }
                     }
@@ -360,10 +543,11 @@ pub(crate) fn review_body_checked_exceptions(
                     // Unqualified: try explicit static import mapping to a type
                     if let Some(ty) = global.static_explicit.get(&mc.name) {
                         if let Some(mt) = crate::review::types::resolve_type_in_index(global, ty) {
-                            if let Some(list) = mt.methods_throws.get(&mc.name) {
-                                let arity = mc.arguments.len();
-                                for (a, thr) in list.iter() { if *a == arity { super::debug_log(format!("call throws (static import): {}.{}({}) -> {:?}", ty, mc.name, arity, thr)); for t in thr { require(t)?; } } }
-                            }
+                            let arity = mc.arguments.len();
+                            let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                            let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
+                            super::debug_log(format!("call throws (static import): {}.{}({}) -> {:?}", ty, mc.name, arity, thr));
+                            for t in &thr { require(t)?; }
                         }
                     }
                 }
@@ -376,10 +560,11 @@ pub(crate) fn review_body_checked_exceptions(
                 // Constructors of current class only
                 if n.target_type.name == current_class.name {
                     if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
-                        if let Some(list) = mt.ctors_throws.get(&current_class.name) {
-                            let arity = n.arguments.len();
-                            for (a, thr) in list.iter() { if *a == arity { super::debug_log(format!("ctor throws (local): {}.<init>({}) -> {:?}", current_class.name, arity, thr)); for t in thr { require(t)?; } } }
-                        }
+                        let arity = n.arguments.len();
+                        let arg_types = collect_arg_types(current_class, &n.arguments, global, scopes);
+                        let thr = select_ctor_throws(mt, &current_class.name, arity, arg_types.as_ref());
+                        super::debug_log(format!("ctor throws (local): {}.<init>({}) -> {:?}", current_class.name, arity, thr));
+                        for t in &thr { require(t)?; }
                     } else {
                         let arity = n.arguments.len();
                         let mut union_throws: HashSet<String> = HashSet::new();
@@ -390,10 +575,11 @@ pub(crate) fn review_body_checked_exceptions(
                 } else {
                     // Cross-type constructor throws
                     if let Some(mt) = crate::review::types::resolve_type_in_index(global, &n.target_type.name) {
-                        if let Some(list) = mt.ctors_throws.get(&n.target_type.name) {
-                            let arity = n.arguments.len();
-                            for (a, thr) in list.iter() { if *a == arity { super::debug_log(format!("ctor throws (cross-type): {}.<init>({}) -> {:?}", n.target_type.name, arity, thr)); for t in thr { require(t)?; } } }
-                        }
+                        let arity = n.arguments.len();
+                        let arg_types = collect_arg_types(current_class, &n.arguments, global, scopes);
+                        let thr = select_ctor_throws(mt, &n.target_type.name, arity, arg_types.as_ref());
+                        super::debug_log(format!("ctor throws (cross-type): {}.<init>({}) -> {:?}", n.target_type.name, arity, thr));
+                        for t in &thr { require(t)?; }
                     }
                 }
                 for a in &n.arguments { walk_expr_for_exn(current_class, a, declared, global, catch_stack, scopes)?; }
@@ -416,7 +602,12 @@ pub(crate) fn review_body_checked_exceptions(
         }
     }
 
-    fn expr_static_type(expr: &Expr, scopes: &Vec<HashMap<String, String>>) -> Option<String> {
+    fn expr_static_type(
+        current_class: &ClassDecl,
+        expr: &Expr,
+        global: &crate::review::types::GlobalMemberIndex,
+        scopes: &Vec<HashMap<String, String>>,
+    ) -> Option<String> {
         match expr {
             Expr::New(n) => Some(n.target_type.name.clone()),
             Expr::Identifier(id) => {
@@ -424,15 +615,64 @@ pub(crate) fn review_body_checked_exceptions(
                 None
             }
             Expr::Cast(c) => Some(c.target_type.name.clone()),
+            Expr::MethodCall(mc) => {
+                // Infer return type via meta when possible
+                let arity = mc.arguments.len();
+                // Determine target type name
+                let tname_opt: Option<String> = if let Some(t) = &mc.target {
+                    match &**t {
+                        Expr::Identifier(id) => Some(id.name.clone()),
+                        other => expr_static_type(current_class, other, global, scopes),
+                    }
+                } else { Some(current_class.name.clone()) };
+                if let Some(tname) = tname_opt {
+                    if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tname) {
+                        // Try exact signature match
+                        let arg_types = {
+                            let mut v = Vec::with_capacity(arity);
+                            for a in &mc.arguments { if let Some(tt) = expr_static_type(current_class, a, global, scopes) { v.push(tt); } else { v.clear(); break; } }
+                            if v.is_empty() { None } else { Some(v) }
+                        };
+                        if let Some(list) = mt.methods_meta.get(&mc.name) {
+                            if let Some(arg_sig) = arg_types.as_ref() {
+                                for meta in list {
+                                    if meta.signature == *arg_sig { return meta.return_type.clone(); }
+                                }
+                            }
+                            // Fallback: if only one overload, take its return type
+                            if list.len() == 1 { return list[0].return_type.clone(); }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
 
-    fn walk(block: &Block, current_class: &ClassDecl, declared: &[String], global: &crate::review::types::GlobalMemberIndex, catch_stack: &mut Vec<Vec<String>>, scopes: &mut Vec<HashMap<String, String>>) -> ReviewResult<()> {
+    #[derive(Clone)]
+    struct RethrowCtx { catch_name: String, catch_type: String, try_checked: Vec<String> }
+
+    fn walk(block: &Block, current_class: &ClassDecl, declared: &[String], global: &crate::review::types::GlobalMemberIndex, catch_stack: &mut Vec<Vec<String>>, scopes: &mut Vec<HashMap<String, String>>, rethrow_ctx: &Option<RethrowCtx>) -> ReviewResult<()> {
         for s in &block.statements {
             match s {
                 Stmt::Throw(ts) => {
-                    if let Some(exc) = expr_static_type(&ts.expr, scopes) {
+                    // Precise rethrow: throw of a catch parameter rethrows only checked exceptions from try
+                    if let Expr::Identifier(id) = &ts.expr {
+                        if let Some(ctx) = rethrow_ctx {
+                            if id.name == ctx.catch_name {
+                                for exc in &ctx.try_checked {
+                                    if is_unchecked_exception(exc, global) { continue; }
+                                    if !is_reference_assignable(global, exc, &ctx.catch_type) { continue; }
+                                    if catch_stack.iter().rev().any(|frame| is_assignable_to_any(global, exc, frame)) { continue; }
+                                    if is_assignable_to_any(global, exc, declared) { continue; }
+                                    return Err(ReviewError::UnreportedCheckedException(exc.clone()));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(exc) = expr_static_type(current_class, &ts.expr, global, scopes) {
                         if !is_unchecked_exception(&exc, global)
                             && !catch_stack.iter().rev().any(|frame| is_assignable_to_any(global, &exc, frame))
                             && !is_assignable_to_any(global, &exc, declared)
@@ -449,24 +689,33 @@ pub(crate) fn review_body_checked_exceptions(
                     catch_stack.push(catch_types_here.clone());
                     // New scope for try block
                     scopes.push(HashMap::new());
-                    walk(&t.try_block, current_class, declared, global, catch_stack, scopes)?;
+                    walk(&t.try_block, current_class, declared, global, catch_stack, scopes, &None)?;
                     scopes.pop();
                     catch_stack.pop();
                     // catch blocks: establish catch var type in a new scope
-                    for c in &t.catch_clauses { 
+                    // compute checked exceptions possibly thrown in try
+                    let try_checked = collect_checked_exceptions_in_block(current_class, &t.try_block, global, scopes);
+                    for c in &t.catch_clauses {
                         scopes.push({ let mut m = HashMap::new(); m.insert(c.parameter.name.clone(), c.parameter.type_ref.name.clone()); m });
-                        walk(&c.block, current_class, declared, global, catch_stack, scopes)?; 
+                        let ctx = RethrowCtx { catch_name: c.parameter.name.clone(), catch_type: c.parameter.type_ref.name.clone(), try_checked: try_checked.clone() };
+                        walk(&c.block, current_class, declared, global, catch_stack, scopes, &Some(ctx))?;
                         scopes.pop();
                     }
-                    // try-with-resources: enforce close() declared throws
+                    // try-with-resources: enforce initializer and close() declared throws
                     if !t.resources.is_empty() {
                         // Collect resource declared/static types
                         let mut resource_types: Vec<String> = Vec::new();
                         for r in &t.resources {
                             match r {
-                                TryResource::Var { type_ref, .. } => resource_types.push(type_ref.name.clone()),
+                                TryResource::Var { type_ref, initializer, .. } => {
+                                    resource_types.push(type_ref.name.clone());
+                                    // Account for exceptions thrown during resource initializer evaluation
+                                    walk_expr_for_exn(current_class, initializer, declared, global, catch_stack, scopes)?;
+                                }
                                 TryResource::Expr { expr, .. } => {
-                                    if let Some(tn) = expr_static_type(expr, scopes) { resource_types.push(tn); }
+                                    if let Some(tn) = expr_static_type(current_class, expr, global, scopes) { resource_types.push(tn); }
+                                    // Account for exceptions thrown during resource expression evaluation
+                                    walk_expr_for_exn(current_class, expr, declared, global, catch_stack, scopes)?;
                                 }
                             }
                         }
@@ -505,25 +754,25 @@ pub(crate) fn review_body_checked_exceptions(
                             { return Err(ReviewError::UnreportedCheckedException(exc)); }
                         }
                     }
-                    if let Some(fin) = &t.finally_block { scopes.push(HashMap::new()); walk(fin, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                    if let Some(fin) = &t.finally_block { scopes.push(HashMap::new()); walk(fin, current_class, declared, global, catch_stack, scopes, &None)?; scopes.pop(); }
                 }
                 Stmt::If(i) => {
                     let then_block = if let Stmt::Block(b) = &*i.then_branch { b.clone() } else { Block { statements: vec![(*i.then_branch.clone())], span: i.span } }; 
                     scopes.push(HashMap::new());
-                    walk(&then_block, current_class, declared, global, catch_stack, scopes)?;
+                    walk(&then_block, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?;
                     scopes.pop();
                     if let Some(else_b) = &i.else_branch {
                         let else_block = if let Stmt::Block(b) = &**else_b { b.clone() } else { Block { statements: vec![(**else_b).clone()], span: i.span } };
                         scopes.push(HashMap::new());
-                        walk(&else_block, current_class, declared, global, catch_stack, scopes)?;
+                        walk(&else_block, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?;
                         scopes.pop();
                     }
                 }
-                Stmt::While(w) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*w.body.clone())], span: w.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
-                Stmt::For(f) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*f.body.clone())], span: f.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
-                Stmt::Block(b) => { scopes.push(HashMap::new()); walk(b, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
-                Stmt::Switch(sw) => { for c in &sw.cases { scopes.push(HashMap::new()); walk(&Block { statements: c.statements.clone(), span: c.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); } }
-                Stmt::Labeled(ls) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, current_class, declared, global, catch_stack, scopes)?; scopes.pop(); }
+                Stmt::While(w) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*w.body.clone())], span: w.span }, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?; scopes.pop(); }
+                Stmt::For(f) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*f.body.clone())], span: f.span }, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?; scopes.pop(); }
+                Stmt::Block(b) => { scopes.push(HashMap::new()); walk(b, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?; scopes.pop(); }
+                Stmt::Switch(sw) => { for c in &sw.cases { scopes.push(HashMap::new()); walk(&Block { statements: c.statements.clone(), span: c.span }, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?; scopes.pop(); } }
+                Stmt::Labeled(ls) => { scopes.push(HashMap::new()); walk(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, current_class, declared, global, catch_stack, scopes, rethrow_ctx)?; scopes.pop(); }
                 Stmt::Declaration(vd) => {
                     // Record declared variable types
                     for var in &vd.variables { if let Some(scope) = scopes.last_mut() { scope.insert(var.name.clone(), vd.type_ref.name.clone()); } }
@@ -537,7 +786,111 @@ pub(crate) fn review_body_checked_exceptions(
 
     let mut catch_stack: Vec<Vec<String>> = Vec::new();
     let mut scopes: Vec<HashMap<String, String>> = vec![HashMap::new()];
-    walk(body, current_class, declared_throws, global, &mut catch_stack, &mut scopes)
+    walk(body, current_class, declared_throws, global, &mut catch_stack, &mut scopes, &None)
+}
+
+fn collect_checked_exceptions_in_block(
+    current_class: &ClassDecl,
+    block: &Block,
+    global: &crate::review::types::GlobalMemberIndex,
+    scopes: &Vec<HashMap<String, String>>,
+) -> Vec<String> {
+    use std::collections::HashSet;
+    // Reuse the unchecked check from outer fn via a small wrapper
+    fn unchecked(global: &crate::review::types::GlobalMemberIndex, name: &str) -> bool { is_unchecked_exception(name, global) }
+    fn collect_expr(
+        current_class: &ClassDecl,
+        expr: &Expr,
+        global: &crate::review::types::GlobalMemberIndex,
+        scopes: &Vec<HashMap<String, String>>,
+        out: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::MethodCall(mc) => {
+                if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
+                    if let Some(list) = mt.methods_throws.get(&mc.name) {
+                        let arity = mc.arguments.len();
+                        for (a, thr) in list.iter() { if *a == arity { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
+                    }
+                }
+                if let Some(t) = &mc.target {
+                    if let Expr::Identifier(id) = &**t {
+                        if let Some(mt) = crate::review::types::resolve_type_in_index(global, &id.name) {
+                            if let Some(list) = mt.methods_throws.get(&mc.name) {
+                                let arity = mc.arguments.len();
+                                for (a, thr) in list.iter() { if *a == arity { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
+                            }
+                        }
+                    }
+                }
+                for a in &mc.arguments { collect_expr(current_class, a, global, scopes, out); }
+            }
+            Expr::New(n) => {
+                if n.target_type.name == current_class.name {
+                    if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
+                        if let Some(list) = mt.ctors_throws.get(&current_class.name) {
+                            let arity = n.arguments.len();
+                            for (a, thr) in list.iter() { if *a == arity { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
+                        }
+                    }
+                } else if let Some(mt) = crate::review::types::resolve_type_in_index(global, &n.target_type.name) {
+                    if let Some(list) = mt.ctors_throws.get(&n.target_type.name) {
+                        let arity = n.arguments.len();
+                        for (a, thr) in list.iter() { if *a == arity { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
+                    }
+                }
+                for a in &n.arguments { collect_expr(current_class, a, global, scopes, out); }
+            }
+            Expr::Cast(c) => collect_expr(current_class, &c.expr, global, scopes, out),
+            Expr::Assignment(a) => { collect_expr(current_class, &a.value, global, scopes, out); collect_expr(current_class, &a.target, global, scopes, out); }
+            Expr::Unary(u) => collect_expr(current_class, &u.operand, global, scopes, out),
+            Expr::Binary(b) => { collect_expr(current_class, &b.left, global, scopes, out); collect_expr(current_class, &b.right, global, scopes, out); }
+            Expr::ArrayAccess(a) => { collect_expr(current_class, &a.array, global, scopes, out); collect_expr(current_class, &a.index, global, scopes, out); }
+            Expr::FieldAccess(f) => { if let Some(t) = &f.target { collect_expr(current_class, t, global, scopes, out); } }
+            Expr::Conditional(c) => { collect_expr(current_class, &c.condition, global, scopes, out); collect_expr(current_class, &c.then_expr, global, scopes, out); collect_expr(current_class, &c.else_expr, global, scopes, out); }
+            Expr::Parenthesized(p) => collect_expr(current_class, p, global, scopes, out),
+            _ => {}
+        }
+    }
+    fn collect(block: &Block, current_class: &ClassDecl, global: &crate::review::types::GlobalMemberIndex, scopes: &Vec<HashMap<String, String>>, out: &mut HashSet<String>) {
+        for s in &block.statements {
+            match s {
+                Stmt::Throw(ts) => {
+                    // minimal static type for throw expr
+                    let exc = match &ts.expr {
+                        Expr::New(n) => Some(n.target_type.name.clone()),
+                        Expr::Identifier(id) => scopes.iter().rev().find_map(|m| m.get(&id.name).cloned()),
+                        Expr::Cast(c) => Some(c.target_type.name.clone()),
+                        _ => None,
+                    };
+                    if let Some(exc) = exc { if !unchecked(global, &exc) { out.insert(exc); } }
+                }
+                Stmt::Try(t) => {
+                    collect(&t.try_block, current_class, global, scopes, out);
+                    for c in &t.catch_clauses { collect(&c.block, current_class, global, scopes, out); }
+                    if let Some(fin) = &t.finally_block { collect(fin, current_class, global, scopes, out); }
+                }
+                Stmt::If(i) => {
+                    let then_block = if let Stmt::Block(b) = &*i.then_branch { b.clone() } else { Block { statements: vec![(*i.then_branch.clone())], span: i.span } };
+                    collect(&then_block, current_class, global, scopes, out);
+                    if let Some(else_b) = &i.else_branch {
+                        let else_block = if let Stmt::Block(b) = &**else_b { b.clone() } else { Block { statements: vec![(**else_b).clone()], span: i.span } };
+                        collect(&else_block, current_class, global, scopes, out);
+                    }
+                }
+                Stmt::While(w) => collect(&Block { statements: vec![(*w.body.clone())], span: w.span }, current_class, global, scopes, out),
+                Stmt::For(f) => collect(&Block { statements: vec![(*f.body.clone())], span: f.span }, current_class, global, scopes, out),
+                Stmt::Block(b) => collect(b, current_class, global, scopes, out),
+                Stmt::Switch(sw) => { for c in &sw.cases { collect(&Block { statements: c.statements.clone(), span: c.span }, current_class, global, scopes, out); } }
+                Stmt::Labeled(ls) => collect(&Block { statements: vec![(*ls.statement.clone())], span: ls.span }, current_class, global, scopes, out),
+                Stmt::Expression(es) => collect_expr(current_class, &es.expr, global, scopes, out),
+                _ => {}
+            }
+        }
+    }
+    let mut set = std::collections::HashSet::new();
+    collect(block, current_class, global, scopes, &mut set);
+    set.into_iter().collect()
 }
 
 // Local variable duplicate detection and simple initializer compatibility in a single pass
@@ -633,20 +986,13 @@ fn walk_stmt_locals(
             }
             Stmt::While(w) => {
                 if expr_is_boolean_true(&w.condition) {
-                    // Prefer precise merge: names definitely assigned before a top-level break in first iteration
+                    // Only propagate assignments that occur unconditionally before a top-level break.
                     if let Some(names) = collect_unconditional_assigns_until_break(&w.body) {
                         for name in names {
                             if let Some(scope) = scopes.iter_mut().rev().find(|s| s.contains_key(&name)) {
                                 scope.insert(name, true);
                             }
                         }
-                    } else {
-                        // Fallback to conservative propagation via body analysis
-                        let mut then_scopes = scopes.clone();
-                        walk_stmt_locals(&Block { statements: vec![(*w.body.clone())], span: w.span }, &mut then_scopes, final_params, true, global)?;
-                        let then_top = then_scopes.last().unwrap();
-                        let cur_top = scopes.last_mut().unwrap();
-                        for (name, assigned) in then_top.iter() { if *assigned { cur_top.insert(name.clone(), true); } }
                     }
                 } else {
                     // Non-constant loop condition: be conservative.
@@ -662,12 +1008,13 @@ fn walk_stmt_locals(
             }
             Stmt::For(f) => {
                 if f.condition.is_none() {
-                    let mut then_scopes = scopes.clone();
-                    walk_stmt_locals(&Block { statements: vec![(*f.body.clone())], span: f.span }, &mut then_scopes, final_params, true, global)?;
-                    let then_top = then_scopes.last().unwrap();
-                    let cur_top = scopes.last_mut().unwrap();
-                    for (name, assigned) in then_top.iter() {
-                        if *assigned { cur_top.insert(name.clone(), true); }
+                    // Infinite for(;;): only propagate assignments unconditionally before a top-level break
+                    if let Some(names) = collect_unconditional_assigns_until_break(&f.body) {
+                        for name in names {
+                            if let Some(scope) = scopes.iter_mut().rev().find(|s| s.contains_key(&name)) {
+                                scope.insert(name, true);
+                            }
+                        }
                     }
                 } else {
                     if let Some(names) = collect_unconditional_assigns_until_break(&f.body) {
@@ -680,33 +1027,47 @@ fn walk_stmt_locals(
                 }
             }
             Stmt::Try(t) => {
-                // Compute DA across try/catch/finally
+                // Compute DA across try/catch/finally per JLS-like rules
                 let names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
-                // try
+                // Evaluate try block
                 let mut try_scopes = scopes.clone();
                 walk_stmt_locals(&Block { statements: t.try_block.statements.clone(), span: t.try_block.span }, &mut try_scopes, final_params, inside_loop, global)?;
                 let try_top = try_scopes.last().unwrap();
-                // catches
+                // Evaluate each catch block
                 let mut catches_tops: Vec<std::collections::HashMap<String, bool>> = Vec::new();
                 for cc in &t.catch_clauses {
                     let mut c_scopes = scopes.clone();
                     walk_stmt_locals(&Block { statements: cc.block.statements.clone(), span: cc.block.span }, &mut c_scopes, final_params, inside_loop, global)?;
                     catches_tops.push(c_scopes.last().unwrap().clone());
                 }
-                // finally
-                let finally_top_opt = if let Some(fin) = &t.finally_block {
+                if let Some(fin) = &t.finally_block {
+                    // Build DA at entry to finally: in_finally[name] = cur[name] || try_top[name] || (all catches[name])
+                    let base_top = scopes.last().unwrap().clone();
                     let mut f_scopes = scopes.clone();
+                    if let Some(f_top) = f_scopes.last_mut() {
+                        for n in &names {
+                            let base = base_top.get(n).copied().unwrap_or(false);
+                            let da_try = try_top.get(n).copied().unwrap_or(false);
+                            let da_all_catches = if catches_tops.is_empty() { false } else { catches_tops.iter().all(|m| m.get(n).copied().unwrap_or(false)) };
+                            f_top.insert(n.clone(), base || da_try || da_all_catches);
+                        }
+                    }
+                    // Walk finally with seeded DA state
                     walk_stmt_locals(&Block { statements: fin.statements.clone(), span: fin.span }, &mut f_scopes, final_params, inside_loop, global)?;
-                    Some(f_scopes.last().unwrap().clone())
-                } else { None };
-                // Merge rule (approx JVMS/JLS): DA_out = (DA_try) OR (intersection over all catches) OR (DA_finally)
-                let cur_top = scopes.last_mut().unwrap();
-                for n in names {
-                    let da_try = try_top.get(&n).copied().unwrap_or(false);
-                    let da_all_catches = if catches_tops.is_empty() { false } else { catches_tops.iter().all(|m| m.get(&n).copied().unwrap_or(false)) };
-                    let da_finally = finally_top_opt.as_ref().map(|m| m.get(&n).copied().unwrap_or(false)).unwrap_or(false);
-                    if da_try || da_all_catches || da_finally {
-                        cur_top.insert(n, true);
+                    // DA after try statement equals DA after finally
+                    if let Some(out_top) = f_scopes.last() {
+                        if let Some(cur_top) = scopes.last_mut() {
+                            for (k, v) in out_top.iter() { cur_top.insert(k.clone(), *v); }
+                        }
+                    }
+                } else {
+                    // No finally: DA_out[name] = da_try || (all catches)
+                    if let Some(cur_top) = scopes.last_mut() {
+                        for n in &names {
+                            let da_try = try_top.get(n).copied().unwrap_or(false);
+                            let da_all_catches = if catches_tops.is_empty() { false } else { catches_tops.iter().all(|m| m.get(n).copied().unwrap_or(false)) };
+                            cur_top.insert(n.clone(), da_try || da_all_catches);
+                        }
                     }
                 }
             }
@@ -800,10 +1161,14 @@ fn walk_stmt_locals(
 // handled conservatively: an assignment must occur on all branches before a break to qualify.
 fn collect_unconditional_assigns_until_break(body: &Stmt) -> Option<Vec<String>> {
     use std::collections::HashSet;
-    fn walker(stmt: &Stmt) -> (HashSet<String>, bool) {
+    let inner_labels = collect_inner_labels(body);
+    fn walker(stmt: &Stmt, inner_labels: &HashSet<String>, loop_depth: usize, in_switch: bool) -> (HashSet<String>, bool) {
         // returns (assigned_names, has_top_level_break)
         match stmt {
-            Stmt::Break(_) => (HashSet::new(), true),
+            Stmt::Break(b) => {
+                let exits_loop = if let Some(lab) = &b.label { !inner_labels.contains(lab) } else { loop_depth == 0 && !in_switch };
+                (HashSet::new(), exits_loop)
+            }
             Stmt::Expression(es) => {
                 if let Expr::Assignment(a) = &es.expr {
                     if let Expr::Identifier(id) = &*a.target {
@@ -815,8 +1180,8 @@ fn collect_unconditional_assigns_until_break(body: &Stmt) -> Option<Vec<String>>
                 (HashSet::new(), false)
             }
             Stmt::If(ifstmt) => {
-                let (then_set, then_break) = walker(&ifstmt.then_branch);
-                let (else_set, else_break) = if let Some(else_b) = &ifstmt.else_branch { walker(else_b) } else { (HashSet::new(), false) };
+                let (then_set, then_break) = walker(&ifstmt.then_branch, inner_labels, loop_depth, in_switch);
+                let (else_set, else_break) = if let Some(else_b) = &ifstmt.else_branch { walker(else_b, inner_labels, loop_depth, in_switch) } else { (HashSet::new(), false) };
                 let inter: HashSet<String> = then_set.intersection(&else_set).cloned().collect();
                 (inter, then_break && else_break)
             }
@@ -824,7 +1189,7 @@ fn collect_unconditional_assigns_until_break(body: &Stmt) -> Option<Vec<String>>
                 let mut acc: HashSet<String> = HashSet::new();
                 let mut seen_break = false;
                 for s in &b.statements {
-                    let (set, has_break) = walker(s);
+                    let (set, has_break) = walker(s, inner_labels, loop_depth, in_switch);
                     // accumulate only if we haven't hit a break yet; after break, subsequent statements are unreachable
                     if !seen_break {
                         for n in set { acc.insert(n); }
@@ -833,13 +1198,47 @@ fn collect_unconditional_assigns_until_break(body: &Stmt) -> Option<Vec<String>>
                 }
                 (acc, seen_break)
             }
+            Stmt::While(w) => {
+                // consider inner while only if clearly enters (while(true))
+                if expr_is_boolean_true(&w.condition) {
+                    walker(&w.body, inner_labels, loop_depth + 1, in_switch)
+                } else { (HashSet::new(), false) }
+            }
+            Stmt::For(f) => {
+                // consider inner for only if infinite for(;;)
+                if f.condition.is_none() {
+                    walker(&f.body, inner_labels, loop_depth + 1, in_switch)
+                } else { (HashSet::new(), false) }
+            }
+            Stmt::Switch(sw) => {
+                // require a default and all cases to reach a break that exits the loop
+                let has_default = sw.cases.iter().any(|c| c.labels.is_empty());
+                if !has_default { return (HashSet::new(), false); }
+                let mut maybe_inter: Option<HashSet<String>> = None;
+                let mut all_cases_break = true;
+                for c in &sw.cases {
+                    // walk the case block treating we're inside a switch
+                    let (set, has_break) = walker(&Stmt::Block(Block { statements: c.statements.clone(), span: c.span }), inner_labels, loop_depth, true);
+                    if !has_break { all_cases_break = false; break; }
+                    if let Some(acc) = &mut maybe_inter {
+                        *acc = acc.intersection(&set).cloned().collect();
+                    } else {
+                        maybe_inter = Some(set);
+                    }
+                }
+                if all_cases_break {
+                    (maybe_inter.unwrap_or_default(), true)
+                } else {
+                    (HashSet::new(), false)
+                }
+            }
             // continue does not contribute; reaching it means no break on that path
             Stmt::Continue(_) => (HashSet::new(), false),
             _ => (HashSet::new(), false),
         }
     }
     if let Stmt::Block(b) = body {
-        let (set, has_break) = walker(&Stmt::Block(b.clone()));
+        let (set, has_break) = walker(&Stmt::Block(b.clone()), &inner_labels, 0, false);
         if has_break { return Some(set.into_iter().collect()); }
         return None;
     }

@@ -139,6 +139,12 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                         if let Some(metas) = mt.methods_meta.get(&m.name) {
                             for meta in metas {
                                 if meta.signature == sig_here {
+                                    // Only consider methods that are inherited into this subclass per JLS
+                                    let pkg_here = global.package.as_deref();
+                                    let pkg_super = mt.package_name.as_deref();
+                                    if !is_inherited_method(meta.visibility, pkg_here, pkg_super) {
+                                        continue;
+                                    }
                                     let is_static_here = m.modifiers.iter().any(|mm| matches!(mm, crate::ast::Modifier::Static));
                                     // static/instance consistency
                                     if meta.is_static && !is_static_here {
@@ -166,8 +172,6 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                                                 default_iface_sources.push((tname.clone(), meta.visibility));
                                             }
                                         } else {
-                                            let pkg_here = global.package.as_deref();
-                                            let pkg_super = mt.package_name.as_deref();
                                             if reduces_visibility_pkg(vis_here, meta.visibility, pkg_here, pkg_super) {
                                                 log::debug!("override error: reduces visibility: {}.{} (here={:?}, super={:?}, here_pkg={:?}, super_pkg={:?})", class.name, m.name, vis_here, meta.visibility, pkg_here, pkg_super);
                                                 return Err(ReviewError::DuplicateMember(format!("override reduces visibility for method '{}'", m.name)));
@@ -267,6 +271,80 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
             // - Scan constructor body for single assignments to these fields
             // - Error if assigned 0 or >1 times
             enforce_constructor_final_field_rules(class, c, global)?;
+
+            // Checked exceptions coverage for constructors
+            // 1) Declared throws of this constructor
+            let declared_ctor_throws: Vec<String> = c.throws.iter().map(|t| t.name.clone()).collect();
+
+            // 2) Propagate throws from explicit or implicit constructor invocation
+            //    - this(...): require covering the target ctor's declared throws
+            //    - super(...)/implicit super(): require covering super ctor's throws (cannot be caught in body)
+            match &c.explicit_invocation {
+                Some(crate::ast::ExplicitCtorInvocation::This { arg_count }) => {
+                    let mut union: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for m2 in &class.body {
+                        if let ClassMember::Constructor(c2) = m2 {
+                            if c2.parameters.len() == *arg_count {
+                                for t in &c2.throws { union.insert(t.name.clone()); }
+                            }
+                        }
+                    }
+                    for tname in union {
+                        if is_unchecked_exception_name(global, &tname) { continue; }
+                        let mut covered = false;
+                        for d in &declared_ctor_throws {
+                            if super::statements::is_reference_assignable(global, &tname, d) { covered = true; break; }
+                        }
+                        if !covered {
+                            return Err(ReviewError::UnreportedCheckedException(tname));
+                        }
+                    }
+                }
+                Some(crate::ast::ExplicitCtorInvocation::Super { arg_count }) => {
+                    if let Some(sup) = class.extends.as_ref().map(|t| t.name.clone()) {
+                        if let Some(mt) = global.by_type.get(&sup) {
+                            if let Some(list) = mt.ctors_throws.get(&sup) {
+                                for (a, thr) in list {
+                                    if *a == *arg_count {
+                                        for tname in thr {
+                                            if is_unchecked_exception_name(global, tname) { continue; }
+                                            let mut covered = false;
+                                            for d in &declared_ctor_throws {
+                                                if super::statements::is_reference_assignable(global, tname, d) { covered = true; break; }
+                                            }
+                                            if !covered { return Err(ReviewError::UnreportedCheckedException(tname.clone())); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Implicit call to super() with zero args when a superclass exists
+                    if let Some(sup) = class.extends.as_ref().map(|t| t.name.clone()) {
+                        if let Some(mt) = global.by_type.get(&sup) {
+                            if let Some(list) = mt.ctors_throws.get(&sup) {
+                                for (a, thr) in list {
+                                    if *a == 0 {
+                                        for tname in thr {
+                                            if is_unchecked_exception_name(global, tname) { continue; }
+                                            let mut covered = false;
+                                            for d in &declared_ctor_throws {
+                                                if super::statements::is_reference_assignable(global, tname, d) { covered = true; break; }
+                                            }
+                                            if !covered { return Err(ReviewError::UnreportedCheckedException(tname.clone())); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3) Run body-level checked exceptions coverage (statements inside ctor)
+            super::statements::review_body_checked_exceptions(class, &c.body, &declared_ctor_throws, global)?;
         }
     }
     if varargs_ctor_count > 1 { return Err(ReviewError::MultipleVarargsConstructors); }
@@ -370,6 +448,17 @@ fn reduces_visibility_pkg(here: Visibility, superv: Visibility, pkg_here: Option
             if let (Some(ph), Some(ps)) = (pkg_here, pkg_super) { ph != ps } else { true }
         }
         _ => false,
+    }
+}
+
+fn is_inherited_method(super_vis: Visibility, pkg_here: Option<&str>, pkg_super: Option<&str>) -> bool {
+    use Visibility::*;
+    match super_vis {
+        Public | Protected => true,
+        Package => {
+            if let (Some(ph), Some(ps)) = (pkg_here, pkg_super) { ph == ps } else { false }
+        }
+        Private => false,
     }
 }
 

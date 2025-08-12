@@ -198,6 +198,18 @@ fn labeled_continue_does_not_establish_da_outside() {
 fn switch_without_default_does_not_establish_da() {
     err_contains(r#"package p; class C { int m(int k){ int x; switch(k){ case 0: x=1; break; case 1: x=2; break; } return x; } }"#, "use of local variable");
 }
+
+#[test]
+fn while_true_with_switch_break_only_must_return_ok() {
+    // break inside switch does not exit the loop; method cannot complete normally, allowed without explicit return
+    ok(r#"package p; class C { int m(int k){ while(true){ switch(k){ default: break; } } }"#);
+}
+
+#[test]
+fn labeled_break_to_inner_does_not_exit_outer_loop_must_return_ok() {
+    // break to inner label does not exit the outer loop; method cannot complete normally, allowed without explicit return
+    ok(r#"package p; class C { int m(){ outer: while(true){ inner: while(true){ break inner; } } }"#);
+}
 // Ambiguity from duplicate exact overloads is rejected earlier as duplicate members in our review rules
 // Break/continue DA/DR precision to be extended in follow-ups; placeholders removed to avoid flaky expectations
 

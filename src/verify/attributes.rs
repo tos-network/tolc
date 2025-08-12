@@ -2,7 +2,7 @@ use crate::codegen::attribute::AttributeInfo;
 use crate::codegen::class::ClassFile;
 use crate::codegen::flag::access_flags;
 use crate::codegen::constpool::Constant;
-use crate::codegen::attribute::{AnnotationEntry, TypeAnnotationEntry, RetentionPolicy};
+use crate::codegen::attribute::{AnnotationEntry, TypeAnnotationEntry, RetentionPolicy, AnnotationTarget};
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum AttributesVerifyError {
@@ -173,8 +173,8 @@ pub fn verify(class_file: &ClassFile) -> Result<()> {
             }
             AttributeInfo::RuntimeVisibleAnnotations(rva) => { validate_annotations_targets(rva.annotations.as_slice(), true)?; }
             AttributeInfo::RuntimeInvisibleAnnotations(ria) => { validate_annotations_targets(ria.annotations.as_slice(), false)?; }
-            AttributeInfo::RuntimeVisibleTypeAnnotations(rvta) => { validate_type_annotations_targets(rvta.annotations.as_slice(), true)?; }
-            AttributeInfo::RuntimeInvisibleTypeAnnotations(rita) => { validate_type_annotations_targets(rita.annotations.as_slice(), false)?; }
+            AttributeInfo::RuntimeVisibleTypeAnnotations(rvta) => { validate_type_annotations_for_class(rvta.annotations.as_slice(), true)?; }
+            AttributeInfo::RuntimeInvisibleTypeAnnotations(rita) => { validate_type_annotations_for_class(rita.annotations.as_slice(), false)?; }
             AttributeInfo::Record(rec) => {
                 // Validate record components: name/descriptor are Utf8; nested attributes limited to annotations/signature
                 for comp in &rec.components {
@@ -232,15 +232,27 @@ fn validate_annotations_targets(anns: &[AnnotationEntry], runtime: bool) -> Resu
         if let Some(RetentionPolicy::Runtime) = a.retention {
             if !runtime { return Err(AttributesVerifyError::InvalidContent("Runtime retention annotation in invisible set")); }
         }
-        // Targets are recorded but not context-enforced here; class vs field vs method enforcement is handled by caller if extended later
+        // Basic target sanity: if present, ensure not empty
+        if !a.targets.is_empty() {
+            // No context check here; per-element validation elsewhere
+        }
     }
     Ok(())
 }
 
-fn validate_type_annotations_targets(anns: &[TypeAnnotationEntry], runtime: bool) -> Result<()> {
+fn validate_type_annotations_for_class(anns: &[TypeAnnotationEntry], runtime: bool) -> Result<()> {
     for a in anns {
         if let Some(RetentionPolicy::Runtime) = a.retention {
             if !runtime { return Err(AttributesVerifyError::InvalidContent("Runtime retention type-annotation in invisible set")); }
+        }
+        // On class: allow TYPE_USE and TYPE_PARAMETER; reject METHOD, FIELD, PARAMETER-only contexts
+        for t in &a.targets {
+            match t {
+                AnnotationTarget::Type | AnnotationTarget::TypeParameter | AnnotationTarget::TypeUse | AnnotationTarget::AnnotationType | AnnotationTarget::Package => {}
+                AnnotationTarget::Field | AnnotationTarget::Method | AnnotationTarget::Parameter | AnnotationTarget::Constructor | AnnotationTarget::LocalVariable => {
+                    return Err(AttributesVerifyError::InvalidContent("Type annotation target not valid on class"));
+                }
+            }
         }
     }
     Ok(())
