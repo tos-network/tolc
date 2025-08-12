@@ -993,14 +993,17 @@ impl Parser {
         self.consume(&Token::LBrace, "Expected '{' to start constructor body")?;
         // Optional explicit constructor invocation must be first statement
         let mut seen_explicit_ctor_call = false;
+        let mut explicit_invocation: Option<crate::ast::ExplicitCtorInvocation> = None;
         if self.check(&Token::This) || self.check(&Token::Super) {
             // Parse 'this(args);' or 'super(args);'
+            let is_this = self.check(&Token::This);
             self.advance(); // consume this/super
             self.consume(&Token::LParen, "Expected '(' after this/super")?;
-            if !self.check(&Token::RParen) { let _ = self.parse_argument_list()?; }
+            let argc = if !self.check(&Token::RParen) { self.parse_argument_list()?.len() } else { 0 };
             self.consume(&Token::RParen, "Expected ')' after constructor invocation arguments")?;
             if self.check(&Token::Semicolon) { self.advance(); }
             seen_explicit_ctor_call = true;
+            explicit_invocation = Some(if is_this { crate::ast::ExplicitCtorInvocation::This { arg_count: argc } } else { crate::ast::ExplicitCtorInvocation::Super { arg_count: argc } });
         }
         // Remaining statements
         let mut statements = Vec::new();
@@ -1018,7 +1021,7 @@ impl Parser {
         let _ = self.consume(&Token::RBrace, "Expected '}' to close constructor body");
         let body = Block { statements, span: Span::new(start.start, self.previous_span().end) };
         let span = Span::new(start.start, self.previous_span().end);
-        Ok(ConstructorDecl { modifiers, annotations: Vec::new(), name, parameters, throws, body, span })
+        Ok(ConstructorDecl { modifiers, annotations: Vec::new(), name, parameters, throws, explicit_invocation, body, span })
     }
     
     // Helper methods for the new parsing functionality
@@ -1109,7 +1112,7 @@ impl Parser {
         loop {
             let modifiers = self.parse_modifiers()?;
             let annotations = self.parse_annotations()?;
-            let type_ref = self.parse_type_ref()?;
+            let mut type_ref = self.parse_type_ref()?;
             // Varargs ( ... ) attaches to the type
             let varargs = if self.match_token(&Token::Ellipsis) { true } else { false };
             let name = self.parse_identifier()?;
@@ -1120,6 +1123,10 @@ impl Parser {
                 self.advance(); // consume '['
                 self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
                 _array_dims += 1;
+            }
+            // Apply any post-identifier array dimensions to the parameter's type
+            if _array_dims > 0 {
+                type_ref.array_dims += _array_dims;
             }
             
             let span = Span::new(

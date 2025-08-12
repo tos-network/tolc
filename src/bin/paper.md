@@ -1,4 +1,4 @@
-## Review/Verify roadmap
+## Review/Verify paper
 
 This document outlines of tolc's compilation
 --target is Java 8 only (classfile major 52)
@@ -33,6 +33,23 @@ This document outlines of tolc's compilation
   - Per-kind stubs split into dedicated files (`class.rs`, `interface.rs`, `annotation.rs`, `enums.rs`)
   - Class: abstract ∧ final is rejected
   - Interface: final is rejected
+  - Nested types: inner classes/interfaces/enums are recursively reviewed so they receive the same checks as top-level types
+  - Access control and overrides:
+    - Enforce no visibility reduction; interface implementations must be public
+    - Forbid overriding final methods; prevent static/instance override/hide mismatches
+    - Return covariance for references; if super return is a type parameter, accept any reference return (javac-like)
+    - Throws clause narrowing enforced (basic subset)
+  - Method resolution:
+    - Arity and varargs minimum checks; primitive/String-based applicability with widening cost; ambiguity reporting
+    - Cross-type calls/constructors resolved via classpath index (when enabled)
+  - Generics:
+    - Enforce type-argument count for new/cast/instanceof; minimal upper-bound checks when bounds are present
+  - Checked exceptions (basic):
+    - Classify throw sites and propagate checked exceptions across local and cross-type calls; supports static-imported members
+    - Common RuntimeException subclasses treated as unchecked (fallback); prefer hierarchy via classpath index when available
+  - Control flow:
+    - Must-return: treats throw as terminal; refined if/switch/try/finally coverage
+    - DA/DR seed: use-before-init for locals; branch and loop heuristics; final parameters/locals single-assignment
 
   - verify (ClassFile)
   - Constant pool: index/type checks; basic BootstrapMethods indices; no Module/Nest/Record/PermittedSubclasses in Java 8
@@ -41,6 +58,12 @@ This document outlines of tolc's compilation
   - Interfaces vector: each entry refers to Class
   - Fields: name/descriptor to Utf8; interface field flags; ConstantValue validation
   - Methods: access flags; name/descriptor to Utf8; Code/Exceptions/Signature; last return opcode matches descriptor
+
+Compatibility and classpath
+- `TOLC_CLASSPATH`: enables a classpath-wide `GlobalMemberIndex` from `.java` files for inheritance/interfaces/overloads/throws/fields; used by review checks to align with javac
+- `TOLC_JAVAC_COMPAT`: relaxes certain checks when information is incomplete (e.g., tolerate raw types with 0 generic args; defer strict arity/type errors when unresolved)
+- Java suite harness auto-sets the above and initializes logging; supports `JAVA_SUITE_FILTER` and `JAVA_SUITE_FIRST_ONLY`
+- Classpath index global cache: built once per process and reused to speed up the suite
 
 ---
 
@@ -54,14 +77,11 @@ This document outlines of tolc's compilation
      - Interface members default to public; reject illegal combos
 
 2) review (ATTR-lite)
-   - Method call arity checks (arguments vs parameters)
-   - Literal assignability to primitive types
-   - Non-void methods: ensure at least one return on all paths (basic structural check)
+   - Broaden applicability beyond primitives/String (boxing/unboxing for references)
+   - Non-void methods: continue increasing must-return precision in complex flows
 
 3) verify (JVM conformance)
-   - Parameter annotations count equals descriptor parameter count
-  - Code attribute: ensure presence when not abstract/native and absence otherwise (done); extend with basic StackMapTable sanity if available
-  - Tighten BootstrapMethods validation (indices sanity)
+   - Maintain Java 8 attribute set coverage; incremental tightening as needed
 
 ---
 
@@ -178,6 +198,7 @@ This document outlines of tolc's compilation
 
 - Messages
   - Prefer concise, e.g., "duplicate method '{name}({arity})'", "incompatible literal: expected int, found long"
+  - Use `TOLC_DEBUG=1` to enable targeted review debug logs; general logs via `RUST_LOG`
 
 ---
 
@@ -253,6 +274,19 @@ This document outlines of tolc's compilation
 
 - Added `coverage.md` documenting a fine-grained coverage comparison against javac (Java 8 semantics). This serves as a living checklist to guide review/verify parity work.
 - review: Added a basic checked-exception analysis (throws/catch coverage) and tests; updated coverage table accordingly.
+
+- review (recent):
+  - Recursive nested-type review (inner classes/interfaces/enums)
+  - Overrides/visibility: full-chain/interface checks, final/static rules, return covariance (incl. type-parameter super returns), throws narrowing
+  - Method resolution: cross-type arity/signature lookup via classpath index; improved applicability and ambiguity detection; compat fallbacks
+  - Generics: strict arity checks on new/cast/instanceof; minimal bounds enforcement; raw (0 args) tolerance only in compat mode
+  - Must-return refinements and DA/DR seeds (throw terminal; try/finally; loop/branch heuristics; final locals/params)
+  - Illegal static call checks for fields/methods with static imports awareness
+
+- infrastructure:
+  - Classpath-wide index (`TOLC_CLASSPATH`) with a global cache for performance
+  - Compatibility switch (`TOLC_JAVAC_COMPAT`) to align behavior with javac on large suites
+  - Java suite harness updated to auto-set env vars and provide focused filters/logging
 
 - Sprint 1 (ENTER-lite) – initial landing
   - review (per AST, pre-ClassFile):

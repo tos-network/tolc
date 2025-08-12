@@ -80,10 +80,24 @@ pub enum ReviewError {
 
 /// AST-level review before codegen
 pub fn review(ast: &Ast) -> ReviewResult<()> {
+    log::debug!("review start: types={} imports={}", ast.type_decls.len(), ast.imports.len());
     self::package::review_package(ast)?;
     self::imports::review_imports(ast)?;
     types::review_types(ast)?;
+    log::debug!("review end: ok");
     Ok(())
+}
+
+#[inline]
+pub(crate) fn debug_log(msg: impl AsRef<str>) {
+    if std::env::var("TOLC_DEBUG").is_ok() {
+        eprintln!("[tolc-debug] {}", msg.as_ref());
+    }
+}
+
+#[inline]
+pub(crate) fn compat_mode() -> bool {
+    std::env::var("TOLC_JAVAC_COMPAT").is_ok()
 }
 
 // Per-kind checks are implemented in dedicated modules for clarity

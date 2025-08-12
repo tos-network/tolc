@@ -308,6 +308,7 @@ pub struct ConstructorDecl {
     pub name: String,
     pub parameters: Vec<Parameter>,
     pub throws: Vec<TypeRef>,
+    pub explicit_invocation: Option<ExplicitCtorInvocation>,
     pub body: Block,
     pub span: Span,
 }
@@ -330,6 +331,12 @@ pub struct Parameter {
     pub name: String,
     pub varargs: bool,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExplicitCtorInvocation {
+    This { arg_count: usize },
+    Super { arg_count: usize },
 }
 
 impl AstNode for Parameter {

@@ -1,6 +1,10 @@
 use super::{ReviewError, ReviewResult};
 use crate::ast::*;
 use std::collections::HashMap;
+use std::fs;
+use walkdir::WalkDir;
+use once_cell::sync::OnceCell;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Visibility { Private, Package, Protected, Public }
@@ -45,6 +49,13 @@ pub(crate) fn visibility_of(mods: &[Modifier]) -> Visibility {
     Visibility::Package
 }
 
+#[inline]
+pub(crate) fn type_ref_signature_name(t: &TypeRef) -> String {
+    let mut name = t.name.clone();
+    for _ in 0..t.array_dims { name.push_str("[]"); }
+    name
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GlobalMemberIndex {
     pub by_type: HashMap<String, MemberTables>,
@@ -57,28 +68,48 @@ pub(crate) struct GlobalMemberIndex {
     pub enum_index: HashMap<String, HashMap<String, usize>>, // enum -> const -> ordinal
 }
 
+// Global cache for classpath index to avoid rebuilding per Java file
+static CLASSPATH_INDEX_CACHE: OnceCell<(String, Arc<GlobalMemberIndex>)> = OnceCell::new();
+
+fn get_or_build_classpath_index(current_ast: &Ast, classpath_dir: &str) -> Arc<GlobalMemberIndex> {
+    if let Some((cached_cp, cached)) = CLASSPATH_INDEX_CACHE.get() {
+        if cached_cp == classpath_dir {
+            return Arc::clone(cached);
+        }
+    }
+    let built = build_global_member_index_with_classpath(current_ast, classpath_dir);
+    let arc = Arc::new(built);
+    let _ = CLASSPATH_INDEX_CACHE.set((classpath_dir.to_string(), Arc::clone(&arc)));
+    arc
+}
+
 pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
     let mut idx = GlobalMemberIndex { by_type: HashMap::new(), imports: Vec::new(), package: None, wildcard_imports: Vec::new(), static_explicit: HashMap::new(), static_wildcard: Vec::new(), enum_index: HashMap::new() };
     // record package
     idx.package = ast.package_decl.as_ref().map(|p| p.name.clone());
+    super::debug_log(format!("index package: {:?}", idx.package));
     // record simple imports
     for imp in &ast.imports {
         if imp.is_static {
             if imp.is_wildcard {
                 // import static pkg.Type.*;
                 idx.static_wildcard.push(imp.name.clone());
+                super::debug_log(format!("import static *: {}", imp.name));
             } else {
                 // import static pkg.Type.member;
                 if let Some(dot) = imp.name.rfind('.') {
                     let type_name = imp.name[..dot].to_string();
                     let member = imp.name[dot + 1..].to_string();
                     idx.static_explicit.insert(member, type_name);
+                    super::debug_log(format!("import static member: {}", imp.name));
                 }
             }
         } else if imp.is_wildcard {
             idx.wildcard_imports.push(imp.name.clone());
+            super::debug_log(format!("import *: {}", imp.name));
         } else {
             idx.imports.push(imp.name.clone());
+            super::debug_log(format!("import: {}", imp.name));
         }
     }
     for td in &ast.type_decls {
@@ -110,13 +141,13 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                                 .and_modify(|min| { *min = (*min).min(arity - 1); })
                                 .or_insert(arity - 1);
                         }
-                        let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                        let sig: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                         mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
                         let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
                         mt.methods_static.entry(m.name.clone()).or_insert(is_static);
                         let throws: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
                         mt.methods_throws.entry(m.name.clone()).or_default().push((arity, throws));
-                        let sig_keys: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                        let sig_keys: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                         let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
                         mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig_keys.clone(), throws_vec));
                         let meta = MethodMeta {
@@ -138,11 +169,11 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                                 .and_modify(|min| { *min = (*min).min(arity - 1); })
                                 .or_insert(arity - 1);
                         }
-                        let sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                        let sig: Vec<String> = cons.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                         mt.ctors_signatures.entry(c.name.clone()).or_default().push(sig);
                         let throws: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
                         mt.ctors_throws.entry(c.name.clone()).or_default().push((arity, throws));
-                        let ct_sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                        let ct_sig: Vec<String> = cons.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                         let ct_thr: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
                         mt.ctors_throws_by_sig.entry(c.name.clone()).or_default().push((ct_sig, ct_thr));
                     }
@@ -161,10 +192,12 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             mt.is_interface = false;
             // insert by simple name
             idx.by_type.insert(c.name.clone(), mt.clone());
+            super::debug_log(format!("index class: {}", c.name));
             // and fully qualified if package exists
             if let Some(pkg) = &idx.package {
                 let fq = format!("{}.{}", pkg, c.name);
-                idx.by_type.insert(fq, mt);
+                idx.by_type.insert(fq.clone(), mt);
+                super::debug_log(format!("index class fq: {}", fq));
             } else {
                 // also echo simple for completeness
                 idx.by_type.insert(c.name.clone(), mt);
@@ -178,7 +211,20 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             // record interface methods metas and throws by signature
             for member in &i.body {
                 if let InterfaceMember::Method(m) = member {
-                    let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                    // also populate arities/signatures/varargs/static for overload resolution
+                    let arity = m.parameters.len();
+                    mt.methods_arities.entry(m.name.clone()).or_default().push(arity);
+                    if m.parameters.last().map(|p| p.varargs).unwrap_or(false) {
+                        mt.methods_varargs_min
+                            .entry(m.name.clone())
+                            .and_modify(|min| { *min = (*min).min(arity - 1); })
+                            .or_insert(arity - 1);
+                    }
+                    let sig_full: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
+                    mt.methods_signatures.entry(m.name.clone()).or_default().push(sig_full);
+                    let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                    mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                    let sig: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                     let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
                     let meta = MethodMeta {
                         signature: sig.clone(),
@@ -192,10 +238,13 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                     mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig, throws_vec));
                 }
             }
+            for v in mt.methods_arities.values_mut() { v.sort_unstable(); v.dedup(); }
             idx.by_type.insert(i.name.clone(), mt.clone());
+            super::debug_log(format!("index interface: {}", i.name));
             if let Some(pkg) = &idx.package {
                 let fq = format!("{}.{}", pkg, i.name);
-                idx.by_type.insert(fq, mt);
+                idx.by_type.insert(fq.clone(), mt);
+                super::debug_log(format!("index interface fq: {}", fq));
             } else {
                 idx.by_type.insert(i.name.clone(), mt);
             }
@@ -204,6 +253,179 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             let mut inner: HashMap<String, usize> = HashMap::new();
             for (i, c) in e.constants.iter().enumerate() { inner.insert(c.name.clone(), i); }
             idx.enum_index.insert(e.name.clone(), inner);
+            super::debug_log(format!("index enum: {}", e.name));
+        }
+    }
+    idx
+}
+
+/// Build a classpath-wide index using all types found under `classpath_dir`, while
+/// preserving the imports/package of the current compilation unit `current_ast`.
+pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classpath_dir: &str) -> GlobalMemberIndex {
+    let mut idx = GlobalMemberIndex { by_type: HashMap::new(), imports: Vec::new(), package: None, wildcard_imports: Vec::new(), static_explicit: HashMap::new(), static_wildcard: Vec::new(), enum_index: HashMap::new() };
+    // Seed current CU package/imports for resolution rules that depend on them
+    idx.package = current_ast.package_decl.as_ref().map(|p| p.name.clone());
+    for imp in &current_ast.imports {
+        if imp.is_static {
+            if imp.is_wildcard {
+                idx.static_wildcard.push(imp.name.clone());
+            } else if let Some(dot) = imp.name.rfind('.') {
+                let type_name = imp.name[..dot].to_string();
+                let member = imp.name[dot + 1..].to_string();
+                idx.static_explicit.insert(member, type_name);
+            }
+        } else if imp.is_wildcard {
+            idx.wildcard_imports.push(imp.name.clone());
+        } else {
+            idx.imports.push(imp.name.clone());
+        }
+    }
+    // Helper to index one AST's types using its own package
+    fn index_types_from_ast_into(idx: &mut GlobalMemberIndex, ast: &Ast) {
+        let local_pkg = ast.package_decl.as_ref().map(|p| p.name.clone());
+        for td in &ast.type_decls {
+            match td {
+                TypeDecl::Class(c) => {
+                    let mut mt = MemberTables::default();
+                    mt.type_param_count = c.type_params.len();
+                    if c.type_params.is_empty() {
+                        mt.type_param_bounds = Vec::new();
+                    } else {
+                        mt.type_param_bounds = c.type_params.iter().map(|tp| {
+                            tp.bounds.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                        }).collect();
+                    }
+                    for member in &c.body {
+                        match member {
+                            ClassMember::Field(f) => {
+                                let is_static = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                                mt.fields_static.entry(f.name.clone()).or_insert(is_static);
+                                let is_final = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Final));
+                                mt.fields_final.entry(f.name.clone()).or_insert(is_final);
+                            }
+                            ClassMember::Method(m) => {
+                                let arity = m.parameters.len();
+                                mt.methods_arities.entry(m.name.clone()).or_default().push(arity);
+                                if m.parameters.last().map(|p| p.varargs).unwrap_or(false) {
+                                    mt.methods_varargs_min
+                                        .entry(m.name.clone())
+                                        .and_modify(|min| { *min = (*min).min(arity - 1); })
+                                        .or_insert(arity - 1);
+                                }
+                                let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                                mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
+                                let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                                mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                                let throws: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                                mt.methods_throws.entry(m.name.clone()).or_default().push((arity, throws));
+                                let sig_keys: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                                let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                                mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig_keys.clone(), throws_vec));
+                                let meta = MethodMeta {
+                                    signature: sig_keys,
+                                    visibility: visibility_of(&m.modifiers),
+                                    is_static,
+                                    is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
+                                    is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                                    return_type: m.return_type.as_ref().map(|t| t.name.clone()),
+                                };
+                                mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
+                            }
+                            ClassMember::Constructor(cons) => {
+                                let arity = cons.parameters.len();
+                                mt.ctors_arities.entry(c.name.clone()).or_default().push(arity);
+                                if cons.parameters.last().map(|p| p.varargs).unwrap_or(false) {
+                                    mt.ctors_varargs_min
+                                        .entry(c.name.clone())
+                                        .and_modify(|min| { *min = (*min).min(arity - 1); })
+                                        .or_insert(arity - 1);
+                                }
+                                let sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                                mt.ctors_signatures.entry(c.name.clone()).or_default().push(sig);
+                                let throws: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
+                                mt.ctors_throws.entry(c.name.clone()).or_default().push((arity, throws));
+                                let ct_sig: Vec<String> = cons.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                                let ct_thr: Vec<String> = cons.throws.iter().map(|t| t.name.clone()).collect();
+                                mt.ctors_throws_by_sig.entry(c.name.clone()).or_default().push((ct_sig, ct_thr));
+                            }
+                            _ => {}
+                        }
+                    }
+                    for v in mt.methods_arities.values_mut() { v.sort_unstable(); v.dedup(); }
+                    for v in mt.ctors_arities.values_mut() { v.sort_unstable(); v.dedup(); }
+                    mt.super_name = c.extends.as_ref().map(|t| t.name.clone());
+                    mt.interfaces = c.implements.iter().map(|t| t.name.clone()).collect();
+                    mt.package_name = local_pkg.clone();
+                    mt.is_interface = false;
+                    // insert simple and fq
+                    idx.by_type.insert(c.name.clone(), mt.clone());
+                    if let Some(pkg) = &local_pkg {
+                        let fq = format!("{}.{}", pkg, c.name);
+                        idx.by_type.insert(fq, mt);
+                    } else {
+                        idx.by_type.insert(c.name.clone(), mt);
+                    }
+                }
+                TypeDecl::Interface(i) => {
+                    let mut mt = MemberTables::default();
+                    mt.type_param_count = i.type_params.len();
+                    mt.package_name = local_pkg.clone();
+                    mt.interfaces = i.extends.iter().map(|t| t.name.clone()).collect();
+                    mt.is_interface = true;
+                    for member in &i.body {
+                        if let InterfaceMember::Method(m) = member {
+                            let arity = m.parameters.len();
+                            mt.methods_arities.entry(m.name.clone()).or_default().push(arity);
+                            if m.parameters.last().map(|p| p.varargs).unwrap_or(false) {
+                                mt.methods_varargs_min
+                                    .entry(m.name.clone())
+                                    .and_modify(|min| { *min = (*min).min(arity - 1); })
+                                    .or_insert(arity - 1);
+                            }
+                            let sig_full: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
+                            mt.methods_signatures.entry(m.name.clone()).or_default().push(sig_full);
+                            let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                            mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                            let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+                            let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
+                            let meta = MethodMeta {
+                                signature: sig.clone(),
+                                visibility: visibility_of(&m.modifiers),
+                                is_static: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static)),
+                                is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
+                                is_abstract: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Abstract)),
+                                return_type: m.return_type.as_ref().map(|t| t.name.clone()),
+                            };
+                            mt.methods_meta.entry(m.name.clone()).or_default().push(meta);
+                            mt.methods_throws_by_sig.entry(m.name.clone()).or_default().push((sig, throws_vec));
+                        }
+                    }
+                    for v in mt.methods_arities.values_mut() { v.sort_unstable(); v.dedup(); }
+                    idx.by_type.insert(i.name.clone(), mt.clone());
+                    if let Some(pkg) = &local_pkg {
+                        let fq = format!("{}.{}", pkg, i.name);
+                        idx.by_type.insert(fq, mt);
+                    } else {
+                        idx.by_type.insert(i.name.clone(), mt);
+                    }
+                }
+                TypeDecl::Enum(e) => {
+                    let mut inner: HashMap<String, usize> = HashMap::new();
+                    for (i, c) in e.constants.iter().enumerate() { inner.insert(c.name.clone(), i); }
+                    idx.enum_index.insert(e.name.clone(), inner);
+                }
+                _ => {}
+            }
+        }
+    }
+    for entry in WalkDir::new(classpath_dir).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if entry.file_type().is_file() && path.extension().map(|e| e == "java").unwrap_or(false) {
+            if let Ok(source) = fs::read_to_string(path) {
+                if let Ok(ast) = crate::parser::parse_tol(&source) {
+                    index_types_from_ast_into(&mut idx, &ast);
+                }
+            }
         }
     }
     idx
@@ -225,7 +447,67 @@ pub(crate) fn resolve_type_in_index<'a>(global: &'a GlobalMemberIndex, name: &st
 
 pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
     use std::collections::HashSet;
-    let global_index = build_global_member_index(ast);
+    let global_index = if let Ok(cp) = std::env::var("TOLC_CLASSPATH") {
+        // Use cached classpath-wide index for performance
+        get_or_build_classpath_index(ast, &cp)
+    } else {
+        Arc::new(build_global_member_index(ast))
+    };
+    // Recursively review nested type declarations within a class/interface body
+    fn review_nested_in_class(c: &ClassDecl, global_index: &GlobalMemberIndex) -> ReviewResult<()> {
+        for member in &c.body {
+            if let ClassMember::TypeDecl(td) = member {
+                match td {
+                    TypeDecl::Class(nc) => {
+                        super::class::review_class(nc)?;
+                        super::fields::review_fields_of_class(nc, global_index)?;
+                        super::methods::review_methods_of_class(nc, global_index)?;
+                        review_nested_in_class(nc, global_index)?;
+                    }
+                    TypeDecl::Interface(ni) => {
+                        super::interface::review_interface(ni)?;
+                        super::fields::review_fields_of_interface(ni, global_index)?;
+                        super::methods::review_methods_of_interface(ni)?;
+                        review_nested_in_interface(ni, global_index)?;
+                    }
+                    TypeDecl::Enum(ne) => {
+                        super::enums::review_enum(ne)?;
+                    }
+                    TypeDecl::Annotation(na) => {
+                        super::annotation::review_annotation(na)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn review_nested_in_interface(i: &InterfaceDecl, global_index: &GlobalMemberIndex) -> ReviewResult<()> {
+        for member in &i.body {
+            if let InterfaceMember::TypeDecl(td) = member {
+                match td {
+                    TypeDecl::Class(nc) => {
+                        super::class::review_class(nc)?;
+                        super::fields::review_fields_of_class(nc, global_index)?;
+                        super::methods::review_methods_of_class(nc, global_index)?;
+                        review_nested_in_class(nc, global_index)?;
+                    }
+                    TypeDecl::Interface(ni) => {
+                        super::interface::review_interface(ni)?;
+                        super::fields::review_fields_of_interface(ni, global_index)?;
+                        super::methods::review_methods_of_interface(ni)?;
+                        review_nested_in_interface(ni, global_index)?;
+                    }
+                    TypeDecl::Enum(ne) => {
+                        super::enums::review_enum(ne)?;
+                    }
+                    TypeDecl::Annotation(na) => {
+                        super::annotation::review_annotation(na)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     let mut seen: HashSet<String> = HashSet::new();
     for td in &ast.type_decls {
         match td {
@@ -235,6 +517,7 @@ pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
                 super::class::review_class(c)?;
                 super::fields::review_fields_of_class(c, &global_index)?;
                 super::methods::review_methods_of_class(c, &global_index)?;
+                review_nested_in_class(c, &global_index)?;
             }
             TypeDecl::Interface(i) => {
                 if i.name.trim().is_empty() { return Err(ReviewError::EmptyClassName); }
@@ -242,6 +525,7 @@ pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
                 super::interface::review_interface(i)?;
                 super::fields::review_fields_of_interface(i, &global_index)?;
                 super::methods::review_methods_of_interface(i)?;
+                review_nested_in_interface(i, &global_index)?;
             }
             TypeDecl::Enum(e) => {
                 if e.name.trim().is_empty() { return Err(ReviewError::EmptyClassName); }
