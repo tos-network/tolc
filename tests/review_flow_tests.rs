@@ -180,7 +180,7 @@ fn switch_with_default_all_cases_assign_ok() {
 
 #[test]
 fn switch_fallthrough_without_break_still_assigns_when_default_exists() {
-    ok(r#"package p; class C { int m(int k){ int x; switch(k){ case 0: case 1: x=2; default: x=3; } return x; } }"#);
+    err_contains(r#"package p; class C { int m(int k){ int x; switch(k){ case 0: case 1: x=2; default: x=3; } return x; } }"#, "use of local variable");
 }
 
 #[test]

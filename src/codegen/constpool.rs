@@ -265,12 +265,16 @@ impl ConstantPool {
     
     pub fn try_add_name_and_type(&mut self, name: &str, descriptor: &str) -> Result<u16, ConstPoolError> {
         if let Some(idx) = self.name_and_type_key_map.get(&(name.to_string(), descriptor.to_string())) { return Ok(*idx); }
-        self.ensure_space(1)?;
-        let idx = (self.constants.len() + 1) as u16;
-        self.constants.push(Constant::NameAndType(0, 0));
-        self.pending.push(Some(Pending::NameAndType { name: name.to_string(), descriptor: descriptor.to_string() }));
+        // Ensure space for Utf8(name) + Utf8(descriptor) + NameAndType
+        self.ensure_space(3)?;
+        // Add dependencies first to stabilize ordering like javac
+        let name_index = self.try_add_utf8(name)?;
+        let desc_index = self.try_add_utf8(descriptor)?;
+        // Now add the NameAndType entry pointing to the two Utf8 entries
+        self.constants.push(Constant::NameAndType(name_index, desc_index));
+        self.pending.push(None);
+        let idx = self.constants.len() as u16;
         self.name_and_type_key_map.insert((name.to_string(), descriptor.to_string()), idx);
-        self.resolve_index(idx);
         Ok(idx)
     }
 

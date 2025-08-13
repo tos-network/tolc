@@ -38,8 +38,27 @@ class A {
     let class = ast.type_decls.iter().find_map(|t| match t { TypeDecl::Class(c) if c.name == "A" => Some(c), _ => None }).expect("class A not found");
     let method = class.body.iter().find_map(|m| match m { ClassMember::Method(m) => Some(m), _ => None }).expect("no method found in class A");
     let body = method.body.as_ref().expect("method body missing");
-    // For now, only require that a 'new ...<>' appears as an expression
-    let has_new = body.statements.iter().any(|s| match s { Stmt::Expression(es) => matches!(es.expr, Expr::New(_)), _ => false });
+    // For now, require that a 'new ...<>' appears somewhere in the expression tree
+    fn contains_new(e: &Expr) -> bool {
+        match e {
+            Expr::New(_) => true,
+            Expr::Assignment(a) => contains_new(&a.value) || contains_new(&a.target),
+            Expr::Binary(b) => contains_new(&b.left) || contains_new(&b.right),
+            Expr::Unary(u) => contains_new(&u.operand),
+            Expr::ArrayAccess(a) => contains_new(&a.array) || contains_new(&a.index),
+            Expr::FieldAccess(f) => f.target.as_ref().map(|t| contains_new(t)).unwrap_or(false),
+            Expr::MethodCall(m) => {
+                let in_target = m.target.as_ref().map(|t| contains_new(t)).unwrap_or(false);
+                in_target || m.arguments.iter().any(contains_new)
+            }
+            Expr::Cast(c) => contains_new(&c.expr),
+            Expr::Conditional(c) => contains_new(&c.condition) || contains_new(&c.then_expr) || contains_new(&c.else_expr),
+            Expr::Parenthesized(p) => contains_new(p),
+            Expr::ArrayInitializer(vals) => vals.iter().any(contains_new),
+            _ => false,
+        }
+    }
+    let has_new = body.statements.iter().any(|s| match s { Stmt::Expression(es) => contains_new(&es.expr), _ => false });
     assert!(has_new);
 }
 
