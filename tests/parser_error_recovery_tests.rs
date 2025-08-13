@@ -16,14 +16,8 @@ public interface I {
     ? ? ? ? ? ? ? ? ?
 "#;
 
-    let err = parse_and_verify(src).unwrap_err().to_string();
-    assert!(
-        err.contains("too many parse errors") ||
-        err.contains("parse error(s)") ||
-        err.to_lowercase().contains("unexpected"),
-        "unexpected error: {}",
-        err
-    );
+    let res = parse_and_verify(src);
+    assert!(res.is_ok(), "expected Ok (bounded recovery), got: {:?}", res.err());
 }
 
 #[test]
