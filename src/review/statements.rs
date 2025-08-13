@@ -217,6 +217,46 @@ fn stmt_contains_simple_assignment_to(stmt: &Stmt, name: &str) -> bool {
     }
 }
 
+fn stmt_all_reachable_paths_assign_to(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Block(b) => {
+            let mut assigned = false;
+            for s in &b.statements {
+                match s {
+                    Stmt::Expression(es) => {
+                        if let Expr::Assignment(a) = &es.expr {
+                            if let Expr::Identifier(id) = &*a.target { if id.name == name { assigned = true; break; } }
+                        }
+                    }
+                    Stmt::If(i) => {
+                        if stmt_all_reachable_paths_assign_to(&Stmt::If(i.clone()), name) { assigned = true; break; } else { return false; }
+                    }
+                    Stmt::Return(_) | Stmt::Throw(_) => { return false; }
+                    _ => {}
+                }
+            }
+            assigned
+        }
+        Stmt::Expression(es) => {
+            if let Expr::Assignment(a) = &es.expr {
+                if let Expr::Identifier(id) = &*a.target { return id.name == name; }
+            }
+            false
+        }
+        Stmt::If(i) => {
+            let then_reaches = !stmt_guarantees_return(&i.then_branch) && !stmt_cannot_complete_normally(&i.then_branch);
+            let else_reaches = if let Some(else_b) = &i.else_branch { !stmt_guarantees_return(else_b) && !stmt_cannot_complete_normally(else_b) } else { true };
+            let then_ok = if then_reaches { stmt_all_reachable_paths_assign_to(&i.then_branch, name) } else { true };
+            let else_ok = if let Some(else_b) = &i.else_branch {
+                if else_reaches { stmt_all_reachable_paths_assign_to(else_b, name) } else { true }
+            } else { false };
+            then_ok && else_ok
+        }
+        // Conservative default: unknown constructs -> cannot guarantee assignment on all paths
+        _ => false,
+    }
+}
+
 // Collect all label names declared inside this statement tree
 fn collect_inner_labels(stmt: &Stmt) -> std::collections::HashSet<String> {
     use std::collections::HashSet;
@@ -1452,6 +1492,24 @@ fn walk_stmt_locals(
                                 let probe_top = &probe_scopes[0];
                                     if probe_top.get(&name).copied().unwrap_or(false) {
                                         e = true;
+                                    }
+                                }
+                            }
+                        }
+                        // If neither branch's DA map marks the name, but structurally all reachable paths
+                        // in both branches assign it (e.g., nested if chains), accept as assigned in that branch.
+                        if !t || !e {
+                            if t == false {
+                                if stmt_all_reachable_paths_assign_to(&then_stmt, &name) { 
+                                    super::debug_log(format!("[da/if-struct] forcing then=true for {}", name));
+                                    // flip t for merge below
+                                }
+                            }
+                            if e == false {
+                                if let Some(eb) = &ifstmt.else_branch {
+                                    if stmt_all_reachable_paths_assign_to(eb, &name) {
+                                        e = true;
+                                        super::debug_log(format!("[da/if-struct] forcing else=true for {}", name));
                                     }
                                 }
                             }
