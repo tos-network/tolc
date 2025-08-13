@@ -50,8 +50,8 @@ Notes
 | Signature | Valid class/field/method signature strings | ✓ | `verify/signature.rs`; `verify/attributes.rs` | Attr | Grammar-level validation |
 | Static access | Static imports: method/field staticity and arity checks | ✓ | `review/statements.rs`, `review/fields.rs`; tests | Resolve/Enter | — |
 | Static access | `TypeName.m(...)` / `TypeName.f` must be static | ✓ | `review/statements.rs`, `review/fields.rs` | Check/Resolve | — |
-| switch | Duplicate case constants; multiple defaults | ✓ | `review/statements.rs`; tests | Flow | int constant folding subset |
-| switch | Effect of default on DA | ✓ | review/statements.rs (walk_stmt_locals: Switch), tests: switch_tests.rs | Flow | Default considered in DA merge: constant selector evaluates single fallthrough path; non-constant enumerates all case-entry fallthrough paths; if no default, include the empty path; DA after switch is the intersection across all exits. |
+| switch | Duplicate case constants; multiple defaults | ✓ | `review/statements.rs`; tests: `switch_tests.rs`, `switch_da_default_tests.rs`, `switch_string_enum_tests.rs` | Flow | Covered for int/String/enum labels, with constant folding for int/String and enum-ordinal mapping; multiple defaults rejected. |
+| switch | Effect of default on DA | ✓ | `review/statements.rs` (walk_stmt_locals: Switch), tests: `switch_tests.rs`, `switch_da_default_tests.rs`, `switch_string_enum_tests.rs` | Flow | Default considered in DA merge: constant selector evaluates single fallthrough path (int/String/enum); non-constant enumerates all case-entry fallthrough paths; if no default, include the empty path, except for enum switches that exhaustively list all constants (treated as covered). DA after switch is the intersection across all normal exits. |
 | Types/declarations | Duplicate type names in a CU | ✓ | `review/types.rs` | Enter/Check | — |
 | Types/declarations | Empty type names rejected | ✓ | `review/types.rs` | Check | — |
 | Types/declarations | Interface cannot be final | ✓ | `verify/mod.rs` | Check | — |
@@ -62,3 +62,30 @@ Summary
 -
 
  tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful Flow/Resolve/Generics subsets.
+
+### Gaps to 100% javac alignment (Java 8) and roadmap
+
+Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
+
+| Area | Gap | Status | Notes / Target spec (javac/JLS) |
+|---|---|---|---|
+| Generics | Full capture conversion (wildcards), inference across expressions and calls | ✗ | JLS 4.10, 15.12.2.7; affects overload applicability and cast/instanceof/new consistency |
+| Generics | Generic method type inference (poly expressions) | ✗ | JLS 15.12.2; most-specific selection with inferred type args |
+| Generics | Wildcards in constructor type args and nested use sites | ◐ | Basic checks done; full legality and capture missing |
+| Overload resolution | Complete JLS ordering (boxing/unboxing, varargs vs fixed, primitive promotions, most-specific by subtyping) | ◐ | Implemented simplified ranking; needs full tie-breaks (JLS 15.12) and applicability-by-subtyping pass |
+| Lambdas/method refs | Parsing, target typing, inference, exception typing | ✗ | Java 8 feature; out-of-scope so far |
+| Flow/DA | Blank final fields: definite assignment across constructors/this()/super() and DA/DU rules | ✗ | JLS 16 (8e 16.1–16.9); only final-parameter assign banned today |
+| Flow/DA | Full reachability (DR) and DA for complex labeled break/continue with try/finally nesting | ◐ | Core cases handled; needs exhaustive label/try/finally interactions |
+| Flow/DA | Switch analysis parity (strings/enums constant folding, exhaustive per-entry fallthrough paths) | ◐ | Added String/enum constant folding, duplicate-label checks, and enum-exhaustive coverage (no empty path when all constants are listed). Remaining: broader String constant detection beyond literals, and deeper per-label reachability nuances. |
+| Exceptions | Precise throws for generic methods, multi-catch disjointness checks, lambda-related throws | ◐ | Typical throws coverage is present; generic/lambda precision pending |
+| Attr/Annotations | Complete type-annotation coverage (arrays, nested, use-site targets), repeated annotations | ◐ | Runtime-visible sets validated; full placement matrix and repeats TBD |
+| Name resolution | Ambiguous/duplicate imports precedence, inner-class vs top-level shadowing, star-import specificity | ◐ | Basic duplicate import checks done; full resolution order parity with javac pending |
+| Overrides | Generic override checks with erasure/bridges, ACC_SYNTHETIC bridge expectations | ◐ | Visibility/covariant returns/throws narrowing are enforced; bridge-related checks missing |
+| Parser | Lambda/method ref grammar, full annotation positions, multi-resource TWR details | ◐/✗ | Parser covers most statements/expressions; lambda/mref not yet |
+| Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Baseline bounds and monotonic checks; full type lattice merge not implemented |
+| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ✗ | Affects constant propagation checks and some attribute generation |
+
+Planned sequencing to reach 100%
+- Short-term: switch DA parity (enum/string), name-resolution precedence, override-bridge checks, annotation placement matrix, generics upper-bound corner cases, full overload tie-breaks.
+- Mid-term: blank-final DA/DU, generic method inference and capture conversion, StackMap merge improvements, constant expression evaluation.
+- Long-term: lambdas/method references (parser + type inference + flow), full verification type lattice, repeated annotations semantics.

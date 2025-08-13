@@ -16,6 +16,9 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
     let mut varargs_ctor_count = 0usize;
     for member in &class.body {
         if let ClassMember::Method(m) = member {
+            // Check duplicate annotations on the method and its parameters
+            super::annotation::review_method_annotations(m)?;
+            super::annotation::review_method_annotations(m)?;
             declared_method_sigs
                 .entry(m.name.clone())
                 .or_default()
@@ -265,6 +268,9 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                 }
             }
         } else if let ClassMember::Constructor(c) = member {
+            // Check duplicate annotations on the constructor and its parameters
+            super::annotation::review_ctor_annotations(c)?;
+            super::annotation::review_ctor_annotations(c)?;
             // Constructor visibility exclusivity and illegal flags
             ensure_visibility_exclusive(&c.modifiers, &c.name)?;
             use crate::ast::Modifier::*;

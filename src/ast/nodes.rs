@@ -101,6 +101,7 @@ impl fmt::Display for TypeDecl {
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
     pub modifiers: Vec<Modifier>,
+    pub annotations: Vec<Annotation>,
     pub name: String,
     pub type_params: Vec<TypeParam>,
     pub extends: Option<TypeRef>,
@@ -128,6 +129,7 @@ impl fmt::Display for ClassDecl {
 #[derive(Debug, Clone)]
 pub struct InterfaceDecl {
     pub modifiers: Vec<Modifier>,
+    pub annotations: Vec<Annotation>,
     pub name: String,
     pub type_params: Vec<TypeParam>,
     pub extends: Vec<TypeRef>,
@@ -673,6 +675,7 @@ pub struct InitializerBlock {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub modifiers: Vec<Modifier>,
+    pub annotations: Vec<Annotation>,
     pub name: String,
     pub implements: Vec<TypeRef>,
     pub constants: Vec<EnumConstant>,

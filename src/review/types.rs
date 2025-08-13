@@ -640,16 +640,42 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
 }
 
 pub(crate) fn resolve_type_in_index<'a>(global: &'a GlobalMemberIndex, name: &str) -> Option<&'a MemberTables> {
-    if let Some(mt) = global.by_type.get(name) { return Some(mt); }
+    // Fully-qualified name provided
+    if name.contains('.') {
+        if let Some(mt) = global.by_type.get(name) { return Some(mt); }
+        return None;
+    }
+
+    // 1) Single-type (explicit) imports have highest precedence among imports
     for imp in &global.imports {
         if let Some(last) = imp.rsplit('.').next() {
-            if last == name { if let Some(mt) = global.by_type.get(imp) { return Some(mt); } }
+            if last == name {
+                if let Some(mt) = global.by_type.get(imp) { return Some(mt); }
+            }
         }
     }
+
+    // 2) Types in the current package
+    if let Some(pkg) = &global.package {
+        let fq = format!("{}.{name}", pkg);
+        if let Some(mt) = global.by_type.get(&fq) { return Some(mt); }
+    }
+
+    // 3) On-demand (wildcard) imports
     for wi in &global.wildcard_imports {
         let fq = format!("{}.{name}", wi);
         if let Some(mt) = global.by_type.get(&fq) { return Some(mt); }
     }
+
+    // 4) Implicit java.lang.*
+    {
+        let fq = format!("java.lang.{name}");
+        if let Some(mt) = global.by_type.get(&fq) { return Some(mt); }
+    }
+
+    // 5) Fallback: simple-name lookup in the index (best-effort)
+    if let Some(mt) = global.by_type.get(name) { return Some(mt); }
+
     None
 }
 
@@ -720,6 +746,7 @@ pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
     for td in &ast.type_decls {
         match td {
             TypeDecl::Class(c) => {
+                super::annotation::review_type_decl_annotations_class(c)?;
                 if c.name.trim().is_empty() { return Err(ReviewError::EmptyClassName); }
                 if !seen.insert(c.name.clone()) { return Err(ReviewError::DuplicateType(c.name.clone())); }
                 super::class::review_class(c)?;
@@ -728,6 +755,7 @@ pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
                 review_nested_in_class(c, &global_index)?;
             }
             TypeDecl::Interface(i) => {
+                super::annotation::review_type_decl_annotations_interface(i)?;
                 if i.name.trim().is_empty() { return Err(ReviewError::EmptyClassName); }
                 if !seen.insert(i.name.clone()) { return Err(ReviewError::DuplicateType(i.name.clone())); }
                 super::interface::review_interface(i)?;
@@ -736,6 +764,7 @@ pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
                 review_nested_in_interface(i, &global_index)?;
             }
             TypeDecl::Enum(e) => {
+                super::annotation::review_type_decl_annotations_enum(e)?;
                 if e.name.trim().is_empty() { return Err(ReviewError::EmptyClassName); }
                 if !seen.insert(e.name.clone()) { return Err(ReviewError::DuplicateType(e.name.clone())); }
                 super::enums::review_enum(e)?;

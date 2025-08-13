@@ -8,6 +8,8 @@ pub(crate) fn review_fields_of_class(class: &ClassDecl, global: &GlobalMemberInd
     let mut seen: HashSet<String> = HashSet::new();
     for member in &class.body {
         if let ClassMember::Field(f) = member {
+            // Check duplicate declaration annotations on field
+            super::annotation::review_field_annotations(f)?;
             // field type cannot be void
             if f.type_ref.name == "void" {
                 return Err(ReviewError::DuplicateType(format!(

@@ -400,6 +400,68 @@ fn fold_case_value_for_int_switch(expr: &Expr) -> Option<i32> {
     match k { ConstKind::Int32 => Some(v as i32), ConstKind::Int64 => None }
 }
 
+// String switch support (subset): treat only literal strings and parenthesized literals as constants
+fn fold_selector_value_for_string_switch(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(lit) => {
+            if let crate::ast::Literal::String(s) = &lit.value { Some(s.clone()) } else { None }
+        }
+        Expr::Parenthesized(inner) => fold_selector_value_for_string_switch(inner),
+        _ => None,
+    }
+}
+
+fn fold_case_value_for_string_switch(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(lit) => {
+            if let crate::ast::Literal::String(s) = &lit.value { Some(s.clone()) } else { None }
+        }
+        Expr::Parenthesized(inner) => fold_case_value_for_string_switch(inner),
+        _ => None,
+    }
+}
+
+// Enum switch support (subset, using global index): support qualified enum constants in selector,
+// and case labels as either bare identifiers (CONST) or qualified (Enum.CONST) when enum name is known
+fn fold_selector_value_for_enum_switch_global(
+    global: Option<&crate::review::types::GlobalMemberIndex>,
+    expr: &Expr,
+) -> Option<(String, usize)> {
+    let g = global?;
+    if let Expr::FieldAccess(fa) = expr {
+        if let Some(target) = &fa.target {
+            if let Expr::Identifier(id) = &**target {
+                if let Some(inner) = g.enum_index.get(&id.name) {
+                    if let Some(ord) = inner.get(&fa.name) { return Some((id.name.clone(), *ord)); }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn fold_case_value_for_enum_switch_global(
+    enum_name: &str,
+    global: Option<&crate::review::types::GlobalMemberIndex>,
+    expr: &Expr,
+) -> Option<usize> {
+    let g = global?;
+    if let Some(inner) = g.enum_index.get(enum_name) {
+        match expr {
+            Expr::Identifier(id) => inner.get(&id.name).copied(),
+            Expr::FieldAccess(fa) => {
+                if let Some(target) = &fa.target {
+                    if let Expr::Identifier(id) = &**target {
+                        if id.name == enum_name { return inner.get(&fa.name).copied(); }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    } else { None }
+}
+
 // Try fold enum selector to an ordinal by resolving identifier against an enum constant index in current compilation unit.
 fn fold_selector_value_for_enum_switch(ast: &crate::ast::Ast, expr: &Expr) -> Option<(String, usize)> {
     use crate::ast::Expr as E;
@@ -1673,6 +1735,10 @@ fn walk_stmt_locals(
                 // Basic diagnostics: multiple defaults and duplicate constant labels (with constant folding)
                 let mut default_count = 0usize;
                 let mut seen_labels: std::collections::HashSet<i32> = std::collections::HashSet::new();
+                let mut seen_str_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let enum_selector_name: Option<String> = fold_selector_value_for_enum_switch_global(global, &sw.expression).map(|(n, _)| n);
+                let mut seen_enum_labels: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                let mut seen_enum_texts: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for c in &sw.cases {
                     if c.labels.is_empty() { default_count += 1; }
                     for lab in &c.labels {
@@ -1680,14 +1746,111 @@ fn walk_stmt_locals(
                             if !seen_labels.insert(v) {
                                 return Err(ReviewError::DuplicateSwitchCaseLabel(format!("{}", v)));
                             }
+                        } else if let Some(s) = fold_case_value_for_string_switch(lab) {
+                            if !seen_str_labels.insert(s.clone()) {
+                                return Err(ReviewError::DuplicateSwitchCaseLabel(s));
+                            }
+                        } else if let Some(enum_name) = enum_selector_name.as_ref() {
+                            if let Some(ord) = fold_case_value_for_enum_switch_global(enum_name, global, lab) {
+                                if !seen_enum_labels.insert(ord) {
+                                    return Err(ReviewError::DuplicateSwitchCaseLabel(format!("{}::#{}", enum_name, ord)));
+                                }
+                            }
+                        } else {
+                            // Fallback textual duplicate detection for enum-like labels when selector type is unknown
+                            match lab {
+                                Expr::Identifier(id) => {
+                                    if !seen_enum_texts.insert(id.name.clone()) {
+                                        return Err(ReviewError::DuplicateSwitchCaseLabel(id.name.clone()));
+                                    }
+                                }
+                                Expr::FieldAccess(fa) => {
+                                    if let Some(target) = &fa.target {
+                                        if let Expr::Identifier(id) = &**target {
+                                            let key = format!("{}.{}", id.name, fa.name);
+                                            if !seen_enum_texts.insert(key.clone()) {
+                                                return Err(ReviewError::DuplicateSwitchCaseLabel(key));
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
                 if default_count > 1 { return Err(ReviewError::MultipleSwitchDefaults); }
                 let mut exit_maps: Vec<std::collections::HashMap<String, bool>> = Vec::new();
                 // If switch expression is a constant, evaluate the single reachable fallthrough path
-                let expr_val = fold_selector_value_for_int_switch(&sw.expression);
-                if let Some(v) = expr_val {
+                // Try String constant first, then int constant
+                if let Some(sval) = fold_selector_value_for_string_switch(&sw.expression) {
+                    let default_index = sw.cases.iter().position(|c| c.labels.is_empty());
+                    let mut match_index: Option<usize> = None;
+                    for (idx, c) in sw.cases.iter().enumerate() {
+                        if c.labels.iter().any(|lab| fold_case_value_for_string_switch(lab).as_deref() == Some(&sval)) {
+                            match_index = Some(idx);
+                            break;
+                        }
+                    }
+                    if let Some(start) = match_index.or(default_index) {
+                        // Gather fall-through statements starting at `start`, but stop at the first top-level break
+                        let mut stmts: Vec<Stmt> = Vec::new();
+                        'outer_const_str: for c in &sw.cases[start..] {
+                            for s in &c.statements {
+                                stmts.push(s.clone());
+                                if matches!(s, Stmt::Break(_)) { break 'outer_const_str; }
+                            }
+                        }
+                        // Only consider normal completion paths (those that contain a break)
+                        let has_break = stmts.iter().any(|s| matches!(s, Stmt::Break(_)));
+                        if has_break {
+                            let block = Block { statements: stmts, span: sw.span };
+                            let mut c_scopes = scopes.clone();
+                            match walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global) {
+                                Err(ReviewError::UnreachableStatement) => {/* ignore unreachable within simulated case path */}
+                                Err(e) => return Err(e),
+                                Ok(()) => {}
+                            }
+                            let base_index = scopes.len() - 1;
+                            exit_maps.push(c_scopes[base_index].clone());
+                        }
+                    } else {
+                        // constant but no matching label and no default: no statements execute
+                        exit_maps.push(scopes.last().unwrap().clone());
+                    }
+                } else if let Some((enum_name, ord)) = fold_selector_value_for_enum_switch_global(global, &sw.expression) {
+                    let default_index = sw.cases.iter().position(|c| c.labels.is_empty());
+                    let mut match_index: Option<usize> = None;
+                    for (idx, c) in sw.cases.iter().enumerate() {
+                        if c.labels.iter().any(|lab| fold_case_value_for_enum_switch_global(&enum_name, global, lab) == Some(ord)) {
+                            match_index = Some(idx);
+                            break;
+                        }
+                    }
+                    if let Some(start) = match_index.or(default_index) {
+                        let mut stmts: Vec<Stmt> = Vec::new();
+                        'outer_const_enum: for c in &sw.cases[start..] {
+                            for s in &c.statements {
+                                stmts.push(s.clone());
+                                if matches!(s, Stmt::Break(_)) { break 'outer_const_enum; }
+                            }
+                        }
+                        let has_break = stmts.iter().any(|s| matches!(s, Stmt::Break(_)));
+                        if has_break {
+                            let block = Block { statements: stmts, span: sw.span };
+                            let mut c_scopes = scopes.clone();
+                            match walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global) {
+                                Err(ReviewError::UnreachableStatement) => {/* ignore unreachable within simulated case path */}
+                                Err(e) => return Err(e),
+                                Ok(()) => {}
+                            }
+                            let base_index = scopes.len() - 1;
+                            exit_maps.push(c_scopes[base_index].clone());
+                        }
+                    } else {
+                        exit_maps.push(scopes.last().unwrap().clone());
+                    }
+                } else if let Some(v) = fold_selector_value_for_int_switch(&sw.expression) {
                     let default_index = sw.cases.iter().position(|c| c.labels.is_empty());
                     let mut match_index: Option<usize> = None;
                     for (idx, c) in sw.cases.iter().enumerate() {
@@ -1746,8 +1909,50 @@ fn walk_stmt_locals(
                             exit_maps.push(c_scopes[base_index].clone());
                         }
                     }
-                    // If no default and no case matches, include the path that executes no case at all (normal completion)
-                    if !has_default { exit_maps.push(scopes.last().unwrap().clone()); }
+                    // If no default: include the path that executes no case at all (normal completion),
+                    // except when this is an enum switch that exhaustively lists all enum constants.
+                    if !has_default {
+                        let mut add_nomatch_path = true;
+                        if let Some(g) = global {
+                            // Try to detect if all labels belong to the same enum and cover all constants
+                            // Determine candidate enum name and seen ordinals
+                            let mut candidate: Option<String> = None;
+                            let mut all_match_candidate = true;
+                            let mut seen_ordinals: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                            // Collect non-default labels across all cases
+                            'outer_enum: for c in &sw.cases {
+                                for lab in &c.labels {
+                                    let mut matched_this_label: Option<(String, usize)> = None;
+                                    for (ename, inner) in &g.enum_index {
+                                        if let Some(ord) = fold_case_value_for_enum_switch_global(ename, Some(g), lab) {
+                                            matched_this_label = Some((ename.clone(), ord));
+                                            break;
+                                        }
+                                    }
+                                    if let Some((ename, ord)) = matched_this_label {
+                                        if let Some(cn) = &candidate {
+                                            if *cn != ename { all_match_candidate = false; break 'outer_enum; }
+                                        } else {
+                                            candidate = Some(ename);
+                                        }
+                                        seen_ordinals.insert(ord);
+                                    } else {
+                                        all_match_candidate = false; break 'outer_enum;
+                                    }
+                                }
+                            }
+                            if all_match_candidate {
+                                if let Some(cn) = candidate.as_ref() {
+                                    if let Some(inner) = g.enum_index.get(cn) {
+                                        if seen_ordinals.len() == inner.len() {
+                                            add_nomatch_path = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if add_nomatch_path { exit_maps.push(scopes.last().unwrap().clone()); }
+                    }
                 }
                 let cur_top = scopes.last_mut().unwrap();
                 for n in names {
@@ -2245,9 +2450,15 @@ fn walk_expr(
                                         if fixed_only.len() == 1 {
                                             applicable.retain(|(s, _, _)| *s == fixed_only[0]);
                                         } else {
-                                            let candidates = applicable.iter().map(|(s, _, _)| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
-                                            let found = found_list.join(",");
-                                            return Err(ReviewError::AmbiguousMethod { name: mc.name.clone(), candidates, found });
+                                            // 6) Most-specific by subtyping among references
+                                            let tied: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s).collect();
+                                            if break_specificity_tie(&tied, global) {
+                                                // accept resolution
+                                            } else {
+                                                let candidates = applicable.iter().map(|(s, _, _)| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                                let found = found_list.join(",");
+                                                return Err(ReviewError::AmbiguousMethod { name: mc.name.clone(), candidates, found });
+                                            }
                                         }
                                     }
                                 }
@@ -3036,7 +3247,7 @@ fn calc_cost_with_varargs(
 
 fn break_specificity_tie(cands: &[&Vec<String>], global: Option<&crate::review::types::GlobalMemberIndex>) -> bool {
     if cands.is_empty() { return false; }
-    // pairwise reduction: keep a candidate that is not less specific than others and strictly more specific for at least one position
+    // Only attempt reference-type specificity; primitives remain ambiguous per current policy
     let mut idx_best = 0usize;
     let mut improved = false;
     for i in 1..cands.len() {
@@ -3044,19 +3255,23 @@ fn break_specificity_tie(cands: &[&Vec<String>], global: Option<&crate::review::
         let b = cands[i];
         let mut a_better_any = false;
         let mut b_better_any = false;
-        let comparable_all = true;
+        let mut saw_reference_position = false;
         for (ta, tb) in a.iter().zip(b.iter()) {
-            match more_specific_type(ta, tb, global) {
-                Some(true) => a_better_any = true,
-                Some(false) => b_better_any = true,
-                None => { /* incomparable */ }
+            let a_is_ref = !is_primitive_type(ta) && ta != "String";
+            let b_is_ref = !is_primitive_type(tb) && tb != "String";
+            if a_is_ref && b_is_ref {
+                saw_reference_position = true;
+                match more_specific_type(ta, tb, global) {
+                    Some(true) => a_better_any = true,
+                    Some(false) => b_better_any = true,
+                    None => {}
+                }
             }
         }
-        // require not-worse and at least one strictly better
+        if !saw_reference_position { continue; }
+        // require not-worse and at least one strictly better among reference positions
         if a_better_any && !b_better_any { improved = true; continue; }
         if b_better_any && !a_better_any { idx_best = i; improved = true; continue; }
-        // otherwise incomparable; keep existing
-        let _ = comparable_all;
     }
     improved
 }

@@ -372,6 +372,10 @@ impl ClassWriter {
             self.class_file.methods.push(method_info);
         }
 
+        // Synthesize bridge methods for common erased generics patterns (subset).
+        // Currently supports: Comparable<T>#compareTo(T) -> bridge compareTo(Object)
+        self.synthesize_bridges(class)?;
+
         // Add SourceFile attribute after methods
         let filename = format!("{}.java", class.name);
         if let Ok(attr) = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); crate::codegen::attribute::NamedAttribute::new_source_file_attribute(&mut cp, filename) } {
@@ -382,6 +386,90 @@ impl ClassWriter {
         if let Some(cp) = &self.cp_shared { self.class_file.constant_pool = cp.borrow().clone(); }
         self.cp_shared = None;
         
+        Ok(())
+    }
+
+    fn synthesize_bridges(&mut self, class: &ClassDecl) -> Result<()> {
+        // Heuristic: if class implements Comparable and has compareTo with a single reference-typed parameter
+        // that is not Object, generate a bridge: public synthetic bridge int compareTo(Object o) { return this.compareTo((T)o); }
+        let implements_comparable = class.implements.iter().any(|t| t.name == "Comparable" || t.name.ends_with("Comparable"));
+        if !implements_comparable { return Ok(()); }
+        // Find concrete compareTo(T) candidate
+        let candidate = class.body.iter().find_map(|m| {
+            if let ClassMember::Method(md) = m {
+                if md.name == "compareTo" && md.parameters.len() == 1 {
+                    let pty = &md.parameters[0].type_ref.name;
+                    let is_primitive = matches!(pty.as_str(),
+                        "int"|"long"|"float"|"double"|"boolean"|"char"|"short"|"byte");
+                    if !is_primitive && pty != "Object" { return Some(md); }
+                }
+            }
+            None
+        });
+        let Some(target) = candidate else { return Ok(()); };
+        // Build bridge body: aload_0; aload_1; checkcast <T>; invokevirtual this.compareTo(T)I; ireturn
+        let mut code_bytes: Vec<u8> = Vec::new();
+        code_bytes.push(opcodes::ALOAD_0); // this
+        code_bytes.push(opcodes::ALOAD_1); // param
+        // CHECKCAST to parameter type
+        let param_desc = super::descriptor::type_to_descriptor(&target.parameters[0].type_ref);
+        // Convert descriptor Lpkg/Type; -> internal name pkg/Type for constant pool
+        let internal_class_name = if param_desc.starts_with('L') && param_desc.ends_with(';') {
+            param_desc[1..param_desc.len()-1].to_string()
+        } else if param_desc.ends_with("[]") {
+            // Arrays: no checkcast for primitives arrays handling here; emit as Object cast (safe no-op for our subset)
+            "java/lang/Object".to_string()
+        } else {
+            "java/lang/Object".to_string()
+        };
+        let class_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_class(&internal_class_name) }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        code_bytes.push(opcodes::CHECKCAST);
+        code_bytes.extend_from_slice(&class_index.to_be_bytes());
+        // INVOKEVIRTUAL this.compareTo(T)I
+        let this_internal = self.current_class_name.clone().unwrap_or_else(|| class.name.replace('.', "/"));
+        let method_ref = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            let desc_concrete = format!("({})I", super::descriptor::type_to_descriptor(&target.parameters[0].type_ref));
+            cp.try_add_method_ref(&this_internal, "compareTo", &desc_concrete)
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        code_bytes.push(opcodes::INVOKEVIRTUAL);
+        code_bytes.extend_from_slice(&method_ref.to_be_bytes());
+        code_bytes.push(opcodes::IRETURN);
+
+        // Compute simple max_stack
+        let mut sim_depth: i32 = 0; let mut sim_max: i32 = 0; let mut i = 0usize;
+        while i < code_bytes.len() { let op = code_bytes[i]; match op {
+            0x2A /* ALOAD_0 */ => { sim_depth += 1; },
+            0x2B /* ALOAD_1 */ => { sim_depth += 1; },
+            0xC0 /* CHECKCAST */ => { i += 2; },
+            0xB6 /* INVOKEVIRTUAL */ => { sim_depth -= 1; i += 2; },
+            0xAC /* IRETURN */ => {},
+            _ => {}
+        } if sim_depth > sim_max { sim_max = sim_depth; } i += 1; }
+        let computed_max_stack = sim_depth.max(sim_max).max(1) as u16;
+
+        // Build Code attribute payload
+        let mut attribute_bytes = Vec::new();
+        attribute_bytes.extend_from_slice(&computed_max_stack.to_be_bytes());
+        attribute_bytes.extend_from_slice(&2u16.to_be_bytes()); // max_locals: this + param
+        attribute_bytes.extend_from_slice(&(code_bytes.len() as u32).to_be_bytes());
+        attribute_bytes.extend_from_slice(&code_bytes);
+        attribute_bytes.extend_from_slice(&0u16.to_be_bytes()); // exceptions count
+        attribute_bytes.extend_from_slice(&0u16.to_be_bytes()); // attributes count
+
+        // MethodInfo: public | bridge | synthetic
+        let access = access_flags::ACC_PUBLIC | access_flags::ACC_BRIDGE | access_flags::ACC_SYNTHETIC;
+        let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("compareTo") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let descriptor_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("(Ljava/lang/Object;)I") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let mut method_info = MethodInfo::new(access, name_index, descriptor_index);
+        // Name of Code attribute
+        let code_name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Code") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let named = NamedAttribute::new(code_name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload: attribute_bytes }));
+        method_info.attributes.push(named);
+        self.class_file.methods.push(method_info);
         Ok(())
     }
     
@@ -484,7 +572,67 @@ impl ClassWriter {
         
         let access_flags = modifiers_to_flags(&field.modifiers);
         
-        let field_info = FieldInfo::new(access_flags, name_index, descriptor_index);
+        let mut field_info = FieldInfo::new(access_flags, name_index, descriptor_index);
+        // ConstantValue for static final primitives or String literals
+        if field.modifiers.iter().any(|m| matches!(m, Modifier::Static))
+            && field.modifiers.iter().any(|m| matches!(m, Modifier::Final))
+        {
+            if let Some(init) = &field.initializer {
+                use crate::ast::{Expr, Literal};
+                let add_const_attr = |cw: &mut ClassWriter, tag: &str, idx: u16, fi: &mut FieldInfo| -> Result<()> {
+                    // ConstantValue attribute payload: u2 constantvalue_index
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&idx.to_be_bytes());
+                    let name_index = { let mut cp = cw.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("ConstantValue") }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    fi.attributes.push(NamedAttribute::new(name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload })));
+                    Ok(())
+                };
+                match init {
+                    Expr::Literal(lit) => match &lit.value {
+                        Literal::Integer(i) => {
+                            let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(*i as i32) };
+                            add_const_attr(self, "Integer", idx, &mut field_info)?;
+                        }
+                        Literal::Float(f) => {
+                            // Our AST uses f64 for all floats; choose ConstantFloat if fits, else ConstantDouble
+                            if (*f as f32) as f64 == *f {
+                                let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_float(*f as f32) };
+                                add_const_attr(self, "Float", idx, &mut field_info)?;
+                            } else {
+                                let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_double(*f) };
+                                add_const_attr(self, "Double", idx, &mut field_info)?;
+                            }
+                        }
+                        Literal::Integer(i) => {
+                            // Use Integer if fits 32-bit, else Long
+                            if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                                let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(*i as i32) };
+                                add_const_attr(self, "Integer", idx, &mut field_info)?;
+                            } else {
+                                let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_long(*i as i64) };
+                                add_const_attr(self, "Long", idx, &mut field_info)?;
+                            }
+                        }
+                        Literal::Char(c) => {
+                            let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(*c as i32) };
+                            add_const_attr(self, "Float", idx, &mut field_info)?;
+                        }
+                        Literal::Boolean(b) => {
+                            let v = if *b { 1 } else { 0 };
+                            let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(v) };
+                            add_const_attr(self, "Boolean", idx, &mut field_info)?;
+                        }
+                        Literal::String(s) => {
+                            let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_string(s) };
+                            add_const_attr(self, "String", idx, &mut field_info)?;
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
         self.class_file.fields.push(field_info);
         
         Ok(())

@@ -308,7 +308,12 @@ impl Parser {
     fn parse_type_decl(&mut self) -> Result<TypeDecl> {
         // Consume and ignore declaration-leading annotations to allow
         // forms like @Retention @Target public @interface ...
-        let _leading_annotations = self.parse_annotations()?;
+        // BUT: do not treat '@interface' as an annotation usage. If the next token after '@'
+        // is the 'interface' keyword, this begins an annotation type declaration and must not
+        // be consumed here.
+        if !(self.check(&Token::At) && self.peek_token_type(self.current + 1) == Some(&Token::Interface)) {
+            let _leading_annotations = self.parse_annotations()?;
+        }
         let modifiers = self.parse_modifiers()?;
         
         match self.peek().token_type() {
@@ -345,6 +350,10 @@ impl Parser {
         
         self.consume(&Token::Class, "Expected 'class'")?;
         
+        // Leading annotations directly before 'class' were collected at type_decl entry.
+        // Parse any annotations that appear between 'class' and the name (rare but allow symmetry)
+        let annotations = self.parse_annotations()?;
+
         let name = self.parse_identifier()?;
         
         let type_params = if self.check(&Token::Lt) {
@@ -393,6 +402,7 @@ impl Parser {
         
         Ok(ClassDecl {
             modifiers,
+            annotations,
             name,
             type_params,
             extends,
@@ -692,13 +702,6 @@ impl Parser {
         // In a full parser, you'd need to handle all member types
         let mut modifiers = self.parse_modifiers()?;
 
-        // Leading annotations on class members
-        let _leading_annotations = self.parse_annotations()?;
-        // It is legal for modifiers to appear after annotations in Java, e.g., @Override public ...
-        // Consume any additional modifiers which follow annotations.
-        let mut more_mods = self.parse_modifiers()?;
-        modifiers.append(&mut more_mods);
-
         // Static initializer block: either we still see 'static' followed by '{',
         // or we already consumed 'static' as a modifier and the next token is '{'.
         if (self.check(&Token::Static) && self.peek_token_type(self.current + 1) == Some(&Token::LBrace))
@@ -724,12 +727,48 @@ impl Parser {
             log::debug!("parse_class_member: parsed nested type decl");
             return Ok(ClassMember::TypeDecl(type_decl));
         }
-        // Constructor: Identifier matching current class name followed by '('
-        if self.peek().token_type() == &Token::Identifier {
-            if self.peek_token_type(self.current + 1) == Some(&Token::LParen) {
+        // Constructor: possibly with leading annotations; look ahead skipping annotations and trailing modifiers
+        {
+            let mut i = self.current;
+            // Skip annotations
+            while self.peek_token_type(i) == Some(&Token::At) {
+                i += 1; // '@'
+                // Qualified name
+                if self.peek_token_type(i) != Some(&Token::Identifier) { break; }
+                i += 1;
+                while self.peek_token_type(i) == Some(&Token::Dot) && self.peek_token_type(i + 1) == Some(&Token::Identifier) { i += 2; }
+                // Optional annotation args
+                if self.peek_token_type(i) == Some(&Token::LParen) {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.peek_token_type(i) {
+                            Some(Token::LParen) => { depth += 1; i += 1; }
+                            Some(Token::RParen) => { i += 1; if depth == 0 { break; } depth = depth.saturating_sub(1); if depth == 0 { break; } }
+                            Some(_) => { i += 1; }
+                            None => break,
+                        }
+                    }
+                }
+            }
+            // Modifiers may appear after annotations too
+            loop {
+                match self.peek_token_type(i) {
+                    Some(Token::Public) | Some(Token::Protected) | Some(Token::Private) |
+                    Some(Token::Abstract) | Some(Token::Static) | Some(Token::Final) |
+                    Some(Token::Native) | Some(Token::Synchronized) | Some(Token::Transient) |
+                    Some(Token::Volatile) | Some(Token::Strictfp) | Some(Token::Default) => { i += 1; }
+                    _ => break,
+                }
+            }
+            if self.peek_token_type(i) == Some(&Token::Identifier) && self.peek_token_type(i + 1) == Some(&Token::LParen) {
                 if let Some(current_class) = self.class_name_stack.last() {
-                    if self.peek().lexeme() == current_class {
-                        let ctor = self.parse_constructor_decl(modifiers)?;
+                    if self.tokens.get(i).map(|t| t.lexeme()) == Some(current_class.as_str()) {
+                        // It's a constructor. Now actually consume the annotations at the real cursor,
+                        // then any modifiers that follow them, and delegate.
+                        let leading_annotations = self.parse_annotations()?;
+                        let mut more_mods = self.parse_modifiers()?;
+                        modifiers.append(&mut more_mods);
+                        let ctor = self.parse_constructor_decl_with_annotations(modifiers, leading_annotations)?;
                         return Ok(ClassMember::Constructor(ctor));
                     }
                 }
@@ -749,14 +788,14 @@ impl Parser {
                 }
             }
             if self.lookahead_is_method_signature() {
-            let method = self.parse_method_decl(modifiers)?;
-            log::debug!("parse_class_member: parsed method decl");
-            Ok(ClassMember::Method(method))
-        } else {
-            let field = self.parse_field_decl(modifiers)?;
-            log::debug!("parse_class_member: parsed field decl");
-            Ok(ClassMember::Field(field))
-        }
+                let method = self.parse_method_decl(modifiers)?;
+                log::debug!("parse_class_member: parsed method decl");
+                Ok(ClassMember::Method(method))
+            } else {
+                let field = self.parse_field_decl(modifiers)?;
+                log::debug!("parse_class_member: parsed field decl");
+                Ok(ClassMember::Field(field))
+            }
         } else {
             let field = self.parse_field_decl(modifiers)?;
             log::debug!("parse_class_member: parsed field decl (fallback)");
@@ -999,6 +1038,7 @@ impl Parser {
     // Simplified implementations for other parsing methods
     fn parse_interface_decl(&mut self, modifiers: Vec<Modifier>) -> Result<InterfaceDecl> {
         self.consume(&Token::Interface, "Expected 'interface' keyword")?;
+        let annotations = self.parse_annotations()?;
         let name = self.parse_identifier()?;
         
         // Parse type parameters; allow single "? extends/super T" as generic param in compat mode
@@ -1060,6 +1100,7 @@ impl Parser {
         
         Ok(InterfaceDecl {
             modifiers,
+            annotations,
             name,
             type_params,
             extends,
@@ -1070,6 +1111,7 @@ impl Parser {
     
     fn parse_enum_decl(&mut self, modifiers: Vec<Modifier>) -> Result<EnumDecl> {
         self.consume(&Token::Enum, "Expected 'enum' keyword")?;
+        let annotations = self.parse_annotations()?;
         let name = self.parse_identifier()?;
         
         // Parse implements clause
@@ -1125,6 +1167,7 @@ impl Parser {
         
         Ok(EnumDecl {
             modifiers,
+            annotations,
             name,
             implements,
             constants,
@@ -1305,7 +1348,7 @@ impl Parser {
         Ok(first_decl.expect("at least one field declarator"))
     }
 
-    fn parse_constructor_decl(&mut self, modifiers: Vec<Modifier>) -> Result<ConstructorDecl> {
+    fn parse_constructor_decl_with_annotations(&mut self, modifiers: Vec<Modifier>, annotations: Vec<Annotation>) -> Result<ConstructorDecl> {
         let start = self.current_span();
         let name = self.parse_identifier()?;
         self.consume(&Token::LParen, "Expected '(' after constructor name")?;
@@ -1359,7 +1402,9 @@ impl Parser {
         let _ = self.consume(&Token::RBrace, "Expected '}' to close constructor body");
         let body = Block { statements, span: Span::new(start.start, self.previous_span().end) };
         let span = Span::new(start.start, self.previous_span().end);
-        Ok(ConstructorDecl { modifiers, annotations: Vec::new(), name, parameters, throws, explicit_invocation, body, span })
+        // Parse annotations before constructor name (already consumed in member start). For now, none are captured at member-start
+        // so keep empty list; future: wire _leading_annotations collected at member entry.
+        Ok(ConstructorDecl { modifiers, annotations, name, parameters, throws, explicit_invocation, body, span })
     }
     
     // Helper methods for the new parsing functionality
@@ -1577,6 +1622,7 @@ impl Parser {
         // Create a minimal ClassDecl for the enum constant body
         Ok(ClassDecl {
             modifiers: Vec::new(),
+            annotations: Vec::new(),
             name: "".to_string(),
             type_params: Vec::new(),
             extends: None,
