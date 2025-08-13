@@ -165,6 +165,8 @@ pub enum Modifier {
     Transient,
     Volatile,
     Strictfp,
+    // Java 8: default interface method
+    Default,
 }
 
 #[derive(Debug, Clone)]
@@ -541,6 +543,8 @@ pub enum Expr {
     Conditional(ConditionalExpr),
     New(NewExpr),
     Parenthesized(Box<Expr>),
+    // Used for annotation element array values like @Target({A,B})
+    ArrayInitializer(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -654,6 +658,7 @@ pub struct ConditionalExpr {
 pub struct NewExpr {
     pub target_type: TypeRef,
     pub arguments: Vec<Expr>,
+    pub anonymous_body: Option<ClassDecl>,
     pub span: Span,
 }
 

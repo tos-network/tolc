@@ -16,9 +16,10 @@ use crate::ast::Ast;
 use crate::error::Result;
 
 /// Parse a .tol source file into an AST
-pub fn parse_tol(source: &str) -> Result<Ast> {
-    parser::parse(source)
-}
+pub fn parse_tol(source: &str) -> Result<Ast> { parser::parse(source) }
+
+/// Lenient parse: produce best-effort AST even if syntax errors occurred.
+pub fn parse_tol_lenient(source: &str) -> Result<Ast> { Parser::new(source)?.parse_lenient() }
 
 /// Parse and verify a .tol source file
 pub fn parse_and_verify(source: &str) -> Result<Ast> {

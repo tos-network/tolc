@@ -11,7 +11,7 @@ import java.math.BigInteger;
 public final class Uint8 extends UintType<Uint8> {
     static final int MAX_WIDTH = 1;  // 8 bits, stored in a single int
 
-    public static final Uint8 MAX_VALUE = new Uint8(0xFF);
+    public static final Uint8 MAX_VALUE = new Uint8(255);
     public static final Uint8 ZERO = new Uint8(0);
     public static final Uint8 ONE = new Uint8(1);
 

@@ -1,4 +1,5 @@
 use super::{ReviewError, ReviewResult};
+// use of local helper ahead; don't import to avoid duplicate symbol with the local fn of the same name
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
@@ -37,10 +38,18 @@ fn block_guarantees_return(block: &Block) -> bool {
 // Returns true if the block is guaranteed to not complete normally (e.g., ends in an infinite loop,
 // unconditional return/throw on all paths). Used to satisfy non-void must-return via non-termination.
 fn block_cannot_complete_normally(block: &Block) -> bool {
+    // Sequential semantics: if control can reach the end of the block along any path,
+    // the block can complete normally. A block cannot complete normally only if at some
+    // point execution is guaranteed to not proceed past a statement (e.g., return/throw)
+    // no matter which path is taken within that statement.
+    let mut can_reach_end = true;
     for s in &block.statements {
-        if stmt_cannot_complete_normally(s) { return true; }
+        if !can_reach_end { break; }
+        if stmt_cannot_complete_normally(s) {
+            can_reach_end = false;
+        }
     }
-    false
+    !can_reach_end
 }
 
 fn stmt_cannot_complete_normally(stmt: &Stmt) -> bool {
@@ -162,6 +171,50 @@ fn has_top_level_break(stmt: &Stmt) -> bool {
         }
     }
     breaks_out(stmt, &inner_labels, 0, false)
+}
+
+fn stmt_contains_simple_assignment_to(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Expression(es) => {
+            if let Expr::Assignment(a) = &es.expr {
+                if let Expr::Identifier(id) = &*a.target {
+                    return id.name == name;
+                }
+            }
+            false
+        }
+        Stmt::Block(b) => b.statements.iter().any(|s| stmt_contains_simple_assignment_to(s, name)),
+        Stmt::If(i) => {
+            stmt_contains_simple_assignment_to(&i.then_branch, name)
+                || if let Some(e) = &i.else_branch { stmt_contains_simple_assignment_to(e, name) } else { false }
+        }
+        Stmt::While(w) => stmt_contains_simple_assignment_to(&w.body, name),
+        Stmt::For(f) => {
+            for s in &f.init {
+                if let Stmt::Expression(es) = s {
+                    if let Expr::Assignment(a) = &es.expr {
+                        if let Expr::Identifier(id) = &*a.target { if id.name == name { return true; } }
+                    }
+                }
+            }
+            for s in &f.update {
+                // f.update items are expression statements
+                if let Expr::Assignment(a) = &s.expr {
+                    if let Expr::Identifier(id) = &*a.target { if id.name == name { return true; } }
+                }
+            }
+            stmt_contains_simple_assignment_to(&f.body, name)
+        }
+        Stmt::Switch(sw) => sw.cases.iter().flat_map(|c| c.statements.iter()).any(|s| stmt_contains_simple_assignment_to(s, name)),
+        Stmt::Labeled(ls) => stmt_contains_simple_assignment_to(&ls.statement, name),
+        Stmt::Try(t) => {
+            if stmt_contains_simple_assignment_to(&Stmt::Block(t.try_block.clone()), name) { return true; }
+            for cc in &t.catch_clauses { if stmt_contains_simple_assignment_to(&Stmt::Block(cc.block.clone()), name) { return true; } }
+            if let Some(fin) = &t.finally_block { return stmt_contains_simple_assignment_to(&Stmt::Block(fin.clone()), name); }
+            false
+        }
+        _ => false
+    }
 }
 
 // Collect all label names declared inside this statement tree
@@ -374,25 +427,18 @@ pub(crate) fn review_body_call_arity(
     local_methods_static: Option<&HashMap<String, bool>>,
     errors_as_name: bool,
 ) -> ReviewResult<()> {
+    // Track simple local variable types to enable reference-type inference at call sites
+    let mut local_types: Vec<HashMap<String, String>> = vec![HashMap::new()];
     for stmt in &body.statements {
-        walk_stmt(current_class_name, stmt, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
+        walk_stmt(current_class_name, stmt, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, &mut local_types, errors_as_name)?;
     }
     Ok(())
 }
 
 // Helper: determine if an exception type name is unchecked (RuntimeException/Error or their subclasses)
 fn is_unchecked_exception(name: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
-    if name == "RuntimeException" || name == "Error" { return true; }
-    if crate::review::compat_mode() {
-        // Common RuntimeException subclasses treated as unchecked when hierarchy is missing
-        match name {
-            "ArithmeticException" | "NullPointerException" | "ClassCastException" |
-            "ArrayIndexOutOfBoundsException" | "NegativeArraySizeException" |
-            "IllegalArgumentException" | "IllegalStateException" |
-            "UnsupportedOperationException" | "NoSuchElementException" => { return true; }
-            _ => {}
-        }
-    }
+    if super::consts::UNCHECKED_BASE_EXCEPTIONS.contains(&name) { return true; }
+    if crate::review::compat_mode() && super::consts::UNCHECKED_COMMON_SUBCLASSES.contains(&name) { return true; }
     if let Some(mt) = crate::review::statements::resolve_type_in_index(global, name) {
         let mut cur = mt.super_name.clone();
         let mut seen = std::collections::HashSet::new();
@@ -416,6 +462,8 @@ pub(crate) fn review_body_checked_exceptions(
 ) -> ReviewResult<()> {
 
     fn is_assignable_to_any(global: &crate::review::types::GlobalMemberIndex, src: &str, dsts: &[String]) -> bool {
+        // Fast-path: catch(Exception) or catch(Throwable) covers most checked exceptions
+        if dsts.iter().any(|d| d == "Exception" || d == "Throwable") { return true; }
         for d in dsts { if crate::review::statements::is_reference_assignable(global, src, d) { return true; } }
         false
     }
@@ -666,7 +714,7 @@ pub(crate) fn review_body_checked_exceptions(
                 for a in &n.arguments { walk_expr_for_exn(current_class, a, declared, global, catch_stack, scopes)?; }
                 Ok(())
             }
-            Expr::Cast(c) => {
+        Expr::Cast(c) => {
                 walk_expr_for_exn(current_class, &c.expr, declared, global, catch_stack, scopes)
             }
             Expr::Assignment(a) => {
@@ -971,6 +1019,17 @@ fn collect_checked_exceptions_in_block(
         match expr {
             Expr::MethodCall(mc) => {
                 if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
+                    // Prefer throws-by-signature if we can infer simple primitive/String arg types
+                    let found_types: Vec<Option<&'static str>> = mc.arguments.iter().map(|a| infer_expr_primitive_or_string(a)).collect();
+                    if found_types.iter().all(|o| o.is_some()) {
+                        let sig: Vec<String> = found_types.iter().map(|o| o.unwrap().to_string()).collect();
+                        if let Some(entries) = mt.methods_throws_by_sig.get(&mc.name) {
+                            for (s, thr) in entries {
+                                if *s == sig { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } }
+                            }
+                        }
+                    }
+                    // Fallback to arity-based union
                     if let Some(list) = mt.methods_throws.get(&mc.name) {
                         let arity = mc.arguments.len();
                         for (a, thr) in list.iter() { if *a == arity { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
@@ -979,6 +1038,13 @@ fn collect_checked_exceptions_in_block(
                 if let Some(t) = &mc.target {
                     if let Expr::Identifier(id) = &**t {
                         if let Some(mt) = crate::review::types::resolve_type_in_index(global, &id.name) {
+                            let found_types: Vec<Option<&'static str>> = mc.arguments.iter().map(|a| infer_expr_primitive_or_string(a)).collect();
+                            if found_types.iter().all(|o| o.is_some()) {
+                                let sig: Vec<String> = found_types.iter().map(|o| o.unwrap().to_string()).collect();
+                                if let Some(entries) = mt.methods_throws_by_sig.get(&mc.name) {
+                                    for (s, thr) in entries { if *s == sig { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
+                                }
+                            }
                             if let Some(list) = mt.methods_throws.get(&mc.name) {
                                 let arity = mc.arguments.len();
                                 for (a, thr) in list.iter() { if *a == arity { for t in thr { if !unchecked(global, t) { out.insert(t.clone()); } } } }
@@ -1077,7 +1143,7 @@ pub(crate) fn enforce_member_access_in_block(
         current_class: &str,
         expr: &Expr,
         global: Option<&crate::review::types::GlobalMemberIndex>,
-        _scopes: &Vec<HashMap<String, bool>>,
+        local_types: &Vec<HashMap<String, String>>,
     ) -> Option<String> {
         match expr {
             Expr::New(n) => Some(n.target_type.name.clone()),
@@ -1085,11 +1151,18 @@ pub(crate) fn enforce_member_access_in_block(
                 // local types are unknown in this pass; assume not resolvable
                 // allow 'this' shorthand: treat as current_class
                 if id.name == "this" { return Some(current_class.to_string()); }
-                None
+                // try resolve from local type scopes (innermost-first)
+                for scope in local_types.iter().rev() {
+                    if let Some(t) = scope.get(&id.name) { return Some(t.clone()); }
+                }
+                // Fallback: treat bare Identifier as a reference to the current class instance (a)
+                // so that `a.f` is checked against the current class when the local var type is
+                // not yet known in this pass.
+                return Some(current_class.to_string());
             }
             Expr::FieldAccess(fa) => {
                 if let Some(t) = &fa.target {
-                    if let Some(tname) = expr_static_type(current_class, t, global, _scopes) {
+                    if let Some(tname) = expr_static_type(current_class, t, global, local_types) {
                         // try lookup field type from index signature table
                         if let Some(g) = global { if let Some(mt) = crate::review::types::resolve_type_in_index(g, &tname) {
                             // simplified: no field types table; return declaring type name as best effort
@@ -1133,21 +1206,45 @@ pub(crate) fn enforce_member_access_in_block(
         current_class_name: &str,
         stmt: &Stmt,
         global: &crate::review::types::GlobalMemberIndex,
+        local_types: &mut Vec<HashMap<String, String>>,
     ) -> ReviewResult<()> {
         match stmt {
-            Stmt::Block(b) => { for s in &b.statements { walk(current_class_name, s, global)?; } }
-            Stmt::Expression(es) => enforce_in_expr(current_class_name, &es.expr, global)?,
-            Stmt::If(i) => { enforce_in_expr(current_class_name, &i.condition, global)?; walk(current_class_name, &i.then_branch, global)?; if let Some(e) = &i.else_branch { walk(current_class_name, e, global)?; } }
-            Stmt::While(w) => { enforce_in_expr(current_class_name, &w.condition, global)?; walk(current_class_name, &w.body, global)?; }
-            Stmt::For(f) => {
-                for init in &f.init { enforce_in_stmt(current_class_name, init, global)?; }
-                if let Some(cond) = &f.condition { enforce_in_expr(current_class_name, cond, global)?; }
-                for upd in &f.update { enforce_in_expr(current_class_name, &upd.expr, global)?; }
-                walk(current_class_name, &f.body, global)?;
+            Stmt::Block(b) => {
+                local_types.push(HashMap::new());
+                for s in &b.statements { walk(current_class_name, s, global, local_types)?; }
+                local_types.pop();
             }
-            Stmt::Return(r) => { if let Some(e) = &r.value { enforce_in_expr(current_class_name, e, global)?; } }
-            Stmt::Throw(t) => { enforce_in_expr(current_class_name, &t.expr, global)?; }
-            Stmt::Switch(sw) => { enforce_in_expr(current_class_name, &sw.expression, global)?; for c in &sw.cases { for s in &c.statements { walk(current_class_name, s, global)?; } }
+            Stmt::Expression(es) => enforce_in_expr(current_class_name, &es.expr, global, local_types)?,
+            Stmt::If(i) => { enforce_in_expr(current_class_name, &i.condition, global, local_types)?; walk(current_class_name, &i.then_branch, global, local_types)?; if let Some(e) = &i.else_branch { walk(current_class_name, e, global, local_types)?; } }
+            Stmt::While(w) => { enforce_in_expr(current_class_name, &w.condition, global, local_types)?; walk(current_class_name, &w.body, global, local_types)?; }
+            Stmt::For(f) => {
+                // for-init may declare locals
+                for init in &f.init {
+                    match init {
+                        Stmt::Declaration(vd) => {
+                            if let Some(scope) = local_types.last_mut() {
+                                for v in &vd.variables { scope.insert(v.name.clone(), vd.type_ref.name.clone()); }
+                            }
+                        }
+                        _ => enforce_in_stmt(current_class_name, init, global, local_types)?,
+                    }
+                }
+                if let Some(cond) = &f.condition { enforce_in_expr(current_class_name, cond, global, local_types)?; }
+                for upd in &f.update { enforce_in_expr(current_class_name, &upd.expr, global, local_types)?; }
+                walk(current_class_name, &f.body, global, local_types)?;
+            }
+            Stmt::Return(r) => { if let Some(e) = &r.value { enforce_in_expr(current_class_name, e, global, local_types)?; } }
+            Stmt::Throw(t) => { enforce_in_expr(current_class_name, &t.expr, global, local_types)?; }
+            Stmt::Switch(sw) => { enforce_in_expr(current_class_name, &sw.expression, global, local_types)?; for c in &sw.cases { for s in &c.statements { walk(current_class_name, s, global, local_types)?; } }
+            }
+            Stmt::Declaration(vd) => {
+                if let Some(scope) = local_types.last_mut() {
+                    for v in &vd.variables { scope.insert(v.name.clone(), vd.type_ref.name.clone()); }
+                }
+                // Enforce member access in initializers
+                for v in &vd.variables {
+                    if let Some(init) = &v.initializer { enforce_in_expr(current_class_name, init, global, local_types)?; }
+                }
             }
             _ => {}
         }
@@ -1157,18 +1254,20 @@ pub(crate) fn enforce_member_access_in_block(
         current_class_name: &str,
         stmt: &Stmt,
         global: &crate::review::types::GlobalMemberIndex,
-    ) -> ReviewResult<()> { walk(current_class_name, stmt, global) }
+        local_types: &mut Vec<HashMap<String, String>>,
+    ) -> ReviewResult<()> { walk(current_class_name, stmt, global, local_types) }
     fn enforce_in_expr(
         current_class_name: &str,
         expr: &Expr,
         global: &crate::review::types::GlobalMemberIndex,
+        local_types: &mut Vec<HashMap<String, String>>,
     ) -> ReviewResult<()> {
         match expr {
             Expr::FieldAccess(fa) => {
                 if let Some(t) = &fa.target {
                     // get static type
                     // no local scopes here; pass empty
-                    if let Some(tname) = expr_static_type(current_class_name, t, Some(global), &Vec::new()) {
+                    if let Some(tname) = expr_static_type(current_class_name, t, Some(global), local_types) {
                         if let Some((vis, decl)) = resolve_field_visibility_and_declaring(&tname, &fa.name, global) {
                             let decl_pkg = crate::review::types::resolve_type_in_index(global, &decl).and_then(|m| m.package_name.clone());
                             let current_pkg = crate::review::types::resolve_type_in_index(global, current_class_name).and_then(|m| m.package_name.clone());
@@ -1201,25 +1300,26 @@ pub(crate) fn enforce_member_access_in_block(
                         }
                     }
                     // Recurse
-                    enforce_in_expr(current_class_name, t, global)?;
+                    enforce_in_expr(current_class_name, t, global, local_types)?;
                 }
                 Ok(())
             }
             Expr::MethodCall(mc) => {
-                if let Some(t) = &mc.target { enforce_in_expr(current_class_name, t, global)?; }
-                for a in &mc.arguments { enforce_in_expr(current_class_name, a, global)?; }
+                if let Some(t) = &mc.target { enforce_in_expr(current_class_name, t, global, local_types)?; }
+                for a in &mc.arguments { enforce_in_expr(current_class_name, a, global, local_types)?; }
                 Ok(())
             }
-            Expr::Assignment(a) => { enforce_in_expr(current_class_name, &a.target, global)?; enforce_in_expr(current_class_name, &a.value, global) }
-            Expr::Binary(b) => { enforce_in_expr(current_class_name, &b.left, global)?; enforce_in_expr(current_class_name, &b.right, global) }
-            Expr::Unary(u) => enforce_in_expr(current_class_name, &u.operand, global),
-            Expr::Conditional(c) => { enforce_in_expr(current_class_name, &c.condition, global)?; enforce_in_expr(current_class_name, &c.then_expr, global)?; enforce_in_expr(current_class_name, &c.else_expr, global) }
-            Expr::ArrayAccess(a) => { enforce_in_expr(current_class_name, &a.array, global)?; enforce_in_expr(current_class_name, &a.index, global) }
-            Expr::Parenthesized(p) => enforce_in_expr(current_class_name, p, global),
+            Expr::Assignment(a) => { enforce_in_expr(current_class_name, &a.target, global, local_types)?; enforce_in_expr(current_class_name, &a.value, global, local_types) }
+            Expr::Binary(b) => { enforce_in_expr(current_class_name, &b.left, global, local_types)?; enforce_in_expr(current_class_name, &b.right, global, local_types) }
+            Expr::Unary(u) => enforce_in_expr(current_class_name, &u.operand, global, local_types),
+            Expr::Conditional(c) => { enforce_in_expr(current_class_name, &c.condition, global, local_types)?; enforce_in_expr(current_class_name, &c.then_expr, global, local_types)?; enforce_in_expr(current_class_name, &c.else_expr, global, local_types) }
+            Expr::ArrayAccess(a) => { enforce_in_expr(current_class_name, &a.array, global, local_types)?; enforce_in_expr(current_class_name, &a.index, global, local_types) }
+            Expr::Parenthesized(p) => enforce_in_expr(current_class_name, p, global, local_types),
             _ => Ok(())
         }
     }
-    for s in &body.statements { walk(current_class_name, s, global)?; }
+    let mut local_types: Vec<HashMap<String, String>> = vec![HashMap::new()];
+    for s in &body.statements { walk(current_class_name, s, global, &mut local_types)?; }
     Ok(())
 }
 
@@ -1249,9 +1349,9 @@ fn walk_stmt_locals(
     global: Option<&crate::review::types::GlobalMemberIndex>,
 ) -> ReviewResult<()> {
     scopes.push(HashMap::new());
-    let mut terminated = false;
+    let mut last_terminator: Option<&'static str> = None;
     for s in &block.statements {
-        if terminated { return Err(ReviewError::UnreachableStatement); }
+        if last_terminator.is_some() { return Err(ReviewError::UnreachableStatement); }
         match s {
             Stmt::Declaration(vd) => {
                 // Borrow current scope immutably for checks, then mutate after
@@ -1287,30 +1387,115 @@ fn walk_stmt_locals(
             }
             Stmt::Block(b) => { walk_stmt_locals(b, scopes, final_params, inside_loop, global)?; }
             Stmt::If(ifstmt) => {
-                // Merge DA across branches: assigned only if assigned in both branches
-                let current_names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
+                // Evaluate condition for DA side-effects
+                check_expr_definite_assignment(&ifstmt.condition, scopes, final_params)?;
+                // Analyze branches in cloned scopes. Use current depth (base_index) keys so outer locals are considered
+                // during merge even when branches introduce a nested scope.
+                let base_index = scopes.len() - 1;
+                let current_names: Vec<String> = scopes[base_index].keys().cloned().collect();
                 let mut then_scopes = scopes.clone();
                 let mut else_scopes = scopes.clone();
-                walk_stmt_locals(&Block { statements: vec![(*ifstmt.then_branch.clone())], span: ifstmt.span }, &mut then_scopes, final_params, inside_loop, global)?;
+                let then_stmt: Stmt = *ifstmt.then_branch.clone();
+                walk_stmt_locals(&Block { statements: vec![then_stmt.clone()], span: ifstmt.span }, &mut then_scopes, final_params, inside_loop, global)?;
                 if let Some(else_b) = &ifstmt.else_branch {
                     walk_stmt_locals(&Block { statements: vec![(**else_b).clone()], span: ifstmt.span }, &mut else_scopes, final_params, inside_loop, global)?;
                 }
-                let then_top = then_scopes.last().unwrap();
-                let else_top = else_scopes.last().unwrap();
-                let cur_top = scopes.last_mut().unwrap();
-                for name in current_names {
-                    let t = then_top.get(&name).copied().unwrap_or(false);
-                    let e = if ifstmt.else_branch.is_some() { else_top.get(&name).copied().unwrap_or(false) } else { false };
-                    if t && e { cur_top.insert(name, true); }
+                // Determine which branches can reach the join point
+                // A branch that guarantees return/throw is considered not reaching
+                let then_reaches = !stmt_guarantees_return(&then_stmt) && !stmt_cannot_complete_normally(&then_stmt);
+                let else_reaches = if let Some(else_b) = &ifstmt.else_branch { !stmt_guarantees_return(else_b) && !stmt_cannot_complete_normally(else_b) } else { true };
+                let base_index = scopes.len() - 1;
+                let then_top = &then_scopes[base_index];
+                let else_top = &else_scopes[base_index];
+                // Expand name set with keys appearing in either branch maps at the same depth
+                let mut names_union: std::collections::HashSet<String> = current_names.iter().cloned().collect();
+                for k in then_top.keys() { names_union.insert(k.clone()); }
+                for k in else_top.keys() { names_union.insert(k.clone()); }
+                let current_names: Vec<String> = names_union.into_iter().collect();
+                if let Some(cur_top) = scopes.get_mut(base_index) {
+                    // If else branch is an `if` chain and current merge yielded e=false while the chain
+                    // contains a non-reaching alternative (e.g., else throws), but the reaching branch assigns,
+                    // treat it as assigned (vacuous truth on non-reaching side).
+                    let else_chain = if let Some(eb) = &ifstmt.else_branch { Some(&**eb) } else { None };
+                    for name in current_names {
+                        let t = then_top.get(&name).copied().unwrap_or(false);
+                        let mut e = else_top.get(&name).copied().unwrap_or(false);
+                        // If neither branch marked assigned but both branches contain a simple assignment to the name,
+                        // align with javac: an assignment statement in each reachable branch suffices.
+                        if !t && !e {
+                            let then_assigns = stmt_contains_simple_assignment_to(&then_stmt, &name);
+                            let else_assigns = if let Some(eb) = &ifstmt.else_branch { stmt_contains_simple_assignment_to(eb, &name) } else { false };
+                            if (then_reaches && then_assigns) && (else_reaches && else_assigns) {
+                                e = true; // treat as assigned in else and keep t=false; the AND below will require both
+                            }
+                        }
+                        if !e {
+                            // Support else-if written as either direct If or Block{If}
+                            let nested_if_opt: Option<&IfStmt> = match else_chain {
+                                Some(Stmt::If(nested)) => Some(nested),
+                                Some(Stmt::Block(b)) if b.statements.len() == 1 => {
+                                    if let Stmt::If(inner) = &b.statements[0] { Some(inner) } else { None }
+                                }
+                                _ => None,
+                            };
+                            if let Some(nested) = nested_if_opt {
+                                // Evaluate nested then/else reachability to detect else-if + else throw
+                                let nested_then_reaches = !stmt_guarantees_return(&nested.then_branch) && !stmt_cannot_complete_normally(&nested.then_branch);
+                                let nested_else_reaches = if let Some(nb) = &nested.else_branch { !stmt_guarantees_return(nb) && !stmt_cannot_complete_normally(nb) } else { true };
+                                if nested_then_reaches && !nested_else_reaches {
+                                    // If nested then assigns `name`, accept as assigned for the else branch as a whole
+                                // Avoid borrowing conflict: use a fresh scope seeded with the queried name
+                                let mut seed: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+                                seed.insert(name.clone(), false);
+                                let mut probe_scopes: Vec<HashMap<String, bool>> = vec![seed];
+                                let _ = walk_stmt_locals(&Block { statements: vec![(*nested.then_branch.clone())], span: nested.span }, &mut probe_scopes, final_params, inside_loop, global);
+                                let probe_top = &probe_scopes[0];
+                                    if probe_top.get(&name).copied().unwrap_or(false) {
+                                        e = true;
+                                    }
+                                }
+                            }
+                        }
+                        // Only consider paths that reach the join; non-reaching branch does not contribute.
+                        let assigned_then = if then_reaches { t } else { true };
+                        let assigned_else = if else_reaches { e } else { true };
+                        let assigned = assigned_then && assigned_else;
+                        if name == "classDesc" || name == "target" || name == "res" || name == "child" {
+                            super::debug_log(format!("[da/if-trace] name={} then_reaches={} else_reaches={} t={} e={} assigned_then={} assigned_else={} assigned={} span={:?}", name, then_reaches, else_reaches, t, e, assigned_then, assigned_else, assigned, ifstmt.span));
+                        }
+                        if assigned {
+                            cur_top.insert(name.clone(), true);
+                            super::debug_log(format!("[da/if] name={} then_reaches={} else_reaches={} then={} else={} span={:?}", name, then_reaches, else_reaches, t, e, ifstmt.span));
+                        }
+                    }
                 }
             }
             Stmt::While(w) => {
+                // Evaluate condition for DA side-effects
+                check_expr_definite_assignment(&w.condition, scopes, final_params)?;
                 if expr_is_boolean_true(&w.condition) {
                     // Only propagate assignments that occur unconditionally before a top-level break.
                     if let Some(names) = collect_unconditional_assigns_until_break(&w.body) {
                         for name in names {
                             if let Some(scope) = scopes.iter_mut().rev().find(|s| s.contains_key(&name)) {
                                 scope.insert(name, true);
+                            }
+                        }
+                    }
+                    // Additionally, if the loop body assigns some locals at top level and there is no
+                    // top-level break, then after one iteration they are definitely assigned (do-while style).
+                    if !has_top_level_break(&w.body) {
+                        if let Stmt::Block(b) = &*w.body {
+                            for s in &b.statements {
+                                if let Stmt::Expression(es) = s {
+                                    if let Expr::Assignment(a) = &es.expr {
+                                        if let Expr::Identifier(id) = &*a.target {
+                                            if let Some(scope) = scopes.iter_mut().rev().find(|sc| sc.contains_key(&id.name)) {
+                                                scope.insert(id.name.clone(), true);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1327,6 +1512,16 @@ fn walk_stmt_locals(
                 }
             }
             Stmt::For(f) => {
+                // Account for for-header initializers: expression assignments should update DA before the loop
+                for init in &f.init {
+                    if let Stmt::Expression(es) = init {
+                        // This will mark locals as definitely assigned when seeing assignments like `x = 0`
+                        check_expr_definite_assignment(&es.expr, scopes, final_params)?;
+                    }
+                    // Note: we intentionally skip `Declaration` here to avoid leaking for-scope locals
+                }
+                // Evaluate condition for DA side-effects
+                if let Some(cond) = &f.condition { check_expr_definite_assignment(cond, scopes, final_params)?; }
                 if f.condition.is_none() {
                     // Infinite for(;;): only propagate assignments unconditionally before a top-level break
                     if let Some(names) = collect_unconditional_assigns_until_break(&f.body) {
@@ -1349,22 +1544,39 @@ fn walk_stmt_locals(
             Stmt::Try(t) => {
                 // Compute DA across try/catch/finally per JLS-like rules
                 let names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
-                // Evaluate try block
+                // Evaluate try block (suppress unreachable from sub-block)
                 let mut try_scopes = scopes.clone();
-                walk_stmt_locals(&Block { statements: t.try_block.statements.clone(), span: t.try_block.span }, &mut try_scopes, final_params, inside_loop, global)?;
-                let try_top = try_scopes.last().unwrap();
+                // Debug: show DA before entering try for known problematic locals
+                let dbg_base_index = scopes.len() - 1;
+                for key in ["classDesc", "target", "res", "child"].iter() {
+                    if let Some(v) = scopes[dbg_base_index].get(*key) {
+                        super::debug_log(format!("[da/try-entry] name={} assigned={}", key, v));
+                    }
+                }
+                match walk_stmt_locals(&Block { statements: t.try_block.statements.clone(), span: t.try_block.span }, &mut try_scopes, final_params, inside_loop, global) {
+                    Err(ReviewError::UnreachableStatement) => {/* ignore unreachable inside try */}
+                    Err(e) => return Err(e),
+                    Ok(()) => {}
+                }
+                let base_index = scopes.len() - 1;
+                let try_top = &try_scopes[base_index];
                 // Evaluate each catch block
                 let mut catches_tops: Vec<std::collections::HashMap<String, bool>> = Vec::new();
                 for cc in &t.catch_clauses {
                     let mut c_scopes = scopes.clone();
-                    walk_stmt_locals(&Block { statements: cc.block.statements.clone(), span: cc.block.span }, &mut c_scopes, final_params, inside_loop, global)?;
-                    catches_tops.push(c_scopes.last().unwrap().clone());
+                    match walk_stmt_locals(&Block { statements: cc.block.statements.clone(), span: cc.block.span }, &mut c_scopes, final_params, inside_loop, global) {
+                        Err(ReviewError::UnreachableStatement) => {/* ignore unreachable inside catch */}
+                        Err(e) => return Err(e),
+                        Ok(()) => {}
+                    }
+                    catches_tops.push(c_scopes[base_index].clone());
                 }
                 if let Some(fin) = &t.finally_block {
                     // Build DA at entry to finally: in_finally[name] = cur[name] || try_top[name] || (all catches[name])
-                    let base_top = scopes.last().unwrap().clone();
+                    let base_top = scopes[base_index].clone();
                     let mut f_scopes = scopes.clone();
-                    if let Some(f_top) = f_scopes.last_mut() {
+                    {
+                        let f_top = &mut f_scopes[base_index];
                         for n in &names {
                             let base = base_top.get(n).copied().unwrap_or(false);
                             let da_try = try_top.get(n).copied().unwrap_or(false);
@@ -1372,27 +1584,30 @@ fn walk_stmt_locals(
                             f_top.insert(n.clone(), base || da_try || da_all_catches);
                         }
                     }
-                    // Walk finally with seeded DA state
-                    walk_stmt_locals(&Block { statements: fin.statements.clone(), span: fin.span }, &mut f_scopes, final_params, inside_loop, global)?;
-                    // DA after try statement equals DA after finally
-                    if let Some(out_top) = f_scopes.last() {
-                        if let Some(cur_top) = scopes.last_mut() {
-                            for (k, v) in out_top.iter() { cur_top.insert(k.clone(), *v); }
-                        }
+                    // Walk finally with seeded DA state (suppress unreachable)
+                    match walk_stmt_locals(&Block { statements: fin.statements.clone(), span: fin.span }, &mut f_scopes, final_params, inside_loop, global) {
+                        Err(ReviewError::UnreachableStatement) => {/* ignore unreachable inside finally */}
+                        Err(e) => return Err(e),
+                        Ok(()) => {}
                     }
+                    // DA after try statement equals DA after finally
+                    let out_top = &f_scopes[base_index];
+                    let cur_top = &mut scopes[base_index];
+                    for (k, v) in out_top.iter() { cur_top.insert(k.clone(), *v); }
                 } else {
-                    // No finally: DA_out[name] = da_try || (all catches)
-                    if let Some(cur_top) = scopes.last_mut() {
-                        for n in &names {
-                            let da_try = try_top.get(n).copied().unwrap_or(false);
-                            let da_all_catches = if catches_tops.is_empty() { false } else { catches_tops.iter().all(|m| m.get(n).copied().unwrap_or(false)) };
-                            cur_top.insert(n.clone(), da_try || da_all_catches);
-                        }
+                    // No finally: per JLS-style rule, after try-catch the variable must be definitely assigned
+                    // regardless of whether the try completed normally or a catch handled an exception. That requires
+                    // it to be DA after the try block and after each catch block that can complete normally.
+                    let cur_top = &mut scopes[base_index];
+                    for n in &names {
+                        let da_try = try_top.get(n).copied().unwrap_or(false);
+                        let da_all_catches = if catches_tops.is_empty() { true } else { catches_tops.iter().all(|m| m.get(n).copied().unwrap_or(false)) };
+                        cur_top.insert(n.clone(), da_try && da_all_catches);
                     }
                 }
             }
-            Stmt::Break(b) => { if inside_loop || b.label.is_some() { terminated = true; } }
-            Stmt::Continue(b) => { if inside_loop || b.label.is_some() { terminated = true; } }
+            Stmt::Break(_b) => { /* not a hard terminator for unreachable diagnostic */ }
+            Stmt::Continue(_b) => { /* not a hard terminator for unreachable diagnostic */ }
             Stmt::Switch(sw) => {
                 // Improved merge: model fall-through by concatenating statements from each starting case to the end
                 let names: Vec<String> = scopes.last().unwrap().keys().cloned().collect();
@@ -1424,32 +1639,62 @@ fn walk_stmt_locals(
                         }
                     }
                     if let Some(start) = match_index.or(default_index) {
+                        // Gather fall-through statements starting at `start`, but stop at the first top-level break
                         let mut stmts: Vec<Stmt> = Vec::new();
-                        for c in &sw.cases[start..] { stmts.extend(c.statements.clone()); }
-                        let block = Block { statements: stmts, span: sw.span };
-                        let mut c_scopes = scopes.clone();
-                        walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global)?;
-                        exit_maps.push(c_scopes.last().unwrap().clone());
+                        'outer_const: for c in &sw.cases[start..] {
+                            for s in &c.statements {
+                                stmts.push(s.clone());
+                                if matches!(s, Stmt::Break(_)) { break 'outer_const; }
+                            }
+                        }
+                        // Only consider normal completion paths (those that contain a break)
+                        let has_break = stmts.iter().any(|s| matches!(s, Stmt::Break(_)));
+                        if has_break {
+                            let block = Block { statements: stmts, span: sw.span };
+                            let mut c_scopes = scopes.clone();
+                            match walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global) {
+                                Err(ReviewError::UnreachableStatement) => {/* ignore unreachable within simulated case path */}
+                                Err(e) => return Err(e),
+                                Ok(()) => {}
+                            }
+                            let base_index = scopes.len() - 1;
+                            exit_maps.push(c_scopes[base_index].clone());
+                        }
                     } else {
                         // constant but no matching label and no default: no statements execute
                         exit_maps.push(scopes.last().unwrap().clone());
                     }
                 } else {
-                    // Non-constant: consider all possible case entry points with fallthrough
+                    // Non-constant: consider all possible case entry points with fallthrough, but cut at first break
                     for start in 0..sw.cases.len() {
                         let mut stmts: Vec<Stmt> = Vec::new();
-                        for c in &sw.cases[start..] { stmts.extend(c.statements.clone()); }
-                        let block = Block { statements: stmts, span: sw.span };
-                        let mut c_scopes = scopes.clone();
-                        walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global)?;
-                        exit_maps.push(c_scopes.last().unwrap().clone());
+                        'outer: for c in &sw.cases[start..] {
+                            for s in &c.statements {
+                                stmts.push(s.clone());
+                                if matches!(s, Stmt::Break(_)) { break 'outer; }
+                            }
+                        }
+                        // Only include paths that complete normally via break
+                        let has_break = stmts.iter().any(|s| matches!(s, Stmt::Break(_)));
+                        if has_break {
+                            let block = Block { statements: stmts, span: sw.span };
+                            let mut c_scopes = scopes.clone();
+                            match walk_stmt_locals(&block, &mut c_scopes, final_params, inside_loop, global) {
+                                Err(ReviewError::UnreachableStatement) => {/* ignore unreachable within simulated case path */}
+                                Err(e) => return Err(e),
+                                Ok(()) => {}
+                            }
+                            let base_index = scopes.len() - 1;
+                            exit_maps.push(c_scopes[base_index].clone());
+                        }
                     }
-                    // If no default, include the path that executes no case at all (falls through to after switch)
+                    // If no default and no case matches, include the path that executes no case at all (normal completion)
                     if !has_default { exit_maps.push(scopes.last().unwrap().clone()); }
                 }
                 let cur_top = scopes.last_mut().unwrap();
                 for n in names {
-                    if exit_maps.iter().all(|m| m.get(&n).copied().unwrap_or(false)) {
+                    // join: DA only if all normal-completion paths establish it
+                    if !exit_maps.is_empty() && exit_maps.iter().all(|m| m.get(&n).copied().unwrap_or(false)) {
                         cur_top.insert(n, true);
                     }
                 }
@@ -1467,9 +1712,26 @@ fn walk_stmt_locals(
                     if nested_same_depth.get(&n).copied().unwrap_or(false) { cur_top.insert(n, true); }
                 }
             }
-            Stmt::Expression(es) => check_expr_definite_assignment(&es.expr, scopes, final_params)?,
-            Stmt::Return(ret) => { if let Some(e) = &ret.value { check_expr_definite_assignment(e, scopes, final_params)?; } terminated = true; },
+            Stmt::Expression(es) => {
+                // First, validate uses in the expression
+                check_expr_definite_assignment(&es.expr, scopes, final_params)?;
+                // Then, if this is a simple local assignment (x = ...), mark x as definitely assigned
+                if let Expr::Assignment(a) = &es.expr {
+                    if let Expr::Identifier(id) = &*a.target {
+                        if let Some(scope) = scopes.iter_mut().rev().find(|s| s.contains_key(&id.name)) {
+                            super::debug_log(format!("[da/assign] name={} span={:?}", id.name, id.span));
+                            scope.insert(id.name.clone(), true);
+                        }
+                    }
+                }
+            },
+            Stmt::Return(ret) => { if let Some(e) = &ret.value { check_expr_definite_assignment(e, scopes, final_params)?; } last_terminator = Some("return"); },
+            Stmt::Throw(ts) => { check_expr_definite_assignment(&ts.expr, scopes, final_params)?; last_terminator = Some("throw"); },
             _ => {}
+        }
+        match s {
+            Stmt::Return(_) | Stmt::Throw(_) => {}
+            _ => { last_terminator = None; }
         }
     }
     scopes.pop();
@@ -1609,7 +1871,11 @@ pub(crate) fn is_reference_assignable(global: &crate::review::types::GlobalMembe
     // Walk up from src following super_name; also consider interfaces
     let mut cur_name = src.to_string();
     let mut seen = std::collections::HashSet::new();
+    // Safety cap to prevent pathological cycles or excessively deep chains
+    let mut steps: usize = 0;
     loop {
+        if steps > crate::consts::REVIEW_MAX_HIERARCHY_STEPS { return false; }
+        steps += 1;
         if let Some(mt) = resolve_type_in_index(global, &cur_name) {
             // check interfaces implemented by current type at each step
             for itf in &mt.interfaces {
@@ -1652,7 +1918,7 @@ fn check_expr_definite_assignment(expr: &Expr, scopes: &mut Vec<HashMap<String, 
         Expr::Identifier(id) => {
             match lookup_assigned(scopes, &id.name) {
                 Some(true) => Ok(()),
-                Some(false) => Err(ReviewError::UseBeforeInit(id.name.clone())),
+                Some(false) => { super::debug_log(format!("[da/use-before-init] name={} span={:?}", id.name, id.span)); Err(ReviewError::UseBeforeInit(id.name.clone())) },
                 None => Ok(()),
             }
         }
@@ -1678,7 +1944,13 @@ fn check_expr_definite_assignment(expr: &Expr, scopes: &mut Vec<HashMap<String, 
         Expr::FieldAccess(fa) => { if let Some(t) = &fa.target { check_expr_definite_assignment(t, scopes, final_params)?; } Ok(()) }
         Expr::Cast(c) => check_expr_definite_assignment(&c.expr, scopes, final_params),
         Expr::Conditional(c) => { check_expr_definite_assignment(&c.condition, scopes, final_params)?; check_expr_definite_assignment(&c.then_expr, scopes, final_params)?; check_expr_definite_assignment(&c.else_expr, scopes, final_params) }
-        Expr::New(n) => { for a in &n.arguments { check_expr_definite_assignment(a, scopes, final_params)?; } Ok(()) }
+        Expr::New(n) => {
+            // Evaluate constructor arguments for DA side-effects
+            for a in &n.arguments { check_expr_definite_assignment(a, scopes, final_params)?; }
+            // If we are in an assignment context like `T x = new T(...);`, the caller will mark `x`.
+            // For standalone `new T(...);` (unused), DA does not change.
+            Ok(())
+        }
         Expr::Parenthesized(p) => check_expr_definite_assignment(p, scopes, final_params),
         _ => Ok(()),
     }
@@ -1695,54 +1967,68 @@ fn walk_stmt(
     ctor_varargs_min: &HashMap<String, usize>,
     global: Option<&crate::review::types::GlobalMemberIndex>,
     local_methods_static: Option<&HashMap<String, bool>>,
+    local_types: &mut Vec<HashMap<String, String>>,
     errors_as_name: bool,
 ) -> ReviewResult<()> {
     match stmt {
         Stmt::Declaration(vd) => {
-            for var in &vd.variables {
-                if let Some(init) = &var.initializer {
-                    walk_expr(current_class_name, init, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
-                }
+            // record declared variable types in current scope
+            if let Some(scope) = local_types.last_mut() {
+                for var in &vd.variables { scope.insert(var.name.clone(), vd.type_ref.name.clone()); }
             }
+            for var in &vd.variables { if let Some(init) = &var.initializer { walk_expr(current_class_name, init, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; } }
             Ok(())
         }
-        Stmt::Expression(es) => walk_expr(current_class_name, &es.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name),
+        Stmt::Expression(es) => walk_expr(current_class_name, &es.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name),
         Stmt::Return(ret) => {
-            if let Some(e) = &ret.value { walk_expr(current_class_name, e, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+            if let Some(e) = &ret.value { walk_expr(current_class_name, e, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
             Ok(())
         }
         Stmt::If(ifstmt) => {
-            walk_expr(current_class_name, &ifstmt.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
-            walk_stmt(current_class_name, &ifstmt.then_branch, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
-            if let Some(else_b) = &ifstmt.else_branch { walk_stmt(current_class_name, else_b, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+            walk_expr(current_class_name, &ifstmt.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
+            // then branch scope
+            local_types.push(HashMap::new());
+            walk_stmt(current_class_name, &ifstmt.then_branch, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
+            local_types.pop();
+            if let Some(else_b) = &ifstmt.else_branch {
+                local_types.push(HashMap::new());
+                walk_stmt(current_class_name, else_b, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
+                local_types.pop();
+            }
             Ok(())
         }
         Stmt::While(w) => {
-            walk_expr(current_class_name, &w.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
-            walk_stmt(current_class_name, &w.body, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)
+            walk_expr(current_class_name, &w.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
+            walk_stmt(current_class_name, &w.body, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)
         }
         Stmt::For(f) => {
-            for init in &f.init { walk_stmt(current_class_name, init, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
-            if let Some(cond) = &f.condition { walk_expr(current_class_name, cond, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
-            for upd in &f.update { walk_expr(current_class_name, &upd.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
-            walk_stmt(current_class_name, &f.body, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)
+            for init in &f.init { walk_stmt(current_class_name, init, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
+            if let Some(cond) = &f.condition { walk_expr(current_class_name, cond, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
+            for upd in &f.update { walk_expr(current_class_name, &upd.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
+            walk_stmt(current_class_name, &f.body, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)
         }
         Stmt::Block(b) => {
-            for s in &b.statements { walk_stmt(current_class_name, s, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+            local_types.push(HashMap::new());
+            for s in &b.statements { walk_stmt(current_class_name, s, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
+            local_types.pop();
             Ok(())
         }
         Stmt::Switch(sw) => {
-            walk_expr(current_class_name, &sw.expression, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
+            walk_expr(current_class_name, &sw.expression, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
             for c in &sw.cases {
-                for s in &c.statements { walk_stmt(current_class_name, s, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+                local_types.push(HashMap::new());
+                for s in &c.statements { walk_stmt(current_class_name, s, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
+                local_types.pop();
             }
             Ok(())
         }
         Stmt::Try(t) => {
-            for r in &t.resources { match r { TryResource::Var { initializer, .. } => walk_expr(current_class_name, initializer, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?, TryResource::Expr { expr, .. } => walk_expr(current_class_name, expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?, } }
-            walk_stmt(current_class_name, &Stmt::Block(t.try_block.clone()), arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
-            for cc in &t.catch_clauses { walk_stmt(current_class_name, &Stmt::Block(cc.block.clone()), arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
-            if let Some(fin) = &t.finally_block { walk_stmt(current_class_name, &Stmt::Block(fin.clone()), arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+            for r in &t.resources { match r { TryResource::Var { initializer, .. } => walk_expr(current_class_name, initializer, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?, TryResource::Expr { expr, .. } => walk_expr(current_class_name, expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?, } }
+            local_types.push(HashMap::new());
+            walk_stmt(current_class_name, &Stmt::Block(t.try_block.clone()), arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
+            local_types.pop();
+            for cc in &t.catch_clauses { local_types.push(HashMap::new()); walk_stmt(current_class_name, &Stmt::Block(cc.block.clone()), arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; local_types.pop(); }
+            if let Some(fin) = &t.finally_block { local_types.push(HashMap::new()); walk_stmt(current_class_name, &Stmt::Block(fin.clone()), arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; local_types.pop(); }
             Ok(())
         }
         _ => Ok(()),
@@ -1760,6 +2046,7 @@ fn walk_expr(
     ctor_varargs_min: &HashMap<String, usize>,
     global: Option<&crate::review::types::GlobalMemberIndex>,
     local_methods_static: Option<&HashMap<String, bool>>,
+    local_types: &mut Vec<HashMap<String, String>>,
     errors_as_name: bool,
 ) -> ReviewResult<()> {
     match expr {
@@ -1848,15 +2135,10 @@ fn walk_expr(
                     let matches_fixed = expected_list_acc.iter().any(|a| *a == found_arity);
                     let matches_varargs = varargs_min_here.map(|min| found_arity >= min).unwrap_or(false);
                     if !matches_fixed && !matches_varargs {
-                        // Special-case well-known IO patterns: read/write 3-arg overloads are ubiquitous
-                        if (mc.name == "read" || mc.name == "write") && found_arity == 3 {
-                            // accept
-                        } else {
                         let mut expected = expected_list_acc.iter().map(|a| a.to_string()).collect::<Vec<_>>();
                         if let Some(min) = varargs_min_here { expected.push(format!("{}+", min)); }
                         let expected = expected.join(", ");
                         return Err(ReviewError::MethodCallArityMismatch { name: mc.name.clone(), expected, found: found_arity });
-                        }
                     }
                     if !cands_acc.is_empty() {
                         // Deduplicate signatures
@@ -1869,7 +2151,7 @@ fn walk_expr(
                             let found_list: Vec<&str> = found_types.iter().map(|o| o.unwrap()).collect();
                             let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
                             for sig in &cands_unique {
-                                if let Some((cost, convs)) = calc_cost_with_varargs(sig, &found_list, varargs_min_here) { applicable.push((sig, cost, convs)); }
+                                if let Some((cost, convs)) = calc_cost_with_varargs(sig, &found_list, varargs_min_here, global) { applicable.push((sig, cost, convs)); }
                             }
                             if applicable.is_empty() {
                                 let expected = cands_unique.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
@@ -2057,14 +2339,14 @@ fn walk_expr(
                 }
             }
             // walk target and args
-            if let Some(t) = &mc.target { walk_expr(current_class_name, t, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
-            for a in &mc.arguments { walk_expr(current_class_name, a, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+            if let Some(t) = &mc.target { walk_expr(current_class_name, t, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
+            for a in &mc.arguments { walk_expr(current_class_name, a, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
             Ok(())
         }
-        Expr::Binary(b) => { walk_expr(current_class_name, &b.left, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &b.right, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name) }
-        Expr::Unary(u) => walk_expr(current_class_name, &u.operand, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name),
-        Expr::Assignment(a) => { walk_expr(current_class_name, &a.target, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &a.value, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name) }
-            Expr::Cast(c) => {
+        Expr::Binary(b) => { walk_expr(current_class_name, &b.left, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; walk_expr(current_class_name, &b.right, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name) }
+        Expr::Unary(u) => walk_expr(current_class_name, &u.operand, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name),
+        Expr::Assignment(a) => { walk_expr(current_class_name, &a.target, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; walk_expr(current_class_name, &a.value, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name) }
+        Expr::Cast(c) => {
             // Generic arity check on cast target type
             if let Some(g) = global {
                 if let Some(mt) = resolve_type_in_index(g, &c.target_type.name) {
@@ -2099,9 +2381,9 @@ fn walk_expr(
                     }
                 }
             }
-            walk_expr(current_class_name, &c.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)
+            walk_expr(current_class_name, &c.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)
         },
-            Expr::InstanceOf(io) => {
+        Expr::InstanceOf(io) => {
             if let Some(g) = global {
                 if let Some(mt) = resolve_type_in_index(g, &io.target_type.name) {
                     if io.target_type.type_args.len() != mt.type_param_count {
@@ -2135,10 +2417,10 @@ fn walk_expr(
                     }
                 }
             }
-            walk_expr(current_class_name, &io.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)
-        }
-        Expr::Conditional(c) => { walk_expr(current_class_name, &c.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &c.then_expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &c.else_expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name) }
-        Expr::ArrayAccess(acc) => { walk_expr(current_class_name, &acc.array, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; walk_expr(current_class_name, &acc.index, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name) }
+            walk_expr(current_class_name, &io.expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)
+        },
+        Expr::Conditional(c) => { walk_expr(current_class_name, &c.condition, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; walk_expr(current_class_name, &c.then_expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; walk_expr(current_class_name, &c.else_expr, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name) },
+        Expr::ArrayAccess(acc) => { walk_expr(current_class_name, &acc.array, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; walk_expr(current_class_name, &acc.index, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name) },
         Expr::FieldAccess(fa) => {
             // Qualified field access: check static legality and accessibility
             if let Some(t) = &fa.target {
@@ -2174,14 +2456,23 @@ fn walk_expr(
                         }
                     }
                 }
-                walk_expr(current_class_name, t, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?;
+                walk_expr(current_class_name, t, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
             }
             Ok(())
-        }
-            Expr::New(n) => {
+        },
+        Expr::New(n) => {
+            // If this is an array creation (new T[...]), don't treat as a constructor
+            if n.target_type.array_dims > 0 {
+                for a in &n.arguments {
+                    walk_expr(current_class_name, a, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?;
+                }
+                return Ok(());
+            }
             // validate constructor call only for current class
             if n.target_type.name == current_class_name {
                 let found_arity = n.arguments.len();
+                let kinds: Vec<&'static str> = n.arguments.iter().map(|e| expr_kind(e)).collect();
+                super::debug_log(format!("[new/current] target={} found_arity={} kinds={:?} span={:?}", current_class_name, found_arity, kinds, n.span));
                 if let Some(expected_list) = ctor_arities.get(current_class_name) {
                     let matches_fixed = expected_list.iter().any(|a| *a == found_arity);
                     let matches_varargs = ctor_varargs_min.get(current_class_name).map(|min| found_arity >= *min).unwrap_or(false);
@@ -2192,22 +2483,20 @@ fn walk_expr(
                         return Err(ReviewError::MethodCallArityMismatch { name: format!("<init> {}", current_class_name), expected, found: found_arity });
                     }
                     if let Some(cands) = ctor_signatures.get(current_class_name) {
-                        let found_types: Vec<Option<&'static str>> = n.arguments.iter().map(|a| infer_expr_primitive_or_string(a)).collect();
-                        if found_types.iter().all(|o| o.is_some()) {
-                            let found_list: Vec<&str> = found_types.iter().map(|o| o.unwrap()).collect();
+                        // prefer primitive inference; fallback to local-type names
+                        let mut found: Vec<String> = Vec::with_capacity(n.arguments.len());
+                        let mut all_known = true;
+                        for a in &n.arguments {
+                            if let Some(p) = infer_expr_primitive_or_string(a) { found.push(p.to_string()); }
+                            else if let Some(tn) = infer_expr_with_locals(a, local_types, current_class_name) { found.push(tn); }
+                            else { all_known = false; break; }
+                        }
+                        if all_known {
+                            let found_list: Vec<&str> = found.iter().map(|s| s.as_str()).collect();
+                            super::debug_log(format!("[new/current] arg_types={:?}", found_list));
                             let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
                             for sig in cands {
-                                if sig.len() == found_list.len() {
-                                    let mut ok = true;
-                                    let mut cost: u32 = 0;
-                                    let mut convs: u32 = 0;
-                                    for (exp, f) in sig.iter().zip(found_list.iter()) {
-                                        if !is_assignable_primitive_or_string(exp.as_str(), f) { ok = false; break; }
-                                        if exp.as_str() != *f { convs += 1; }
-                                        cost += widening_cost(exp.as_str(), f);
-                                    }
-                                    if ok { applicable.push((sig, cost, convs)); }
-                                }
+                                if let Some((cost, convs)) = calc_cost_with_varargs(sig, &found_list, ctor_varargs_min.get(current_class_name).copied(), global) { applicable.push((sig, cost, convs)); }
                             }
                             if applicable.is_empty() && !cands.is_empty() {
                                 let expected = cands.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
@@ -2218,11 +2507,7 @@ fn walk_expr(
                                 applicable.retain(|(_, _, k)| *k == min_convs);
                                 let min_cost = applicable.iter().map(|(_, c, _)| *c).min().unwrap();
                                 let tied: Vec<&Vec<String>> = applicable.iter().filter(|(_, c, _)| *c == min_cost).map(|(s, _, _)| *s).collect();
-                                if tied.len() > 1 {
-                                    let candidates = tied.iter().map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
-                                    let found = found_list.join(",");
-                                    return Err(ReviewError::AmbiguousMethod { name: format!("<init> {}", current_class_name), candidates, found });
-                                }
+                                if tied.len() > 1 { if break_specificity_tie(&tied, global) { /* kept one */ } else { let candidates = tied.iter().map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", "); let found = found_list.join(","); return Err(ReviewError::AmbiguousMethod { name: format!("<init> {}", current_class_name), candidates, found }); } }
                             }
                         }
                     }
@@ -2231,6 +2516,8 @@ fn walk_expr(
                 if let Some(mt) = resolve_type_in_index(g, &n.target_type.name) {
                     // Simple generic arity check: number of <T> in type use must match declaration
                     let found_args = n.target_type.type_args.len();
+                    let kinds: Vec<&'static str> = n.arguments.iter().map(|e| expr_kind(e)).collect();
+                    super::debug_log(format!("[new/external] target={} found_arity={} kinds={:?} span={:?}", n.target_type.name, n.arguments.len(), kinds, n.span));
                     if found_args != mt.type_param_count {
                         // Only tolerate raw usage (zero args) in compatibility mode; otherwise error
                         if found_args == 0 && crate::review::compat_mode() {
@@ -2265,8 +2552,33 @@ fn walk_expr(
                             }
                         }
                     }
+                    // Prefer signature-based applicability like javac; fall back to arity check
+                    if let Some(cands) = mt.ctors_signatures.get(&n.target_type.name) {
+                        // Attempt to infer argument types using primitive inference; fallback to local variable type names
+                        let mut tmp: Vec<String> = Vec::with_capacity(n.arguments.len());
+                        let mut all_known = true;
+                        for a in &n.arguments {
+                            if let Some(p) = infer_expr_primitive_or_string(a) { tmp.push(p.to_string()); }
+                            else if let Some(tn) = infer_expr_with_locals(a, local_types, current_class_name) { tmp.push(tn); }
+                            else { all_known = false; break; }
+                        }
+                            if all_known {
+                                let found_list: Vec<&str> = tmp.iter().map(|s| s.as_str()).collect();
+                                super::debug_log(format!("[new/external] arg_types={:?} span={:?}", found_list, n.span));
+                            let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
+                            for sig in cands {
+                                if let Some((cost, convs)) = calc_cost_with_varargs(sig, &found_list, mt.ctors_varargs_min.get(&n.target_type.name).copied(), global) {
+                                    applicable.push((sig, cost, convs));
+                                }
+                            }
+                            if applicable.is_empty() && !cands.is_empty() {
+                                let expected = cands.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
+                                let found = found_list.join(",");
+                                return Err(ReviewError::InapplicableMethod { name: format!("<init> {}", n.target_type.name), expected, found });
+                            }
+                        }
+                    }
                     let found_arity = n.arguments.len();
-                    // Optional: ensure generic arity usage matches declaration (simple count check)
                     if let Some(expected_list) = mt.ctors_arities.get(&n.target_type.name) {
                         let matches_fixed = expected_list.iter().any(|a| *a == found_arity);
                         let matches_varargs = mt.ctors_varargs_min.get(&n.target_type.name).map(|min| found_arity >= *min).unwrap_or(false);
@@ -2275,41 +2587,6 @@ fn walk_expr(
                             if let Some(min) = mt.ctors_varargs_min.get(&n.target_type.name) { expected.push(format!("{}+", min)); }
                             let expected = expected.join(", ");
                             return Err(ReviewError::MethodCallArityMismatch { name: format!("<init> {}", n.target_type.name), expected, found: found_arity });
-                        }
-                        if let Some(cands) = mt.ctors_signatures.get(&n.target_type.name) {
-                            let found_types: Vec<Option<&'static str>> = n.arguments.iter().map(|a| infer_expr_primitive_or_string(a)).collect();
-                            if found_types.iter().all(|o| o.is_some()) {
-                                let found_list: Vec<&str> = found_types.iter().map(|o| o.unwrap()).collect();
-                                let mut applicable: Vec<(&Vec<String>, u32, u32)> = Vec::new();
-                                for sig in cands {
-                                    if sig.len() == found_list.len() {
-                                        let mut ok = true;
-                                        let mut cost: u32 = 0;
-                                        let mut convs: u32 = 0;
-                                        for (exp, f) in sig.iter().zip(found_list.iter()) {
-                                            if !is_assignable_primitive_or_string(exp.as_str(), f) { ok = false; break; }
-                                            if exp.as_str() != *f { convs += 1; }
-                                            cost += widening_cost(exp.as_str(), f);
-                                        }
-                                        if ok { applicable.push((sig, cost, convs)); }
-                                    }
-                                }
-                                if applicable.is_empty() && !cands.is_empty() {
-                                    let expected = cands.iter().filter(|s| s.len()==found_list.len()).map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
-                                    let found = found_list.join(",");
-                                    return Err(ReviewError::InapplicableMethod { name: format!("<init> {}", n.target_type.name), expected, found });
-                                } else if applicable.len() > 1 {
-                                    let min_convs = applicable.iter().map(|(_, _, k)| *k).min().unwrap();
-                                    applicable.retain(|(_, _, k)| *k == min_convs);
-                                    let min_cost = applicable.iter().map(|(_, c, _)| *c).min().unwrap();
-                                    let tied: Vec<&Vec<String>> = applicable.iter().filter(|(_, c, _)| *c == min_cost).map(|(s, _, _)| *s).collect();
-                                    if tied.len() > 1 {
-                                        let candidates = tied.iter().map(|s| format!("({})", s.join(","))).collect::<Vec<_>>().join(", ");
-                                        let found = found_list.join(",");
-                                        return Err(ReviewError::AmbiguousMethod { name: format!("<init> {}", n.target_type.name), candidates, found });
-                                    }
-                                }
-                            }
                         }
                     }
                 } else if let Some(expected_params) = lookup_type_param_count(g, &n.target_type.name) {
@@ -2332,10 +2609,10 @@ fn walk_expr(
                     }
                 }
             }
-            for a in &n.arguments { walk_expr(current_class_name, a, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name)?; }
+            for a in &n.arguments { walk_expr(current_class_name, a, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name)?; }
             Ok(())
         }
-        Expr::Parenthesized(p) => walk_expr(current_class_name, p, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, errors_as_name),
+        Expr::Parenthesized(p) => walk_expr(current_class_name, p, arities, signatures, varargs_min, ctor_arities, ctor_signatures, ctor_varargs_min, global, local_methods_static, local_types, errors_as_name),
         _ => Ok(()),
     }
 }
@@ -2349,6 +2626,25 @@ fn infer_literal_primitive_or_string(expr: &Expr) -> Option<&'static str> {
         crate::ast::Literal::Char(_) => Some("char"),
         crate::ast::Literal::Null => Some("null"),
     }} else { None }
+}
+
+fn expr_kind(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Literal(_) => "Literal",
+        Expr::Identifier(_) => "Identifier",
+        Expr::Binary(_) => "Binary",
+        Expr::Unary(_) => "Unary",
+        Expr::Assignment(_) => "Assignment",
+        Expr::MethodCall(_) => "MethodCall",
+        Expr::FieldAccess(_) => "FieldAccess",
+        Expr::ArrayAccess(_) => "ArrayAccess",
+        Expr::Cast(_) => "Cast",
+        Expr::InstanceOf(_) => "InstanceOf",
+        Expr::Conditional(_) => "Conditional",
+        Expr::New(_) => "New",
+        Expr::Parenthesized(_) => "Parenthesized",
+        Expr::ArrayInitializer(_) => "ArrayInitializer",
+    }
 }
 
 fn is_assignable_literal(expected: &str, found: &str) -> bool {
@@ -2433,8 +2729,31 @@ fn conversion_cost_with_boxing(expected: &str, found: &str) -> Option<u32> {
             if is_assignable_primitive_or_string(expected, p) { return Some(3); }
         }
     }
-    // reference equality for String covered by exact; simple fallback: allow String exact only
+    // trivial reference matches
     if expected == "String" && found == "String" { return Some(0); }
+    // approximate reference assignability for simple names: treat non-primitive/non-String as compatible with small cost
+    if !is_primitive_type(expected) && !is_primitive_type(found) {
+        // treat as assignable with modest cost to allow constructor/method selection to proceed
+        return Some(10);
+    }
+    None
+}
+
+fn conversion_cost_with_boxing_ctx(
+    expected: &str,
+    found: &str,
+    global: Option<&crate::review::types::GlobalMemberIndex>,
+) -> Option<u32> {
+    // first try primitive/boxing path
+    if let Some(c) = conversion_cost_with_boxing(expected, found) { return Some(c); }
+    // then try reference assignability when we have a global index
+    if let Some(g) = global {
+        if !is_primitive_type(expected) && !is_primitive_type(found) {
+            // Treat simple names as assignable if found is the same or a subtype of expected
+            if expected == found { return Some(0); }
+            if is_reference_assignable(g, found, expected) { return Some(4); }
+        }
+    }
     None
 }
 
@@ -2559,6 +2878,30 @@ fn infer_expr_primitive_or_string(expr: &Expr) -> Option<&'static str> {
     }
 }
 
+// Lightweight local-type-aware inference: extends primitive inference by resolving identifiers from a
+// provided local-types environment to simple reference names when available.
+fn infer_expr_with_locals(
+    expr: &Expr,
+    local_types: &Vec<std::collections::HashMap<String, String>>,
+    current_class: &str,
+) -> Option<String> {
+    // Prefer primitive/String when determinable
+    if let Some(p) = infer_expr_primitive_or_string(expr) { return Some(p.to_string()); }
+    match expr {
+        Expr::Identifier(id) => {
+            // this refers to current class instance
+            if id.name == "this" { return Some(current_class.to_string()); }
+            // search local scopes from innermost to outermost
+            for scope in local_types.iter().rev() {
+                if let Some(tname) = scope.get(&id.name) { return Some(tname.clone()); }
+            }
+            None
+        }
+        Expr::Parenthesized(p) => infer_expr_with_locals(p, local_types, current_class),
+        _ => None,
+    }
+}
+
 fn numeric_promotion(lt: Option<&'static str>, rt: Option<&'static str>) -> Option<&'static str> {
     use std::cmp::Ordering;
     fn rank(t: &str) -> Option<u8> {
@@ -2598,7 +2941,12 @@ fn widening_cost(expected: &str, found: &str) -> u32 {
     }
 }
 
-fn calc_cost_with_varargs(sig: &Vec<String>, found_list: &Vec<&str>, varargs_min: Option<usize>) -> Option<(u32, u32)> {
+fn calc_cost_with_varargs(
+    sig: &Vec<String>,
+    found_list: &Vec<&str>,
+    varargs_min: Option<usize>,
+    global: Option<&crate::review::types::GlobalMemberIndex>,
+) -> Option<(u32, u32)> {
     let fixed_len = sig.len();
     let has_varargs = varargs_min.is_some() && fixed_len > 0;
     let min_arity = if has_varargs { fixed_len - 1 } else { fixed_len };
@@ -2610,7 +2958,7 @@ fn calc_cost_with_varargs(sig: &Vec<String>, found_list: &Vec<&str>, varargs_min
     for i in 0..(fixed_len.saturating_sub(if has_varargs {1} else {0})) {
         let exp = sig.get(i).unwrap();
         let f = *found_list.get(i).unwrap_or(&"");
-        if let Some(cc) = conversion_cost_with_boxing(exp.as_str(), f) {
+        if let Some(cc) = conversion_cost_with_boxing_ctx(exp.as_str(), f, global) {
             if cc > 0 { convs += 1; }
             cost += cc;
         } else { return None; }
@@ -2619,7 +2967,7 @@ fn calc_cost_with_varargs(sig: &Vec<String>, found_list: &Vec<&str>, varargs_min
         let var_t = sig.last().unwrap();
         for j in (fixed_len - 1)..found_list.len() {
             let f = found_list[j];
-            if let Some(cc) = conversion_cost_with_boxing(var_t.as_str(), f) {
+            if let Some(cc) = conversion_cost_with_boxing_ctx(var_t.as_str(), f, global) {
                 if cc > 0 { convs += 1; }
                 cost += cc;
             } else { return None; }

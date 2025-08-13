@@ -388,6 +388,10 @@ where
             Expr::Conditional(conditional) => self.visit_conditional_expr(conditional),
             Expr::New(new) => self.visit_new_expr(new),
             Expr::Parenthesized(expr) => self.visit_expr(expr),
+            Expr::ArrayInitializer(values) => {
+                for v in values { self.visit_expr(v); }
+                T::default()
+            }
         }
     }
     

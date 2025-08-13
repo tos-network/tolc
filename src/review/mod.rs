@@ -9,6 +9,7 @@ mod enums;
 mod fields;
 mod methods;
 mod statements;
+mod consts;
 
 pub type ReviewResult<T> = Result<T, ReviewError>;
 

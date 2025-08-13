@@ -7,7 +7,11 @@ pub fn is_valid_class_signature(s: &str) -> bool {
         if !p.parse_type_parameters() { return false; }
     }
     if !p.parse_class_type_signature() { return false; }
+    // Safety cap: prevent pathological loops on malformed signatures
+    let mut steps: usize = 0;
     while p.more() {
+        if steps > crate::consts::VERIFY_MAX_SIGNATURE_ITERS { return false; }
+        steps += 1;
         // superinterfaces
         if !p.parse_class_type_signature() { return false; }
     }
@@ -77,7 +81,11 @@ impl<'a> Parser<'a> {
                 // ClassBound: FieldTypeSignature
                 if !self.parse_field_type_signature() { return false; }
             }
-            while self.consume(':') {
+        // Safety cap inside bounds loop
+        let mut bsteps: usize = 0;
+        while self.consume(':') {
+            if bsteps > crate::consts::VERIFY_MAX_SIGNATURE_ITERS { return false; }
+            bsteps += 1;
                 if !self.parse_field_type_signature() { return false; }
             }
         }

@@ -245,6 +245,63 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                 // also echo simple for completeness
                 idx.by_type.insert(c.name.clone(), mt);
             }
+            // Index nested types within this class by simple name for local resolution
+            fn index_nested_in_class(idx: &mut GlobalMemberIndex, outer_pkg: &Option<String>, c: &ClassDecl) {
+                for member in &c.body {
+                    if let ClassMember::TypeDecl(TypeDecl::Class(nc)) = member {
+                        let mut nmt = MemberTables::default();
+                        nmt.type_param_count = nc.type_params.len();
+                        nmt.package_name = outer_pkg.clone();
+                        nmt.interfaces = nc.implements.iter().map(|t| t.name.clone()).collect();
+                        // collect members
+                        for m in &nc.body {
+                            match m {
+                                ClassMember::Field(f) => {
+                                    let is_static = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                                    nmt.fields_static.entry(f.name.clone()).or_insert(is_static);
+                                    let is_final = f.modifiers.iter().any(|mm| matches!(mm, Modifier::Final));
+                                    nmt.fields_final.entry(f.name.clone()).or_insert(is_final);
+                                    nmt.fields_visibility.entry(f.name.clone()).or_insert(visibility_of(&f.modifiers));
+                                }
+                                ClassMember::Method(m2) => {
+                                    let arity = m2.parameters.len();
+                                    nmt.methods_arities.entry(m2.name.clone()).or_default().push(arity);
+                                    if m2.parameters.last().map(|p| p.varargs).unwrap_or(false) {
+                                        nmt.methods_varargs_min
+                                            .entry(m2.name.clone())
+                                            .and_modify(|min| { *min = (*min).min(arity - 1); })
+                                            .or_insert(arity - 1);
+                                    }
+                                    let sig: Vec<String> = m2.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
+                                    nmt.methods_signatures.entry(m2.name.clone()).or_default().push(sig);
+                                    let is_static = m2.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
+                                    nmt.methods_static.entry(m2.name.clone()).or_insert(is_static);
+                                }
+                                ClassMember::Constructor(cons) => {
+                                    let arity = cons.parameters.len();
+                                    nmt.ctors_arities.entry(nc.name.clone()).or_default().push(arity);
+                                    if cons.parameters.last().map(|p| p.varargs).unwrap_or(false) {
+                                        nmt.ctors_varargs_min
+                                            .entry(nc.name.clone())
+                                            .and_modify(|min| { *min = (*min).min(arity - 1); })
+                                            .or_insert(arity - 1);
+                                    }
+                                    let sig: Vec<String> = cons.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
+                                    nmt.ctors_signatures.entry(nc.name.clone()).or_default().push(sig);
+                                }
+                                _ => {}
+                            }
+                        }
+                        for v in nmt.methods_arities.values_mut() { v.sort_unstable(); v.dedup(); }
+                        for v in nmt.ctors_arities.values_mut() { v.sort_unstable(); v.dedup(); }
+                        idx.by_type.insert(nc.name.clone(), nmt.clone());
+                        // recurse
+                        index_nested_in_class(idx, outer_pkg, nc);
+                    }
+                }
+            }
+            let pkg_clone = idx.package.clone();
+            index_nested_in_class(&mut idx, &pkg_clone, c);
         } else if let TypeDecl::Interface(i) = td {
             let mut mt = MemberTables::default();
             mt.type_param_count = i.type_params.len();
@@ -570,7 +627,9 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
             if let Ok(source) = fs::read_to_string(path) {
                 // Additional size check in case metadata is unavailable
                 if source.len() as u64 > max_size { continue; }
-                if let Ok(ast) = crate::parser::parse_tol(&source) {
+                // Use lenient parse for classpath scan to avoid stalls on unsupported syntax
+                if let Ok(ast) = crate::parser::parse_tol_lenient(&source) {
+                    super::debug_log(format!("[classpath] indexed {}", path.display()));
                     index_types_from_ast_into(&mut idx, &ast);
                 }
                 processed += 1;

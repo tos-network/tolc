@@ -706,6 +706,14 @@ impl AstVisitor for AstPrinter {
                 self.visit_expr(expr);
                 self.output.push(')');
             }
+            Expr::ArrayInitializer(values) => {
+                self.output.push('{');
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 { self.output.push_str(", "); }
+                    self.visit_expr(v);
+                }
+                self.output.push('}');
+            }
         }
     }
     
@@ -828,6 +836,22 @@ impl AstVisitor for AstPrinter {
         }
         
         self.output.push(')');
+        if let Some(body) = &new.anonymous_body {
+            self.output.push_str(" {");
+            self.output.push('\n');
+            self.indent();
+            for m in &body.body {
+                match m {
+                    ClassMember::Field(f) => self.visit_field_decl(f),
+                    ClassMember::Method(m) => self.visit_method_decl(m),
+                    ClassMember::Constructor(k) => self.visit_constructor_decl(k),
+                    ClassMember::Initializer(i) => self.visit_block(&i.body),
+                    ClassMember::TypeDecl(t) => self.visit_type_decl(t),
+                }
+            }
+            self.dedent();
+            self.writeln("}");
+        }
     }
     
     fn visit_type_ref(&mut self, type_ref: &TypeRef) {

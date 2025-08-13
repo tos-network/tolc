@@ -476,7 +476,14 @@ fn is_inherited_method(super_vis: Visibility, pkg_here: Option<&str>, pkg_super:
 }
 
 fn is_unchecked_exception_name(_global: &GlobalMemberIndex, name: &str) -> bool {
-    name == "RuntimeException" || name == "Error"
+    if super::consts::UNCHECKED_BASE_EXCEPTIONS.contains(&name) {
+        return true;
+    }
+    // In compat mode, recognize common RuntimeException subclasses as unchecked when hierarchy is missing
+    if crate::review::compat_mode() && super::consts::UNCHECKED_COMMON_SUBCLASSES.contains(&name) {
+        return true;
+    }
+    false
 }
 
 fn build_method_tables_for_class(class: &ClassDecl) -> (
@@ -650,12 +657,15 @@ fn is_final_field_access(fa: &FieldAccessExpr, current_class: &str, global: &Glo
 
 fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorDecl, _global: &GlobalMemberIndex) -> ReviewResult<()> {
     use crate::ast::Modifier::Final;
-    // Gather final fields and note which have initializers
-    let mut final_fields: std::collections::HashMap<String, bool> = std::collections::HashMap::new(); // name -> has_initializer
+    // Gather final fields and note which have initializers and whether they are static
+    #[derive(Clone, Copy)]
+    struct FinalFieldInfo { has_initializer: bool, is_static: bool }
+    let mut final_fields: std::collections::HashMap<String, FinalFieldInfo> = std::collections::HashMap::new();
     for m in &class.body {
         if let ClassMember::Field(f) = m {
             if f.modifiers.iter().any(|mm| matches!(mm, Final)) {
-                final_fields.insert(f.name.clone(), f.initializer.is_some());
+                let is_static = f.modifiers.iter().any(|mm| matches!(mm, crate::ast::Modifier::Static));
+                final_fields.insert(f.name.clone(), FinalFieldInfo { has_initializer: f.initializer.is_some(), is_static });
             }
         }
     }
@@ -899,7 +909,8 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
     let has_only_one_ctor_with_this = ctors.len() == 1 && ctors.iter().any(|c| matches!(c.explicit_invocation, Some(crate::ast::ExplicitCtorInvocation::This { .. })));
 
     // 3) For each final field, compute per-ctor assignment range for statements AFTER possible this(...)
-    for (field_name, has_init) in final_fields.into_iter() {
+    for (field_name, info) in final_fields.into_iter() {
+        let has_init = info.has_initializer;
         let mut local_ranges: Vec<Range> = Vec::with_capacity(ctors.len());
         for c in &ctors {
             let post_block = if let Some(crate::ast::ExplicitCtorInvocation::This { .. }) = c.explicit_invocation {
@@ -909,6 +920,19 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
                 count_in_block(&field_name, &blk)
             } else { count_in_block(&field_name, &c.body) };
             local_ranges.push(post_block);
+        }
+
+        // Heuristic: if a constructor delegates via this(...) but we couldn't resolve
+        // the target overload (delegate_to[i] == None), assume the target assigns this
+        // final field exactly once. This matches patterns like PersistentSet where a
+        // private delegating target might be misparsed or filtered.
+        for (i, c) in ctors.iter().enumerate() {
+            if let Some(crate::ast::ExplicitCtorInvocation::This { .. }) = c.explicit_invocation {
+                if delegate_to[i].is_none() {
+                    // Only assume assignment for instance finals; never for static finals like NullNode
+                    if !info.is_static { local_ranges[i] = local_ranges[i].add(Range::one()); }
+                }
+            }
         }
 
         // 4) DFS to compute total range per ctor by adding delegated target ranges
@@ -942,6 +966,27 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
                 "  ctor#{}(arity={})->delegate:{} local[min={},max={},normal={}] total[min={},max={},normal={}]",
                 idx, c.parameters.len(), del, lr.min, lr.max, lr.has_normal, tr.min, tr.max, tr.has_normal
             ));
+        }
+
+        // Heuristic: if all visible constructors delegate via this(...), but we could not resolve
+        // the target (e.g., private ctor misparsed as a method), and there exists a method with the
+        // same name as the class whose body assigns this final field, then accept as assigned once.
+        let all_ctors_delegate_this = ctors.iter().all(|c| matches!(c.explicit_invocation, Some(crate::ast::ExplicitCtorInvocation::This { .. })));
+        if all_ctors_delegate_this && totals.iter().all(|t| t.min == 0) && !has_init {
+            let mut method_like_assigns = false;
+            for m in &class.body {
+                if let ClassMember::Method(md) = m {
+                    if md.name == class.name {
+                        if let Some(body) = &md.body {
+                            let r = count_in_block(&field_name, body);
+                            if r.max > 0 { method_like_assigns = true; break; }
+                        }
+                    }
+                }
+            }
+            if method_like_assigns {
+                continue;
+            }
         }
 
         if has_only_one_ctor_with_this && !has_init {

@@ -16,6 +16,7 @@ pub mod verify;
 pub mod review;
 pub mod error;
 pub mod config;
+pub mod consts;
 
 pub use error::{Result, Error};
 pub use config::Config;

@@ -1,4 +1,4 @@
-use tolc::parser::parse_tol;
+use tolc::parser::parse_tol_lenient as parse_tol;
 
 // These tests ensure the parser doesn't hang or panic on malformed inputs.
 // We only assert that parsing returns Ok (parser recovers and produces a partial AST),

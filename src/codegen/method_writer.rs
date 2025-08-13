@@ -173,8 +173,13 @@ impl MethodWriter {
         match stmt {
             Stmt::Expression(expr_stmt) => {
                 self.generate_expression(&expr_stmt.expr)?;
-                // Pop result if not used
-                self.emit_opcode(self.opcode_generator.pop());
+                // Pop only if expression likely leaves a value on stack. Method calls to println return void.
+                let should_pop = match &expr_stmt.expr {
+                    Expr::MethodCall(mc) => mc.name != "println",
+                    Expr::Assignment(_) => true,
+                    Expr::Identifier(_) | Expr::Literal(_) | Expr::Binary(_) | Expr::Unary(_) | Expr::ArrayAccess(_) | Expr::FieldAccess(_) | Expr::Cast(_) | Expr::Conditional(_) | Expr::New(_) | Expr::Parenthesized(_) | Expr::InstanceOf(_) | Expr::ArrayInitializer(_) => true,
+                };
+                if should_pop { self.emit_opcode(self.opcode_generator.pop()); }
             }
             Stmt::Declaration(var_decl) => {
                 self.generate_variable_declaration(var_decl)?;
@@ -426,6 +431,9 @@ impl MethodWriter {
             Expr::Parenthesized(expr) => {
                 self.generate_expression(expr)?;
             }
+            Expr::ArrayInitializer(_values) => {
+                // Only used in annotations; no code emission
+            }
         }
         Ok(())
     }
@@ -636,9 +644,14 @@ impl MethodWriter {
                     self.emit_opcode(self.opcode_generator.iconst_0());
                 }
             }
-            Literal::String(_value) => {
-                // TODO: Add string to constant pool
-                self.emit_opcode(self.opcode_generator.ldc(1)); // Constant pool index
+            Literal::String(value) => {
+                // Add string to constant pool and emit LDC
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_string(value) };
+                    self.emit_opcode(self.opcode_generator.ldc(idx));
+                } else {
+                    self.emit_opcode(self.opcode_generator.ldc(1));
+                }
             }
             Literal::Char(value) => {
                 let int_value = *value as i32;
@@ -682,47 +695,49 @@ impl MethodWriter {
     
     /// Generate bytecode for a method call
     fn generate_method_call(&mut self, call: &MethodCallExpr) -> Result<()> {
-        // Generate receiver if present
-        if let Some(receiver) = &call.target {
-            self.generate_expression(receiver)?;
-        } else {
-            // Assume 'this' for instance methods
-            self.emit_opcode(self.opcode_generator.aload(0));
-        }
-        
-        // Generate arguments
-        for arg in &call.arguments {
-            self.generate_expression(arg)?;
-        }
-        
-        // Generate method call
-        // Handle System.out.println specifically
+        // Handle System.out.println specially
         if call.name == "println" {
-            // For System.out.println, we need to call PrintStream.println
-            let method_ref_index = self.add_method_ref("java/io/PrintStream", "println", "(Ljava/lang/String;)V");
-            self.emit_opcode(self.opcode_generator.invokevirtual(0));
-            self.emit_short(method_ref_index as i16);
-        } else {
-            // Generate method descriptor based on arguments
-            let descriptor = self.generate_method_descriptor(&call.arguments);
-            
-            // Determine the class for the method call
-            let class_name = if call.target.is_some() {
-                // If there's a target, we need to determine the class from the target
-                // For now, assume it's a method call on the target object
-                // This is a simplified approach - in a full implementation, we'd need type inference
-                "java/lang/Object".to_string()
-            } else {
-                // No target means calling on 'this' - use current class name
-                self.current_class_name.as_ref()
-                    .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
-                    .clone()
+            let is_system_out = match &call.target {
+                Some(t) => match &**t {
+                    Expr::FieldAccess(fa) => matches!(fa.target.as_deref(), Some(Expr::Identifier(id)) if id.name == "System") && fa.name == "out",
+                    _ => false,
+                },
+                None => false,
             };
-            
-            let method_ref_index = self.add_method_ref(&class_name, &call.name, &descriptor);
-            self.emit_opcode(self.opcode_generator.invokevirtual(0));
-            self.emit_short(method_ref_index as i16);
+            if is_system_out {
+                // Align CP ordering with javac: Fieldref(System.out), then String literal, then Methodref(println)
+                let field_ref = if let Some(cp) = &self.constant_pool { let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_field_ref("java/lang/System", "out", "Ljava/io/PrintStream;").unwrap() }; idx } else { 1 };
+                self.emit_opcode(self.opcode_generator.getstatic(field_ref));
+                for arg in &call.arguments { self.generate_expression(arg)?; }
+                let mref = if let Some(cp) = &self.constant_pool { let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_method_ref("java/io/PrintStream", "println", "(Ljava/lang/String;)V").unwrap() }; idx } else { 1 };
+                self.emit_opcode(self.opcode_generator.invokevirtual(mref));
+                return Ok(());
+            }
         }
+
+        // General receiver + args
+        if let Some(receiver) = &call.target { self.generate_expression(receiver)?; } else { self.emit_opcode(self.opcode_generator.aload(0)); }
+        for arg in &call.arguments { self.generate_expression(arg)?; }
+
+        // General invokevirtual
+        // Generate method descriptor based on arguments
+        let descriptor = self.generate_method_descriptor(&call.arguments);
+        
+        // Determine the class for the method call
+        let class_name = if call.target.is_some() {
+            // If there's a target, we need to determine the class from the target
+            // For now, assume it's a method call on the target object
+            // This is a simplified approach - in a full implementation, we'd need type inference
+            "java/lang/Object".to_string()
+        } else {
+            // No target means calling on 'this' - use current class name
+            self.current_class_name.as_ref()
+                .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
+                .clone()
+        };
+        
+        let method_ref_index = self.add_method_ref(&class_name, &call.name, &descriptor);
+        self.emit_opcode(self.opcode_generator.invokevirtual(method_ref_index));
         
         Ok(())
     }

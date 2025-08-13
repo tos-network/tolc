@@ -173,6 +173,8 @@ fn modifiers_to_flags(modifiers: &[Modifier]) -> u16 {
             Modifier::Transient => flags |= flag::access_flags::ACC_TRANSIENT,
             Modifier::Volatile => flags |= flag::access_flags::ACC_VOLATILE,
             Modifier::Strictfp => flags |= flag::access_flags::ACC_STRICT,
+            // No direct access flag for default methods
+            Modifier::Default => {}
         }
     }
     

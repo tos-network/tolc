@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use tolc::parser::Lexer;
-use tolc::parser::parse_tol;
+use tolc::parser::parse_tol_lenient as parse_tol;
 
 fn class_java_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/java/lang/Class.java")

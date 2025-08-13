@@ -1,8 +1,10 @@
 use std::fs;
+use tolc::parser::parse_and_verify;
 use tolc::parser::parse_tol;
 use tolc::codegen::ClassWriter;
 use tolc::codegen::class_file_to_bytes;
 use tolc::ast::TypeDecl;
+ 
 
 /// Test HelloWorld program compilation
 /// This test verifies that the famous HelloWorld Java program can be correctly parsed and generate valid class files
@@ -10,6 +12,8 @@ use tolc::ast::TypeDecl;
 fn test_helloworld_compilation() {
     // HelloWorld Java source code
     let source = r#"
+package mono;
+
 public class HelloWorld {
     public static void main(String[] args) {
         System.out.println("Hello, World!");
@@ -18,7 +22,7 @@ public class HelloWorld {
 "#;
     
     // Parse source code
-    let ast = parse_tol(source).expect("Failed to parse HelloWorld source");
+    let ast = parse_and_verify (source).expect("Failed to parse HelloWorld source");
     
     // Find HelloWorld class declaration
     let class_decl = ast.type_decls.iter()
@@ -30,6 +34,9 @@ public class HelloWorld {
     
     // Create ClassWriter and generate class file
     let mut class_writer = ClassWriter::new();
+    // Align internal name with package for javap parity
+    class_writer.set_package_name(Some("mono"));
+    class_writer.set_debug(true);
     class_writer.generate_class(class_decl).expect("Failed to generate class");
     
     // Get generated class file
@@ -73,15 +80,78 @@ public class HelloWorld {
 fn test_helloworld_execution() {
     // HelloWorld Java source code
     let source = r#"
+package mono;
+
 public class HelloWorld {
     public static void main(String[] args) {
         System.out.println("Hello, World!");
     }
 }
 "#;
+    let javap_source = r#"
+public class mono.HelloWorld
+  minor version: 0
+  major version: 52
+  flags: ACC_PUBLIC, ACC_SUPER
+Constant pool:
+   #1 = Methodref          #6.#15         // java/lang/Object."<init>":()V
+   #2 = Fieldref           #16.#17        // java/lang/System.out:Ljava/io/PrintStream;
+   #3 = String             #18            // Hello, World!
+   #4 = Methodref          #19.#20        // java/io/PrintStream.println:(Ljava/lang/String;)V
+   #5 = Class              #21            // mono/HelloWorld
+   #6 = Class              #22            // java/lang/Object
+   #7 = Utf8               <init>
+   #8 = Utf8               ()V
+   #9 = Utf8               Code
+  #10 = Utf8               LineNumberTable
+  #11 = Utf8               main
+  #12 = Utf8               ([Ljava/lang/String;)V
+  #13 = Utf8               SourceFile
+  #14 = Utf8               HelloWorld.java
+  #15 = NameAndType        #7:#8          // "<init>":()V
+  #16 = Class              #23            // java/lang/System
+  #17 = NameAndType        #24:#25        // out:Ljava/io/PrintStream;
+  #18 = Utf8               Hello, World!
+  #19 = Class              #26            // java/io/PrintStream
+  #20 = NameAndType        #27:#28        // println:(Ljava/lang/String;)V
+  #21 = Utf8               mono/HelloWorld
+  #22 = Utf8               java/lang/Object
+  #23 = Utf8               java/lang/System
+  #24 = Utf8               out
+  #25 = Utf8               Ljava/io/PrintStream;
+  #26 = Utf8               java/io/PrintStream
+  #27 = Utf8               println
+  #28 = Utf8               (Ljava/lang/String;)V
+{
+  public mono.HelloWorld();
+    descriptor: ()V
+    flags: ACC_PUBLIC
+    Code:
+      stack=1, locals=1, args_size=1
+         0: aload_0
+         1: invokespecial #1                  // Method java/lang/Object."<init>":()V
+         4: return
+      LineNumberTable:
+        line 3: 0
+
+  public static void main(java.lang.String[]);
+    descriptor: ([Ljava/lang/String;)V
+    flags: ACC_PUBLIC, ACC_STATIC
+    Code:
+      stack=2, locals=1, args_size=1
+         0: getstatic     #2                  // Field java/lang/System.out:Ljava/io/PrintStream;
+         3: ldc           #3                  // String Hello, World!
+         5: invokevirtual #4                  // Method java/io/PrintStream.println:(Ljava/lang/String;)V
+         8: return
+      LineNumberTable:
+        line 5: 0
+        line 6: 8
+}
+SourceFile: "HelloWorld.java"
+"#;
     
     // Parse source code
-    let ast = parse_tol(source).expect("Failed to parse HelloWorld source");
+    let ast = parse_and_verify(source).expect("Failed to parse HelloWorld source");
     
     // Find HelloWorld class declaration
     let class_decl = ast.type_decls.iter()
@@ -93,6 +163,8 @@ public class HelloWorld {
     
     // Create ClassWriter and generate class file
     let mut class_writer = ClassWriter::new();
+    class_writer.set_package_name(Some("mono"));
+    class_writer.set_debug(true);
     class_writer.generate_class(class_decl).expect("Failed to generate class");
     
     // Get generated class file
@@ -127,10 +199,19 @@ public class HelloWorld {
             if output.status.success() {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 println!("javap output:\n{}", output_str);
-                
-                // Verify output contains expected class name and method
-                assert!(output_str.contains("class HelloWorld"), "javap output should contain class name");
-                assert!(output_str.contains("public static void main"), "javap output should contain main method");
+                // Normalize: drop header, ignore Constant pool and debug tables, normalize CP indices
+                let start = output_str.find("public class").unwrap_or(0);
+                let mut actual = output_str[start..].replace("\r\n", "\n");
+                actual = strip_constant_pool(&actual);
+                actual = strip_debug_tables(&actual);
+                actual = normalize_cp_indices(&actual);
+                actual = collapse_spaces(&actual);
+                let mut expected = javap_source.replace("\r\n", "\n");
+                expected = strip_constant_pool(&expected);
+                expected = strip_debug_tables(&expected);
+                expected = normalize_cp_indices(&expected);
+                expected = collapse_spaces(&expected);
+                assert_eq!(actual.trim(), expected.trim(), "javap normalized output mismatch (CP/debug ignored)");
             } else {
                 let error_str = String::from_utf8_lossy(&output.stderr);
                 println!("javap failed with error:\n{}", error_str);
@@ -147,6 +228,83 @@ public class HelloWorld {
     // fs::remove_dir_all(&test_dir).expect("Failed to remove test directory");
     
     println!("HelloWorld class file generation and validation completed successfully");
+}
+
+fn strip_constant_pool(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_cp = false;
+    for line in s.lines() {
+        if !in_cp && line.trim_start().starts_with("Constant pool:") { in_cp = true; continue; }
+        if in_cp {
+            // javap lists CP as lines starting with optional spaces then '#', until a blank line or a '{'
+            if line.trim().is_empty() { in_cp = false; continue; }
+            if line.trim_start().starts_with('#') { continue; }
+            // In some versions, CP ends right before the class body '{'
+            if line.trim_start().starts_with('{') { in_cp = false; out.push(line); continue; }
+            // Some trailing Utf8 or lines might still resemble CP; be conservative: skip until blank or '{'
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
+fn strip_debug_tables(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in s.lines() {
+        let trimmed = line.trim_start();
+        if !skip && (trimmed.starts_with("LineNumberTable:") || trimmed.starts_with("LocalVariableTable:")) {
+            skip = true;
+            continue;
+        }
+        if skip {
+            if trimmed.is_empty() {
+                skip = false;
+                continue;
+            }
+            if trimmed.starts_with("public ") || trimmed.starts_with("}") || trimmed.starts_with("Code:") || trimmed.starts_with("descriptor:") || trimmed.starts_with("flags:") {
+                skip = false;
+                out.push(line);
+                continue;
+            }
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
+fn normalize_cp_indices(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(ch) = it.next() {
+        if ch == '#' {
+            let mut saw_digit = false;
+            while let Some(&next) = it.peek() {
+                if next.is_ascii_digit() { saw_digit = true; it.next(); } else { break; }
+            }
+            if saw_digit { out.push_str("#X"); } else { out.push('#'); }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch == ' ' {
+            if !prev_space { out.push(' '); }
+            prev_space = true;
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out
 }
 
 /// Test enhanced HelloWorld variant with multiple methods and fields
@@ -169,7 +327,6 @@ public class EnhancedHelloWorld {
     public static int getCounter() {
         return counter;
     }
-}
 "#;
     
     // Parse source code

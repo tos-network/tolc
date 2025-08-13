@@ -38,7 +38,7 @@ impl Default for Config {
             target_java_version: 8,
             output_dir: PathBuf::from("output"),
             debug: false,
-            emit_frames: true,
+            emit_frames: false,
             optimize: true,
             verbose: false,
             warnings_as_errors: false,

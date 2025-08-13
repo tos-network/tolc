@@ -15,7 +15,17 @@ pub fn type_to_descriptor(ty: &TypeRef) -> String {
         "byte" => "B",
         "short" => "S",
         "void" => "V",
-        _ => return format!("{}L{};", desc, ty.name.replace('.', "/")),
+        _ => {
+            // Map common java.lang simple names to fully-qualified internal names
+            let simple = ty.name.as_str();
+            let mapped = match simple {
+                "String" | "Object" | "Throwable" | "Cloneable" | "Serializable" | "Integer" | "Long" | "Float" | "Double" | "Boolean" | "Character" | "Short" | "Byte" | "Void" => {
+                    format!("java/lang/{}", simple)
+                }
+                _ => ty.name.replace('.', "/"),
+            };
+            return format!("{}L{};", desc, mapped);
+        },
     };
     desc.push_str(base);
     desc

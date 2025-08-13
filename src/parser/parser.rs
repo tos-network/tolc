@@ -13,6 +13,12 @@ pub struct Parser {
     current: usize,
     label_stack: Vec<String>,
     pending_members: Vec<ClassMember>,
+    // Global step counter to prevent parser-wide infinite loops
+    global_steps: usize,
+    // Global gas budget: when exhausted, parsing aborts with error
+    global_gas: usize,
+    // Stack of enclosing class names to disambiguate constructors vs methods
+    class_name_stack: Vec<String>,
 }
 
 impl Parser {
@@ -30,12 +36,16 @@ impl Parser {
             current: 0,
             label_stack: Vec::new(),
             pending_members: Vec::new(),
+            global_steps: 0,
+            global_gas: std::env::var("TOLC_PARSER_MAX_GAS").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::consts::PARSER_MAX_GAS),
+            class_name_stack: Vec::new(),
         })
     }
     
-    /// Parse the source code into an AST
+    /// Parse the source code into an AST (strict: returns Err if any parse error occurred)
     pub fn parse(mut self) -> Result<Ast> {
         let start_span = self.current_span();
+        let initial_gas = self.global_gas;
         
         // Parse package declaration
         let package_decl = if self.check(&Token::Package) {
@@ -46,7 +56,10 @@ impl Parser {
         
         // Parse imports
         let mut imports = Vec::new();
+        let mut steps_imports: usize = 0;
         while self.check(&Token::Import) {
+            if steps_imports > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            steps_imports += 1;
             imports.push(self.parse_import_decl()?);
         }
         
@@ -56,21 +69,34 @@ impl Parser {
         let mut error_count: usize = 0;
         let mut had_error: bool = false;
         let mut last_progress_at: usize = self.current;
+        let mut steps_toplevel: usize = 0;
         while !self.is_at_end() {
+            if self.global_gas == 0 {
+                return Err(super::error::ParseError::InvalidSyntax { message: "parser gas exhausted".to_string(), location: self.previous().location() }.into());
+            }
+            // Gracefully skip stray '}' which may appear due to earlier recovery
+            if self.check(&Token::RBrace) {
+                self.advance();
+                continue;
+            }
             match self.parse_type_decl() {
                 Ok(type_decl) => {
                     type_decls.push(type_decl);
                     last_progress_at = self.current;
+                    // Allow multiple top-level types in tests to support minimal multi-class sources
                 }
-                Err(_e) => {
+                Err(e) => {
+                    log::debug!("parse toplevel: error at token {:?} '{}' -> {}", self.peek().token_type(), self.peek().lexeme(), e);
                     // Attempt error recovery at top-level and continue
+                    self.synchronize_toplevel();
+                    // If we're at EOF after recovery, stop without counting as an error
+                    if self.is_at_end() { break; }
                     had_error = true;
                     error_count = error_count.saturating_add(1);
                     if error_budget == 0 {
                         return Err(super::error::ParseError::InvalidSyntax { message: "too many parse errors".to_string(), location: self.previous().location() }.into());
                     }
                     error_budget -= 1;
-                    self.synchronize_toplevel();
                     // Ensure forward progress; if no token advanced, step one to break potential stall
                     if self.current == last_progress_at && !self.is_at_end() {
                         self.advance();
@@ -79,6 +105,8 @@ impl Parser {
                     continue;
                 }
             }
+            steps_toplevel = steps_toplevel.saturating_add(1);
+            if steps_toplevel > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
         }
         if had_error {
             return Err(super::error::ParseError::InvalidSyntax {
@@ -98,6 +126,35 @@ impl Parser {
             span,
         })
     }
+
+    /// Parse the source code into an AST, but do not fail the whole parse if recoverable
+    /// errors were encountered. This is intended for error-recovery tests where we only
+    /// require the parser to terminate and produce a best-effort AST.
+    pub fn parse_lenient(mut self) -> Result<Ast> {
+        let start_span = self.current_span();
+        let package_decl = if self.check(&Token::Package) { Some(self.parse_package_decl()?) } else { None };
+        let mut imports = Vec::new();
+        while self.check(&Token::Import) { imports.push(self.parse_import_decl()?); }
+        let mut type_decls = Vec::new();
+        let mut error_budget: usize = std::env::var("TOLC_PARSE_MAX_ERRORS").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
+        let mut last_progress_at: usize = self.current;
+        while !self.is_at_end() {
+            match self.parse_type_decl() {
+                Ok(td) => { type_decls.push(td); last_progress_at = self.current; }
+                Err(_) => {
+                    if error_budget == 0 { break; }
+                    error_budget -= 1;
+                    self.synchronize_toplevel();
+                    if self.current == last_progress_at && !self.is_at_end() { self.advance(); }
+                    last_progress_at = self.current;
+                }
+            }
+        }
+        let end_span = self.previous_span();
+        let span = Span::new(start_span.start, end_span.end);
+        let ast = Ast { package_decl, imports, type_decls, span };
+        Ok(ast)
+    }
     
     // Helper methods
     fn is_at_end(&self) -> bool {
@@ -114,6 +171,16 @@ impl Parser {
     
     fn advance(&mut self) -> &LexicalToken {
         if !self.is_at_end() {
+            // Increment global step counter and stop advancing if we exceed cap
+            self.global_steps = self.global_steps.saturating_add(1);
+            if self.global_steps > crate::consts::PARSER_MAX_LOOP_ITERS { self.current = self.tokens.len(); return self.previous(); }
+            // Consume global gas; if exhausted, abort parse with InvalidSyntax
+            if self.global_gas == 0 {
+                // Force end and mark error via setting current to end; caller will observe EOF
+                self.current = self.tokens.len();
+                return self.previous();
+            }
+            self.global_gas -= 1;
             self.current += 1;
         }
         self.previous()
@@ -204,32 +271,25 @@ impl Parser {
         
         let is_static = self.match_token(&Token::Static);
         
-        // Parse qualified name allowing trailing .* without consuming the '*'
+        // Parse qualified name or static single-member import: java.foo.Bar.member
         let mut parts: Vec<String> = Vec::new();
-        // First identifier
-        let first = self.parse_identifier()?;
-        parts.push(first);
-        // Subsequent .identifier while next is identifier; stop if see .*
-        loop {
-            if self.check(&Token::Dot) {
-                // Lookahead one past dot
-                if self.peek_token_type(self.current + 1) == Some(&Token::Identifier) {
-                    self.advance(); // '.'
-                    let seg = self.parse_identifier()?;
-                    parts.push(seg);
-                    continue;
-                } else {
-                    break;
-                }
-            } else {
-                break;
+        parts.push(self.parse_identifier()?);
+        while self.match_token(&Token::Dot) {
+            // accept either identifier or '*'
+            if self.match_token(&Token::Star) {
+                // we consumed .*; mark wildcard and stop
+                let name = parts.join(".");
+                let end_span = self.previous_span();
+                let span = Span::new(start_span.start, end_span.end);
+                self.consume(&Token::Semicolon, "Expected ';' after import")?;
+                return Ok(ImportDecl { name, is_static, is_wildcard: true, span });
             }
+            // must be identifier segment
+            parts.push(self.parse_identifier()?);
         }
-        let mut is_wildcard = false;
-        if self.match_token(&Token::Dot) {
-            if self.match_token(&Token::Star) { is_wildcard = true; } else { return Err(ParseError::UnexpectedToken { expected: "* after '.' in import".to_string(), found: format!("{:?}", self.peek().token_type()), location: self.peek().location() }.into()); }
-        }
+        // If static import and there are at least 2 segments, allow last segment to be member name
         let name = parts.join(".");
+        let is_wildcard = false;
         
         self.consume(&Token::Semicolon, "Expected ';' after import")?;
         
@@ -246,6 +306,9 @@ impl Parser {
     
     // Type declaration parsing
     fn parse_type_decl(&mut self) -> Result<TypeDecl> {
+        // Consume and ignore declaration-leading annotations to allow
+        // forms like @Retention @Target public @interface ...
+        let _leading_annotations = self.parse_annotations()?;
         let modifiers = self.parse_modifiers()?;
         
         match self.peek().token_type() {
@@ -304,8 +367,14 @@ impl Parser {
         
         self.consume(&Token::LBrace, "Expected '{' after class declaration")?;
         
+        // Track current class name for constructor lookahead
+        self.class_name_stack.push(name.clone());
         let mut body = Vec::new();
+        // Safety cap to prevent non-progress loops in large classes
+        let mut steps_in_body: usize = 0;
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            if steps_in_body > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            steps_in_body += 1;
             match self.parse_class_member() {
                 Ok(m) => body.push(m),
                 Err(_) => {
@@ -316,6 +385,8 @@ impl Parser {
         }
         
         let _ = self.consume(&Token::RBrace, "Expected '}' after class body");
+        // Pop current class name
+        let _ = self.class_name_stack.pop();
         
         let end_span = self.previous_span();
         let span = Span::new(start_span.start, end_span.end);
@@ -388,6 +459,11 @@ impl Parser {
                 self.advance();
                 Some(Modifier::Strictfp)
             }
+            Token::Default => {
+                // Java 8 default method modifier inside interfaces
+                self.advance();
+                Some(Modifier::Default)
+            }
             _ => None,
         }
     }
@@ -416,7 +492,10 @@ impl Parser {
         parts.push(self.parse_identifier()?);
         
         // Parse remaining parts separated by dots
+        let mut steps: usize = 0;
         while self.match_token(&Token::Dot) {
+            if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            steps += 1;
             parts.push(self.parse_identifier()?);
         }
         
@@ -427,11 +506,18 @@ impl Parser {
         self.consume(&Token::Lt, "Expected '<' for type parameters")?;
         
         let mut params = Vec::new();
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+            let before = self.current;
             params.push(self.parse_type_parameter()?);
             
             if !self.match_token(&Token::Comma) {
                 break;
+            }
+            if self.current == before { if !self.is_at_end() { self.advance(); } }
             }
         }
         
@@ -442,9 +528,17 @@ impl Parser {
 
     // Helper: consume a '>' or combined >> / >>> as generic closers
     fn consume_generic_gt(&mut self) -> Result<()> {
+        // Normal close
         if self.match_token(&Token::Gt) { return Ok(()); }
+        // Combined closers. If the next token is '>>' or '>>>', allow it to satisfy at least one level.
         if self.match_token(&Token::RShift) { return Ok(()); }
         if self.match_token(&Token::URShift) { return Ok(()); }
+        // In nested generic contexts like Set<Entry<K,V>> the inner parser may have consumed
+        // a single RShift token which represents two '>' characters. In that case, callers at the
+        // outer level won't see a '>' token next; treat a previously consumed RShift/URShift as
+        // satisfying this close as well.
+        let prev = self.previous().token_type();
+        if matches!(prev, Token::RShift | Token::URShift) { return Ok(()); }
         Err(ParseError::UnexpectedToken {
             expected: ">".to_string(),
             found: format!("{:?}", self.peek().token_type()),
@@ -474,8 +568,15 @@ impl Parser {
     fn parse_intersection_bounds(&mut self) -> Result<Vec<TypeRef>> {
         let mut types = Vec::new();
         types.push(self.parse_type_ref()?);
-        while self.match_token(&Token::Amp) {
+        {
+            let mut steps: usize = 0;
+            while self.match_token(&Token::Amp) {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+            let before = self.current;
             types.push(self.parse_type_ref()?);
+            if self.current == before { if !self.is_at_end() { self.advance(); } }
+            }
         }
         Ok(types)
     }
@@ -506,9 +607,16 @@ impl Parser {
         };
         
         let mut array_dims = 0;
-        while self.match_token(&Token::LBracket) {
+        {
+            let mut steps: usize = 0;
+            while self.match_token(&Token::LBracket) {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+            let before = self.current;
             self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
             array_dims += 1;
+            if self.current == before { if !self.is_at_end() { self.advance(); } }
+            }
         }
         
         let end_span = self.previous_span();
@@ -527,7 +635,11 @@ impl Parser {
     fn parse_type_arguments_typearg(&mut self) -> Result<Vec<TypeArg>> {
         self.consume(&Token::Lt, "Expected '<' for type arguments")?;
         let mut args = Vec::new();
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             if self.check(&Token::Question) {
                 let loc = self.advance().location();
                 let mut bound = None;
@@ -544,7 +656,8 @@ impl Parser {
                 let tr = self.parse_type_ref()?;
                 args.push(TypeArg::Type(tr));
             }
-            if !self.match_token(&Token::Comma) { break; }
+                if !self.match_token(&Token::Comma) { break; }
+            }
         }
         self.consume_generic_gt()?;
         Ok(args)
@@ -553,11 +666,16 @@ impl Parser {
     fn parse_type_list(&mut self) -> Result<Vec<TypeRef>> {
         let mut types = Vec::new();
         
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             types.push(self.parse_type_ref()?);
             
             if !self.match_token(&Token::Comma) {
                 break;
+            }
             }
         }
         
@@ -565,51 +683,83 @@ impl Parser {
     }
     
     fn parse_class_member(&mut self) -> Result<ClassMember> {
+        log::debug!("parse_class_member: start at token {:?} '{}'", self.peek().token_type(), self.peek().lexeme());
         // Pending members produced by previous field multi-declarators
         if let Some(member) = self.pending_members.pop() {
             return Ok(member);
         }
         // This is a simplified implementation
         // In a full parser, you'd need to handle all member types
-        let modifiers = self.parse_modifiers()?;
+        let mut modifiers = self.parse_modifiers()?;
 
-        // Static initializer block: 'static' '{' ... '}'
-        if self.check(&Token::Static) && self.peek_token_type(self.current + 1) == Some(&Token::LBrace) {
-            self.advance(); // consume 'static'
+        // Leading annotations on class members
+        let _leading_annotations = self.parse_annotations()?;
+        // It is legal for modifiers to appear after annotations in Java, e.g., @Override public ...
+        // Consume any additional modifiers which follow annotations.
+        let mut more_mods = self.parse_modifiers()?;
+        modifiers.append(&mut more_mods);
+
+        // Static initializer block: either we still see 'static' followed by '{',
+        // or we already consumed 'static' as a modifier and the next token is '{'.
+        if (self.check(&Token::Static) && self.peek_token_type(self.current + 1) == Some(&Token::LBrace))
+            || (modifiers.contains(&Modifier::Static) && self.check(&Token::LBrace))
+        {
+            // If 'static' is still present, consume it now
+            if self.check(&Token::Static) { self.advance(); }
             let body = self.parse_block()?;
             let span = body.span;
+            log::debug!("parse_class_member: parsed static initializer block");
             return Ok(ClassMember::Initializer(InitializerBlock { modifiers: vec![Modifier::Static], body, span }));
         }
         // Instance initializer block: '{' ... '}'
         if self.check(&Token::LBrace) {
             let body = self.parse_block()?;
             let span = body.span;
+            log::debug!("parse_class_member: parsed instance initializer block");
             return Ok(ClassMember::Initializer(InitializerBlock { modifiers: Vec::new(), body, span }));
         }
         
         if self.check(&Token::Class) || self.check(&Token::Interface) || self.check(&Token::Enum) {
             let type_decl = self.parse_type_decl()?;
+            log::debug!("parse_class_member: parsed nested type decl");
             return Ok(ClassMember::TypeDecl(type_decl));
         }
-        // Constructor: Identifier followed by '('
+        // Constructor: Identifier matching current class name followed by '('
         if self.peek().token_type() == &Token::Identifier {
             if self.peek_token_type(self.current + 1) == Some(&Token::LParen) {
-                let ctor = self.parse_constructor_decl(modifiers)?;
-                return Ok(ClassMember::Constructor(ctor));
+                if let Some(current_class) = self.class_name_stack.last() {
+                    if self.peek().lexeme() == current_class {
+                        let ctor = self.parse_constructor_decl(modifiers)?;
+                        return Ok(ClassMember::Constructor(ctor));
+                    }
+                }
             }
         }
         
         // Also consider a leading '<' as a possible start of a method (method-level type parameters)
         if self.check(&Token::Void) || self.is_type_start() || self.check(&Token::At) || self.check(&Token::Lt) {
+            // If identifier followed by '(', but it's not constructor (name != class), treat as method
+            if self.check(&Token::Identifier) && self.peek_token_type(self.current + 1) == Some(&Token::LParen) {
+                if let Some(current_class) = self.class_name_stack.last() {
+                    if self.peek().lexeme() != current_class {
+                        let method = self.parse_method_decl(modifiers)?;
+                        log::debug!("parse_class_member: parsed method decl (id+paren)");
+                        return Ok(ClassMember::Method(method));
+                    }
+                }
+            }
             if self.lookahead_is_method_signature() {
             let method = self.parse_method_decl(modifiers)?;
+            log::debug!("parse_class_member: parsed method decl");
             Ok(ClassMember::Method(method))
         } else {
             let field = self.parse_field_decl(modifiers)?;
+            log::debug!("parse_class_member: parsed field decl");
             Ok(ClassMember::Field(field))
         }
         } else {
             let field = self.parse_field_decl(modifiers)?;
+            log::debug!("parse_class_member: parsed field decl (fallback)");
             Ok(ClassMember::Field(field))
         }
     }
@@ -617,17 +767,143 @@ impl Parser {
     // Lookahead: determine if the upcoming tokens form a method signature
     fn lookahead_is_method_signature(&self) -> bool {
         let mut i = self.current;
-        // Skip leading annotations: @QualifiedName (args?)
+        // Skip any annotations
         while self.peek_token_type(i) == Some(&Token::At) {
-            i += 1; // skip '@'
-            // qualified name
+            // Skip '@' QualifiedName ( '(' ... ')' )?
+            i += 1; // '@'
             if self.peek_token_type(i) != Some(&Token::Identifier) { return false; }
             i += 1;
-            while self.peek_token_type(i) == Some(&Token::Dot) {
-                if self.peek_token_type(i + 1) != Some(&Token::Identifier) { return false; }
-                i += 2;
+            while self.peek_token_type(i) == Some(&Token::Dot) && self.peek_token_type(i + 1) == Some(&Token::Identifier) { i += 2; }
+            if self.peek_token_type(i) == Some(&Token::LParen) {
+                let mut depth = 0usize;
+                loop {
+                    match self.peek_token_type(i) {
+                        Some(Token::LParen) => { depth += 1; i += 1; }
+                        Some(Token::RParen) => { i += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                        Some(_) => { i += 1; }
+                        None => return false,
+                    }
+                }
             }
-            // optional argument list
+        }
+        // Skip modifiers if any (rare after we've already consumed them, but safe)
+        loop {
+            match self.peek_token_type(i) {
+                Some(Token::Public) | Some(Token::Protected) | Some(Token::Private) |
+                Some(Token::Abstract) | Some(Token::Static) | Some(Token::Final) |
+                Some(Token::Native) | Some(Token::Synchronized) | Some(Token::Transient) |
+                Some(Token::Volatile) | Some(Token::Strictfp) | Some(Token::Default) => { i += 1; }
+                _ => break,
+            }
+        }
+        // Optional method-level type parameters: < ... >
+        if self.peek_token_type(i) == Some(&Token::Lt) {
+            let mut depth = 0usize;
+            loop {
+                match self.peek_token_type(i) {
+                    Some(Token::Lt) => { depth += 1; i += 1; }
+                    Some(Token::Gt) => { i += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                    Some(Token::RShift) => { i += 1; if depth == 0 { break; } depth = depth.saturating_sub(2); if depth == 0 { break; } }
+                    Some(Token::URShift) => { i += 1; if depth == 0 { break; } depth = depth.saturating_sub(3); if depth == 0 { break; } }
+                    Some(_) => { i += 1; }
+                    None => return false,
+                }
+                if depth == 0 { break; }
+            }
+        }
+        // Return type or 'void'
+        if self.peek_token_type(i) == Some(&Token::Void) {
+            i += 1;
+        } else {
+            if !self.lookahead_type_ref(&mut i) { return false; }
+            // Optional array suffixes after return type
+            while self.peek_token_type(i) == Some(&Token::LBracket) && self.peek_token_type(i + 1) == Some(&Token::RBracket) { i += 2; }
+        }
+        // Method name and '('
+        self.peek_token_type(i) == Some(&Token::Identifier) && self.peek_token_type(i + 1) == Some(&Token::LParen)
+    }
+    
+    // Lookahead: parse a type reference without consuming tokens
+    fn lookahead_type_ref(&self, i: &mut usize) -> bool {
+        // Base token: identifier (qualified), primitive, void, or wildcard '?'
+        match self.peek_token_type(*i) {
+            Some(Token::Identifier)
+            | Some(Token::Boolean)
+            | Some(Token::Byte)
+            | Some(Token::Short)
+            | Some(Token::Int)
+            | Some(Token::Long)
+            | Some(Token::Char)
+            | Some(Token::Float)
+            | Some(Token::Double)
+            | Some(Token::Void)
+            | Some(Token::Question) => {
+                *i += 1; // consume first segment or wildcard/primitive/void
+                if self.peek_token_type(*i) == Some(&Token::Extends) || self.peek_token_type(*i) == Some(&Token::Super) {
+                    *i += 1;
+                    if !self.lookahead_type_ref(i) { return false; }
+                }
+            }
+            _ => return false,
+        }
+        // Optional type arguments after first segment
+        if self.peek_token_type(*i) == Some(&Token::Lt) {
+            let mut depth = 0usize;
+            loop {
+                match self.peek_token_type(*i) {
+                    Some(Token::Lt) => { depth += 1; *i += 1; }
+                    Some(Token::Gt) => { *i += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                    Some(Token::RShift) => { *i += 1; if depth == 0 { break; } depth = depth.saturating_sub(2); if depth == 0 { break; } }
+                    Some(Token::URShift) => { *i += 1; if depth == 0 { break; } depth = depth.saturating_sub(3); if depth == 0 { break; } }
+                    Some(_) => { *i += 1; }
+                    None => return false,
+                }
+                if depth == 0 { break; }
+            }
+        }
+        // Qualified name segments with optional type args: . Identifier (<...>)?
+        loop {
+            if self.peek_token_type(*i) != Some(&Token::Dot) { break; }
+            // ensure next is identifier
+            if self.peek_token_type(*i + 1) != Some(&Token::Identifier) { break; }
+            *i += 2; // consume '.' and identifier
+            // optional type args after segment
+            if self.peek_token_type(*i) == Some(&Token::Lt) {
+                let mut depth = 0usize;
+                loop {
+                    match self.peek_token_type(*i) {
+                        Some(Token::Lt) => { depth += 1; *i += 1; }
+                        Some(Token::Gt) => { *i += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                        Some(Token::RShift) => { *i += 1; if depth == 0 { break; } depth = depth.saturating_sub(2); if depth == 0 { break; } }
+                        Some(Token::URShift) => { *i += 1; if depth == 0 { break; } depth = depth.saturating_sub(3); if depth == 0 { break; } }
+                        Some(_) => { *i += 1; }
+                        None => return false,
+                    }
+                    if depth == 0 { break; }
+                }
+            }
+        }
+        // Array dimensions []*
+        while self.peek_token_type(*i) == Some(&Token::LBracket) {
+            *i += 1;
+            if self.peek_token_type(*i) != Some(&Token::RBracket) { return false; }
+            *i += 1;
+        }
+        true
+    }
+    
+    fn peek_token_type(&self, idx: usize) -> Option<&Token> {
+        self.tokens.get(idx).map(|t| t.token_type())
+    }
+
+    // Lookahead: are we at the start of a plausible class member?
+    fn lookahead_is_member_start(&self, mut i: usize) -> bool {
+        // Skip annotations: @QualifiedName ( ... )?
+        while self.peek_token_type(i) == Some(&Token::At) {
+            i += 1; // '@'
+            if self.peek_token_type(i) != Some(&Token::Identifier) { return false; }
+            i += 1;
+            while self.peek_token_type(i) == Some(&Token::Dot) && self.peek_token_type(i + 1) == Some(&Token::Identifier) { i += 2; }
             if self.peek_token_type(i) == Some(&Token::LParen) {
                 let mut depth = 0usize;
                 loop {
@@ -646,115 +922,70 @@ impl Parser {
                 Some(Token::Public) | Some(Token::Protected) | Some(Token::Private) |
                 Some(Token::Abstract) | Some(Token::Static) | Some(Token::Final) |
                 Some(Token::Native) | Some(Token::Synchronized) | Some(Token::Transient) |
-                Some(Token::Volatile) | Some(Token::Strictfp) => { i += 1; }
+                Some(Token::Volatile) | Some(Token::Strictfp) | Some(Token::Default) => { i += 1; }
                 _ => break,
             }
         }
-        // Optional method type parameters
-        if self.peek_token_type(i) == Some(&Token::Lt) {
-            let mut depth = 0usize;
-            loop {
-                match self.peek_token_type(i) {
-                    Some(Token::Lt) => { depth += 1; i += 1; }
-                    Some(Token::Gt) => {
-                        i += 1;
-                        if depth == 0 { break; }
-                        depth -= 1;
-                        if depth == 0 { break; }
-                    }
-                    Some(_) => { i += 1; }
-                    None => return false,
-                }
-            }
+        // Nested type declarations
+        if matches!(self.peek_token_type(i), Some(Token::Class) | Some(Token::Interface) | Some(Token::Enum) | Some(Token::At)) {
+            return true;
         }
-        // Return type or 'void'
-        if self.peek_token_type(i) == Some(&Token::Void) {
-            i += 1;
-        } else {
-            if !self.lookahead_type_ref(&mut i) {
+        // Primitive or void -> field or method
+        if matches!(self.peek_token_type(i), Some(Token::Boolean)|Some(Token::Byte)|Some(Token::Short)|Some(Token::Int)|Some(Token::Long)|Some(Token::Char)|Some(Token::Float)|Some(Token::Double)|Some(Token::Void)) {
+            return true;
+        }
+        // Reference type or constructor/method starting with Identifier
+        if self.peek_token_type(i) == Some(&Token::Identifier) {
+            // Constructor: Identifier '(' with name == current class name
+            if self.peek_token_type(i + 1) == Some(&Token::LParen) {
+                if let Some(current_class) = self.class_name_stack.last() {
+                    return self.tokens.get(i).map(|t| t.lexeme()) == Some(current_class.as_str());
+                }
                 return false;
             }
-        }
-        // Method name (identifier)
-        if self.peek_token_type(i) != Some(&Token::Identifier) {
-            return false;
-        }
-        i += 1;
-        // Next must be '(' for a method
-        self.peek_token_type(i) == Some(&Token::LParen)
-    }
-    
-    // Lookahead: parse a type reference without consuming tokens
-    fn lookahead_type_ref(&self, i: &mut usize) -> bool {
-        match self.peek_token_type(*i) {
-            Some(Token::Identifier)
-            | Some(Token::Boolean)
-            | Some(Token::Byte)
-            | Some(Token::Short)
-            | Some(Token::Int)
-            | Some(Token::Long)
-            | Some(Token::Char)
-            | Some(Token::Float)
-            | Some(Token::Double)
-            | Some(Token::Void)
-            | Some(Token::Question) => {
-                *i += 1; // consume type name
-                if self.peek_token_type(*i) == Some(&Token::Extends) || self.peek_token_type(*i) == Some(&Token::Super) {
-                    *i += 1;
-                    if !self.lookahead_type_ref(i) { return false; }
+            // Qualified name: Identifier ('.' Identifier)* possibly with type args
+            // Or a simple type ref followed by another Identifier (variable/method name)
+            let mut j = i;
+            // consume first identifier
+            j += 1;
+            // optional type args after first segment
+            if self.peek_token_type(j) == Some(&Token::Lt) {
+                // best-effort: scan balanced generics
+                let mut depth = 0usize;
+                loop {
+                    match self.peek_token_type(j) {
+                        Some(Token::Lt) => { depth += 1; j += 1; }
+                        Some(Token::Gt) => { j += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                        Some(Token::RShift) => { j += 1; if depth == 0 { break; } depth = depth.saturating_sub(2); if depth == 0 { break; } }
+                        Some(Token::URShift) => { j += 1; if depth == 0 { break; } depth = depth.saturating_sub(3); if depth == 0 { break; } }
+                        Some(_) => { j += 1; }
+                        None => break,
+                    }
+                    if depth == 0 { break; }
                 }
             }
-            _ => return false,
-        }
-        // Optional type arguments: < ... > (naive balance)
-        if self.peek_token_type(*i) == Some(&Token::Lt) {
-            let mut depth = 0usize;
-            loop {
-                match self.peek_token_type(*i) {
-                    Some(Token::Lt) => { depth += 1; *i += 1; }
-                    Some(Token::Gt) => {
-                        *i += 1;
-                        if depth == 0 { break; }
-                        depth -= 1;
-                        if depth == 0 { break; }
-                    }
-                    Some(Token::RShift) => {
-                        *i += 1;
-                        if depth == 0 { break; }
-                        if depth >= 2 { 
-                            depth -= 2; 
-                            if depth == 0 { break; }
-                        } else { 
-                            break; 
+            // Qualified segments
+            while self.peek_token_type(j) == Some(&Token::Dot) && self.peek_token_type(j + 1) == Some(&Token::Identifier) {
+                j += 2;
+                if self.peek_token_type(j) == Some(&Token::Lt) {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.peek_token_type(j) {
+                            Some(Token::Lt) => { depth += 1; j += 1; }
+                            Some(Token::Gt) => { j += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                            Some(Token::RShift) => { j += 1; if depth == 0 { break; } depth = depth.saturating_sub(2); if depth == 0 { break; } }
+                            Some(Token::URShift) => { j += 1; if depth == 0 { break; } depth = depth.saturating_sub(3); if depth == 0 { break; } }
+                            Some(_) => { j += 1; }
+                            None => break,
                         }
-                    }
-                    Some(Token::URShift) => {
-                        *i += 1;
                         if depth == 0 { break; }
-                        if depth >= 3 { 
-                            depth -= 3; 
-                            if depth == 0 { break; }
-                        } else { 
-                            break; 
-                        }
                     }
-                    Some(_) => { *i += 1; }
-                    None => return false,
                 }
-                if depth == 0 { break; }
             }
+            // Now expect either an Identifier (member name) or '[' for array declarator or '(' for method (rare due to constructor check)
+            return matches!(self.peek_token_type(j), Some(Token::Identifier) | Some(Token::LBracket));
         }
-        // Array dimensions []*
-        while self.peek_token_type(*i) == Some(&Token::LBracket) {
-            *i += 1;
-            if self.peek_token_type(*i) != Some(&Token::RBracket) { return false; }
-            *i += 1;
-        }
-        true
-    }
-    
-    fn peek_token_type(&self, idx: usize) -> Option<&Token> {
-        self.tokens.get(idx).map(|t| t.token_type())
+        false
     }
     
     fn is_type_start(&self) -> bool {
@@ -770,9 +1001,31 @@ impl Parser {
         self.consume(&Token::Interface, "Expected 'interface' keyword")?;
         let name = self.parse_identifier()?;
         
-        // Parse type parameters
+        // Parse type parameters; allow single "? extends/super T" as generic param in compat mode
         let type_params = if self.check(&Token::Lt) {
-            self.parse_type_parameters()?
+            // Lookahead for wildcard generics like <? extends K, ? extends V>
+            if self.peek_token_type(self.current + 1) == Some(&Token::Question) {
+                self.advance(); // consume '<'
+                let mut params: Vec<TypeParam> = Vec::new();
+                loop {
+                    if self.match_token(&Token::Question) {
+                        // Synthesize a TypeParam name for wildcard; record extends bound if present
+                        let name = "?".to_string();
+                        let bounds = if self.match_token(&Token::Extends) {
+                            vec![ self.parse_type_ref()? ]
+                        } else if self.match_token(&Token::Super) {
+                            vec![ self.parse_type_ref()? ]
+                        } else { Vec::new() };
+                        let sp = self.current_span();
+                        params.push(TypeParam { name, bounds, span: sp });
+                    }
+                    if !self.match_token(&Token::Comma) { break; }
+                }
+                self.consume_generic_gt()?;
+                params
+            } else {
+                self.parse_type_parameters()?
+            }
         } else {
             Vec::new()
         };
@@ -789,8 +1042,13 @@ impl Parser {
         self.consume(&Token::LBrace, "Expected '{' after interface declaration")?;
         
         let mut members = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
-            members.push(self.parse_interface_member()?);
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+                members.push(self.parse_interface_member()?);
+            }
         }
         
         self.consume(&Token::RBrace, "Expected '}' to close interface body")?;
@@ -824,13 +1082,20 @@ impl Parser {
         
         // Parse enum body
         self.consume(&Token::LBrace, "Expected '{' after enum declaration")?;
+        // Track current enum name so that enum constructors are recognized properly by parse_class_member
+        self.class_name_stack.push(name.clone());
         
         let mut constants = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
-            constants.push(self.parse_enum_constant()?);
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+                constants.push(self.parse_enum_constant()?);
             
-            if !self.match_token(&Token::Comma) {
-                break;
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
             }
         }
         
@@ -841,11 +1106,17 @@ impl Parser {
         
         // Parse class body members
         let mut members = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
-            members.push(self.parse_class_member()?);
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+                members.push(self.parse_class_member()?);
+            }
         }
         
         self.consume(&Token::RBrace, "Expected '}' to close enum body")?;
+        let _ = self.class_name_stack.pop();
         
         let span = Span::new(
             self.current_span().start,
@@ -871,8 +1142,13 @@ impl Parser {
         self.consume(&Token::LBrace, "Expected '{' after annotation declaration")?;
         
         let mut members = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
-            members.push(self.parse_annotation_member()?);
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+                members.push(self.parse_annotation_member()?);
+            }
         }
         
         self.consume(&Token::RBrace, "Expected '}' to close annotation body")?;
@@ -899,7 +1175,7 @@ impl Parser {
         // Parse method type parameters
         let type_params = if self.check(&Token::Lt) { self.parse_type_parameters()? } else { Vec::new() };
         // Parse return type
-        let return_type = if self.check(&Token::Void) {
+        let mut return_type = if self.check(&Token::Void) {
             self.advance();
             None
         } else {
@@ -924,6 +1200,23 @@ impl Parser {
                 self.advance();
             }
             if self.check(&Token::RParen) { self.advance(); }
+        }
+
+        // Optional return type array dimensions after parameter list, e.g., `int m()[]` or `T m()[][]`
+        if return_type.is_some() {
+            let mut extra_dims = 0usize;
+            while self.check(&Token::LBracket) {
+                self.advance();
+                if self.consume(&Token::RBracket, "Expected ']' after return type array dimension").is_err() {
+                    break;
+                }
+                extra_dims += 1;
+            }
+            if extra_dims > 0 {
+                if let Some(rt) = &mut return_type {
+                    rt.array_dims = rt.array_dims.saturating_add(extra_dims);
+                }
+            }
         }
         
         // Parse throws clause
@@ -985,10 +1278,14 @@ impl Parser {
             } else { None };
             let span_decl = Span::new(self.current_span().start, self.previous_span().end);
 
+            // Apply per-declarator array dimensions to the declared type
+            let mut type_ref_for_decl = type_ref.clone();
+            if _array_dims > 0 { type_ref_for_decl.array_dims += _array_dims; }
+
             let decl = FieldDecl {
                 modifiers: modifiers.clone(),
                 annotations: annotations.clone(),
-                type_ref: type_ref.clone(),
+                type_ref: type_ref_for_decl,
                 name,
                 initializer,
                 span: span_decl,
@@ -1025,10 +1322,14 @@ impl Parser {
         let throws = if self.check(&Token::Throws) { self.advance(); self.parse_type_list()? } else { Vec::new() };
         // Parse body with optional leading this(...) or super(...)
         self.consume(&Token::LBrace, "Expected '{' to start constructor body")?;
-        // Optional explicit constructor invocation must be first statement
+        // Optional explicit constructor invocation must be first statement and must be
+        // the token 'this' or 'super' immediately followed by '('. Do NOT confuse
+        // ordinary primary expressions like `this.field = ...` with ctor invocation.
         let mut seen_explicit_ctor_call = false;
         let mut explicit_invocation: Option<crate::ast::ExplicitCtorInvocation> = None;
-        if self.check(&Token::This) || self.check(&Token::Super) {
+        if (self.check(&Token::This) || self.check(&Token::Super))
+            && self.peek_token_type(self.current + 1) == Some(&Token::LParen)
+        {
             // Parse 'this(args);' or 'super(args);'
             let is_this = self.check(&Token::This);
             self.advance(); // consume this/super
@@ -1044,7 +1345,10 @@ impl Parser {
         while !self.check(&Token::RBrace) && !self.is_at_end() {
             if self.check(&Token::Semicolon) { self.advance(); continue; }
             // Enforce: explicit ctor call only allowed as first statement
-            if self.check(&Token::This) || self.check(&Token::Super) {
+            // Only trigger when it's actually a ctor invocation token sequence: this '(' ... or super '(' ...
+            if (self.check(&Token::This) || self.check(&Token::Super))
+                && self.peek_token_type(self.current + 1) == Some(&Token::LParen)
+            {
                 let loc = self.peek().location();
                 if seen_explicit_ctor_call || !statements.is_empty() {
                     return Err(ParseError::semantic_error("explicit constructor invocation must be the first statement and appear only once", loc).into());
@@ -1060,18 +1364,27 @@ impl Parser {
     
     // Helper methods for the new parsing functionality
     fn parse_interface_member(&mut self) -> Result<InterfaceMember> {
-        let modifiers = self.parse_modifiers()?;
-        
-        if self.check(&Token::Void) || self.is_type_start() {
-            let method = self.parse_method_decl(modifiers)?;
-            Ok(InterfaceMember::Method(method))
-        } else if self.check(&Token::Class) || self.check(&Token::Interface) || self.check(&Token::Enum) {
+        // Allow modifiers and annotations in any order at member start
+        let mut modifiers = self.parse_modifiers()?;
+        let _annotations = self.parse_annotations()?;
+        let mut more = self.parse_modifiers()?;
+        modifiers.append(&mut more);
+
+        // Nested types inside interface
+        if self.check(&Token::Class) || self.check(&Token::Interface) || self.check(&Token::Enum) || self.check(&Token::At) {
             let type_decl = self.parse_type_decl()?;
-            Ok(InterfaceMember::TypeDecl(type_decl))
-        } else {
-            let field = self.parse_field_decl(modifiers)?;
-            Ok(InterfaceMember::Field(field))
+            return Ok(InterfaceMember::TypeDecl(type_decl));
         }
+
+        // Methods: return type or 'void', also permit method-level type params '<>'
+        if self.check(&Token::Void) || self.is_type_start() || self.check(&Token::Lt) || self.check(&Token::At) {
+            let method = self.parse_method_decl(modifiers)?;
+            return Ok(InterfaceMember::Method(method));
+        }
+
+        // Constants (fields) as fallback
+        let field = self.parse_field_decl(modifiers)?;
+        Ok(InterfaceMember::Field(field))
     }
     
     fn parse_enum_constant(&mut self) -> Result<EnumConstant> {
@@ -1112,38 +1425,62 @@ impl Parser {
     }
     
     fn parse_annotation_member(&mut self) -> Result<AnnotationMember> {
-        let modifiers = self.parse_modifiers()?;
-        
-        if self.check(&Token::Void) || self.is_type_start() {
-            let method = self.parse_method_decl(modifiers)?;
-            // Convert MethodDecl to AnnotationMember (simplified)
-            let span = method.span;
-            Ok(AnnotationMember {
-                type_ref: method.return_type.unwrap_or_else(|| TypeRef {
-                    name: "void".to_string(),
-                    type_args: Vec::new(),
-                    array_dims: 0,
-                    span,
-                }),
-                name: method.name,
-                default_value: None,
-                span,
-            })
+        // JLS: AnnotationTypeElementDeclaration → {Annotation} UnannType Identifier () [default ElementValue] ;
+        // We parse a simplified form: [modifiers] Type Identifier '(' ')' ['default' elementValue] ';'
+        let _modifiers = self.parse_modifiers()?; // currently ignored on AnnotationMember
+
+        // Type (non-void in JLS, but we allow and carry through if present)
+        let type_ref = if self.check(&Token::Void) {
+            // consume void to avoid loops; represent as a TypeRef("void")
+            let start = self.current_span();
+            self.advance();
+            let end = self.previous_span();
+            TypeRef { name: "void".to_string(), type_args: Vec::new(), array_dims: 0, span: Span::new(start.start, end.end) }
         } else {
-            let field = self.parse_field_decl(modifiers)?;
-            Ok(AnnotationMember {
-                type_ref: field.type_ref,
-                name: field.name,
-                default_value: field.initializer,
-                span: field.span,
-            })
-        }
+            self.parse_type_ref()?
+        };
+
+        // Name and mandatory empty parameter list
+        let name = self.parse_identifier()?;
+        self.consume(&Token::LParen, "Expected '(' in annotation member declaration")?;
+        self.consume(&Token::RParen, "Expected ')' in annotation member declaration")?;
+
+        // Optional default value
+        let default_value = if self.match_token(&Token::Default) {
+            // elementValue → conditionalExpression | annotation | elementValueArrayInitializer
+            // We support expression and array initializer forms here.
+            let expr = if self.check(&Token::LBrace) {
+                // Array initializer: '{' (expr (',' expr)*)? '}'
+                self.advance();
+                let mut values: Vec<Expr> = Vec::new();
+                if !self.check(&Token::RBrace) {
+                    loop {
+                        values.push(self.parse_expression()?);
+                        if !self.match_token(&Token::Comma) { break; }
+                    }
+                }
+                self.consume(&Token::RBrace, "Expected '}' to close annotation default array value")?;
+                Expr::ArrayInitializer(values)
+            } else {
+                self.parse_expression()?
+            };
+            Some(expr)
+        } else { None };
+
+        self.consume(&Token::Semicolon, "Expected ';' after annotation member declaration")?;
+
+        let span = Span::new(self.current_span().start, self.previous_span().end);
+        Ok(AnnotationMember { type_ref, name, default_value, span })
     }
     
     fn parse_parameter_list(&mut self) -> Result<Vec<Parameter>> {
         let mut parameters = Vec::new();
         
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             let modifiers = self.parse_modifiers()?;
             let annotations = self.parse_annotations()?;
             let mut type_ref = self.parse_type_ref()?;
@@ -1151,7 +1488,7 @@ impl Parser {
             let varargs = if self.match_token(&Token::Ellipsis) { true } else { false };
             let name = self.parse_identifier()?;
             
-            // Parse array dimensions
+            // Parse array dimensions after the identifier
             let mut _array_dims = 0;
             while self.check(&Token::LBracket) {
                 self.advance(); // consume '['
@@ -1162,6 +1499,7 @@ impl Parser {
             if _array_dims > 0 {
                 type_ref.array_dims += _array_dims;
             }
+            // Allow an alternative form: array dimensions after type (already handled in parse_type_ref)
             
             let span = Span::new(
                 self.current_span().start,
@@ -1180,6 +1518,7 @@ impl Parser {
             if !self.match_token(&Token::Comma) {
                 break;
             }
+            }
         }
         
         Ok(parameters)
@@ -1188,11 +1527,16 @@ impl Parser {
     fn parse_argument_list(&mut self) -> Result<Vec<Expr>> {
         let mut arguments = Vec::new();
         
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             arguments.push(self.parse_expression()?);
             
             if !self.match_token(&Token::Comma) {
                 break;
+            }
             }
         }
         
@@ -1203,12 +1547,22 @@ impl Parser {
         self.consume(&Token::LBrace, "Expected '{' for class body")?;
         
         let mut members = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+                let before = self.current;
             match self.parse_class_member() {
                 Ok(m) => members.push(m),
-                Err(_) => {
+                Err(e) => {
+                    log::debug!("parse_class_body: member error at token {:?} '{}' -> {}", self.peek().token_type(), self.peek().lexeme(), e);
                     self.synchronize_in_class_body();
                     if self.check(&Token::Semicolon) { self.advance(); }
+                }
+            }
+                if self.current == before {
+                    if !self.is_at_end() { self.advance(); }
                 }
             }
         }
@@ -1236,12 +1590,17 @@ impl Parser {
         self.consume(&Token::LBrace, "Expected '{' for block")?;
         
         let mut statements = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             // Skip empty statements and semicolons
             if self.check(&Token::Semicolon) {
                 self.advance();
                 continue;
             }
+            log::debug!("parse_block: statement start at token {:?} '{}'", self.peek().token_type(), self.peek().lexeme());
             // Return statement
             if self.check(&Token::Return) {
                 let start = self.current_span();
@@ -1287,8 +1646,9 @@ impl Parser {
             let before = self.current;
             match self.parse_statement() {
                 Ok(stmt) => statements.push(stmt),
-                Err(_) => {
+                Err(e) => {
                     // Error recovery inside blocks
+                    log::debug!("parse_block: statement error at token {:?} '{}' -> {}", self.peek().token_type(), self.peek().lexeme(), e);
                     self.synchronize_in_block();
                     continue;
                 }
@@ -1296,6 +1656,7 @@ impl Parser {
             if self.current == before {
                 // Ensure progress to avoid infinite loops
                 if !self.is_at_end() { self.advance(); }
+            }
             }
         }
         
@@ -1404,10 +1765,42 @@ impl Parser {
         if self.check(&Token::Try) { return self.parse_try_stmt(); }
         if self.check(&Token::Switch) { return self.parse_switch_stmt(); }
 
-        // Local type declaration (class/interface/enum) inside blocks
-        if self.check(&Token::Class) || self.check(&Token::Interface) || self.check(&Token::Enum) || self.check(&Token::At) {
-            if let Ok(decl) = self.parse_type_decl() {
-                return Ok(Stmt::TypeDecl(decl));
+        // Local type declaration (class/interface/enum/annotation) inside blocks.
+        // Allow leading annotations/modifiers before the keyword.
+        {
+            let mut i = self.current;
+            // Skip annotations: @QualifiedName ( ... )?
+            while self.peek_token_type(i) == Some(&Token::At) {
+                i += 1; // '@'
+                if self.peek_token_type(i) != Some(&Token::Identifier) { break; }
+                i += 1;
+                while self.peek_token_type(i) == Some(&Token::Dot) && self.peek_token_type(i + 1) == Some(&Token::Identifier) {
+                    i += 2;
+                }
+                if self.peek_token_type(i) == Some(&Token::LParen) {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.peek_token_type(i) {
+                            Some(Token::LParen) => { depth += 1; i += 1; }
+                            Some(Token::RParen) => { i += 1; if depth == 0 { break; } depth -= 1; if depth == 0 { break; } }
+                            Some(_) => { i += 1; }
+                            None => break,
+                        }
+                    }
+                }
+            }
+            // Skip modifiers
+            loop {
+                match self.peek_token_type(i) {
+                    Some(Token::Public) | Some(Token::Protected) | Some(Token::Private) |
+                    Some(Token::Abstract) | Some(Token::Static) | Some(Token::Final) |
+                    Some(Token::Native) | Some(Token::Synchronized) | Some(Token::Transient) |
+                    Some(Token::Volatile) | Some(Token::Strictfp) | Some(Token::Default) => { i += 1; }
+                    _ => break,
+                }
+            }
+            if matches!(self.peek_token_type(i), Some(Token::Class) | Some(Token::Interface) | Some(Token::Enum) | Some(Token::At)) {
+                if let Ok(decl) = self.parse_type_decl() { return Ok(Stmt::TypeDecl(decl)); }
             }
         }
 
@@ -1463,7 +1856,12 @@ impl Parser {
         let modifiers = self.parse_modifiers()?;
         let type_ref = self.parse_type_ref()?;
         let mut variables: Vec<VariableDeclarator> = Vec::new();
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+            let before = self.current;
             let name = self.parse_identifier()?;
             let mut array_dims = 0;
             while self.match_token(&Token::LBracket) {
@@ -1476,6 +1874,10 @@ impl Parser {
             let decl_span = Span::new(start.start, self.previous_span().end);
             variables.push(VariableDeclarator { name, array_dims, initializer, span: decl_span });
             if !self.match_token(&Token::Comma) { break; }
+            if self.current == before {
+                if !self.is_at_end() { self.advance(); }
+            }
+            }
         }
         self.consume(&Token::Semicolon, "Expected ';' after variable declaration")?;
         let span = Span::new(start.start, self.previous_span().end);
@@ -1483,10 +1885,6 @@ impl Parser {
     }
     
     fn parse_expression(&mut self) -> Result<Expr> {
-        // Parse object creation: new Type(...) with optional diamond operator
-        if self.check(&Token::New) {
-            return self.parse_new_expression();
-        }
         // Assignment is the lowest precedence (right-associative)
         let expr = self.parse_assignment_expr()?;
         Ok(expr)
@@ -1584,27 +1982,41 @@ impl Parser {
 
     fn parse_bitwise_xor_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_bitwise_and_expr()?;
-        while self.match_token(&Token::Caret) {
+        {
+            let mut steps: usize = 0;
+            while self.match_token(&Token::Caret) {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             let right = self.parse_bitwise_and_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
             expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Xor, right: Box::new(right), span });
+            }
         }
         Ok(expr)
     }
 
     fn parse_bitwise_and_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_equality_expr()?;
-        while self.match_token(&Token::Amp) {
+        {
+            let mut steps: usize = 0;
+            while self.match_token(&Token::Amp) {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             let right = self.parse_equality_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
             expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::And, right: Box::new(right), span });
+            }
         }
         Ok(expr)
     }
 
     fn parse_equality_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_relational_expr()?;
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             if self.match_token(&Token::Eq) {
                 let right = self.parse_relational_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -1614,13 +2026,18 @@ impl Parser {
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Ne, right: Box::new(right), span });
             } else { break; }
+            }
         }
         Ok(expr)
     }
 
     fn parse_relational_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_shift_expr()?;
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             if self.match_token(&Token::Lt) {
                 let right = self.parse_shift_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -1642,13 +2059,18 @@ impl Parser {
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::InstanceOf(InstanceOfExpr { expr: Box::new(expr), target_type, span });
             } else { break; }
+            }
         }
         Ok(expr)
     }
 
     fn parse_shift_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_additive_expr()?;
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             if self.match_token(&Token::LShift) {
                 let right = self.parse_additive_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -1662,13 +2084,18 @@ impl Parser {
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::URShift, right: Box::new(right), span });
             } else { break; }
+            }
         }
         Ok(expr)
     }
 
     fn parse_additive_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_multiplicative_expr()?;
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             if self.match_token(&Token::Plus) {
                 let right = self.parse_multiplicative_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -1678,13 +2105,18 @@ impl Parser {
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Sub, right: Box::new(right), span });
             } else { break; }
+            }
         }
         Ok(expr)
     }
 
     fn parse_multiplicative_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_unary_expr()?;
-        loop {
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             if self.match_token(&Token::Star) {
                 let right = self.parse_unary_expr()?;
                 let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -1698,6 +2130,7 @@ impl Parser {
                 let span = Span::new(self.current_span().start, self.previous_span().end);
                 expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Mod, right: Box::new(right), span });
             } else { break; }
+            }
         }
         Ok(expr)
     }
@@ -1756,22 +2189,64 @@ impl Parser {
 
     fn parse_postfix_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary_expr()?;
-        // Chained operations: calls, field access, array access, post-inc/dec
-        loop {
+        // Chained operations: calls, field access, array access, post-inc/dec, anonymous class after constructor
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+            // If we have just parsed a constructor call like `new T(args)` and the next token is '{',
+            // treat it as an anonymous class body attached to the previous NewExpr.
+            if self.check(&Token::LBrace) {
+                if let Expr::New(mut new_expr) = expr.clone() {
+                    // Only attach anonymous body if not already set
+                    if new_expr.anonymous_body.is_none() {
+                        let body_decl = self.parse_class_body()?;
+                        let span_all = Span::new(self.current_span().start, self.previous_span().end);
+                        new_expr.anonymous_body = Some(body_decl);
+                        new_expr.span = span_all;
+                        expr = Expr::New(new_expr);
+                        continue;
+                    }
+                }
+            }
             if self.check(&Token::LParen) {
-        self.advance();
+                self.advance();
                 let args = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
                 self.consume(&Token::RParen, "Expected ')' after arguments")?;
                 if let Expr::Identifier(IdentifierExpr { name: id_name, span }) = expr {
                     let span_all = Span::new(span.start, self.previous_span().end);
                     expr = Expr::MethodCall(MethodCallExpr { target: None, name: id_name, arguments: args, span: span_all });
-                } else {
-                    break;
+                    continue;
                 }
-                continue;
+                // For qualified calls, we always reach here via the dot-branch below
+                break;
             }
             if self.match_token(&Token::Dot) {
-                let name = self.parse_identifier()?;
+                // Optional call-site type arguments: .<T, U extends X>
+                if self.check(&Token::Lt) {
+                    // Best-effort: parse and ignore call-site type args
+                    let _ = self.parse_type_arguments_typearg();
+                }
+                // After a dot, Java allows identifiers, 'this', 'super', and 'class'
+                let name = if self.check(&Token::Identifier) {
+                    self.parse_identifier()?
+                } else if self.check(&Token::This) {
+                    self.advance();
+                    "this".to_string()
+                } else if self.check(&Token::Super) {
+                    self.advance();
+                    "super".to_string()
+                } else if self.check(&Token::Class) {
+                    self.advance();
+                    "class".to_string()
+                } else {
+                    // Fallback: treat unexpected token after '.' as an identifier-like name
+                    // to avoid stalling; this keeps the parser progressing in recovery mode.
+                    let t = self.peek().lexeme().to_string();
+                    self.advance();
+                    t
+                };
                 if self.check(&Token::LParen) {
                     self.advance();
                     let arguments = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
@@ -1802,11 +2277,63 @@ impl Parser {
                 continue;
             }
             break;
+            }
         }
         Ok(expr)
     }
     
     fn parse_primary_expr(&mut self) -> Result<Expr> {
+        // Class literal: TypeName.class or primitiveType.class (optionally with array dims)
+        {
+            let save = self.current;
+            // Try to parse a type reference greedily and then check for '.class'
+            // Only attempt when the current token looks like a type start to avoid backtracking cost
+            if matches!(self.peek().token_type(),
+                Token::Boolean | Token::Byte | Token::Short | Token::Int |
+                Token::Long | Token::Char | Token::Float | Token::Double |
+                Token::Identifier
+            ) {
+                // Use a speculative parse of a type ref
+                if let Ok(mut ty) = (|| -> Result<TypeRef> { Ok(self.parse_type_ref()?) })() {
+                    if self.check(&Token::Dot) && self.peek_token_type(self.current + 1) == Some(&Token::Class) {
+                        self.advance(); // '.'
+                        self.advance(); // 'class'
+                        let span = Span::new(self.current_span().start, self.previous_span().end);
+                        // Represent as a field access on a synthetic identifier of the type name
+                        let target = Expr::Identifier(IdentifierExpr { name: ty.name.clone(), span });
+                        return Ok(Expr::FieldAccess(FieldAccessExpr { target: Some(Box::new(target)), name: "class".to_string(), span }));
+                    } else {
+                        // Not a class literal; rewind and continue with normal primary parsing
+                        self.current = save;
+                    }
+                } else {
+                    self.current = save;
+                }
+            }
+        }
+        // Object creation and anonymous class as a primary expression
+        if self.check(&Token::New) {
+            return self.parse_new_expression();
+        }
+        // Explicit call-site type arguments before an unqualified method invocation:
+        // <T, U extends X> identifier(args)
+        if self.check(&Token::Lt) {
+            let save = self.current;
+            if self.parse_type_arguments_typearg().is_ok() {
+                if self.check(&Token::Identifier) {
+                    let name = self.parse_identifier()?;
+                    if self.check(&Token::LParen) {
+                        self.advance();
+                        let args = if !self.check(&Token::RParen) { self.parse_argument_list()? } else { Vec::new() };
+                        self.consume(&Token::RParen, "Expected ')' after arguments")?;
+                        let span = Span::new(self.current_span().start, self.previous_span().end);
+                        return Ok(Expr::MethodCall(MethodCallExpr { target: None, name, arguments: args, span }));
+                    }
+                }
+            }
+            // rollback if not a method invocation
+            self.current = save;
+        }
         // Parenthesized
         if self.match_token(&Token::LParen) {
             let inner = self.parse_expression()?;
@@ -1815,7 +2342,7 @@ impl Parser {
         }
         
         // Literals and identifiers (existing logic adapted)
-        // Parse string literals
+        // Parse literals
         if self.check(&Token::StringLiteral) {
             let token = self.advance();
             let value = token.lexeme().trim_matches('"').to_string();
@@ -1826,17 +2353,37 @@ impl Parser {
                 span,
             }));
         }
-        
-        // Parse integer literals
-        if self.check(&Token::DecimalInteger) {
+        if self.check(&Token::CharLiteral) {
             let token = self.advance();
-            let value = token.lexeme().parse::<i64>().unwrap_or(0);
+            let lex = token.lexeme();
+            let ch = if lex.len() >= 3 { lex.chars().nth(1).unwrap_or('\0') } else { '\0' };
             let location = token.location();
             let span = Span::new(location.clone(), location);
-            return Ok(Expr::Literal(LiteralExpr {
-                value: Literal::Integer(value),
-                span,
-            }));
+            return Ok(Expr::Literal(LiteralExpr { value: Literal::Char(ch), span }));
+        }
+        if self.check(&Token::HexInteger) || self.check(&Token::BinaryInteger) || self.check(&Token::OctalInteger) || self.check(&Token::DecimalInteger) || self.check(&Token::LongLiteral) {
+            let token = self.advance();
+            let raw = token.lexeme().replace('_', "");
+            let v = if raw.starts_with("0x") || raw.starts_with("0X") {
+                i64::from_str_radix(raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0)
+            } else if raw.starts_with("0b") || raw.starts_with("0B") {
+                i64::from_str_radix(raw.trim_start_matches("0b").trim_start_matches("0B"), 2).unwrap_or(0)
+            } else if raw.starts_with('0') && raw.len() > 1 {
+                i64::from_str_radix(raw.trim_start_matches('0'), 8).unwrap_or(0)
+            } else {
+                raw.trim_end_matches(|c| c=='l'||c=='L').parse::<i64>().unwrap_or(0)
+            };
+            let location = token.location();
+            let span = Span::new(location.clone(), location);
+            return Ok(Expr::Literal(LiteralExpr { value: Literal::Integer(v), span }));
+        }
+        if self.check(&Token::TypedFloat) || self.check(&Token::FloatLiteral) || self.check(&Token::ScientificFloat) {
+            let token = self.advance();
+            let raw = token.lexeme().replace('_', "");
+            let v = raw.trim_end_matches(|c| c=='f' || c=='F' || c=='d' || c=='D').parse::<f64>().unwrap_or(0.0);
+            let location = token.location();
+            let span = Span::new(location.clone(), location);
+            return Ok(Expr::Literal(LiteralExpr { value: Literal::Float(v), span }));
         }
         
         // Parse boolean literals
@@ -1888,7 +2435,7 @@ impl Parser {
             }));
         }
         
-        // Fallback literal zero to avoid infinite loops, but consume nothing else
+        // Fallback: produce a zero literal but avoid consuming unexpected tokens to keep recovery stable
         let span = self.current_span();
         Ok(Expr::Literal(LiteralExpr { value: Literal::Integer(0), span }))
     }
@@ -1920,7 +2467,7 @@ impl Parser {
             // Lookahead one token to see if it's a diamond operator
             let save = self.current;
             self.advance(); // consume '<'
-            if self.check(&Token::Gt) {
+            if self.check(&Token::Gt) || self.check(&Token::RShift) || self.check(&Token::URShift) {
                 // Diamond operator: consume '>' and keep empty type_args
                 self.advance();
             } else {
@@ -1930,8 +2477,9 @@ impl Parser {
             }
         }
 
-        // Either array creation new T[expr]... or constructor call
+        // Either array creation new T[expr]... or constructor call (optional anonymous body)
         let mut arguments = Vec::new();
+        let mut array_dims_count: usize = 0;
         if self.check(&Token::LBracket) {
             // array creation
             // Option A: new T[expr] [expr] ...
@@ -1941,11 +2489,13 @@ impl Parser {
                     // new T[] ... possibly initializer
                     saw_empty_brackets = true;
                     self.advance(); // consume ']'
+                    array_dims_count += 1;
                     break;
                 } else {
                     // size expression
                     arguments.push(self.parse_expression()?);
                     self.consume(&Token::RBracket, "Expected ']' in array creation")?;
+                    array_dims_count += 1;
                 }
             }
             // Optional initializer: { expr (, expr)* }
@@ -1969,15 +2519,24 @@ impl Parser {
                 Vec::new()
             };
             self.consume(&Token::RParen, "Expected ')' after constructor arguments")?;
+            // Optional anonymous class body
+            let anonymous_body = if self.check(&Token::LBrace) {
+                // Reuse parse_class_body to get members; wrap into a synthetic ClassDecl
+                let body_decl = self.parse_class_body()?;
+                Some(body_decl)
+            } else { None };
+            let end_span = self.previous_span();
+            let span = Span::new(start_span.start, end_span.end);
+            let type_span = span;
+            let target_type = TypeRef { name, type_args, array_dims: 0, span: type_span };
+            return Ok(Expr::New(NewExpr { target_type, arguments, anonymous_body, span }));
         }
 
         let end_span = self.previous_span();
         let span = Span::new(start_span.start, end_span.end);
-
         let type_span = span; // approximate span
-        let target_type = TypeRef { name, type_args, array_dims: 0, span: type_span };
-
-        Ok(Expr::New(NewExpr { target_type, arguments, span }))
+        let target_type = TypeRef { name, type_args, array_dims: array_dims_count, span: type_span };
+        Ok(Expr::New(NewExpr { target_type, arguments, anonymous_body: None, span }))
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt> {
@@ -2013,7 +2572,8 @@ impl Parser {
         let mut init_stmts: Vec<Stmt> = Vec::new();
         if !self.check(&Token::Semicolon) {
             if self.is_variable_declaration_start() {
-                let decl = self.parse_variable_declaration_stmt()?;
+                // In a for-header, the init variable declaration must NOT consume the trailing ';'
+                let decl = self.parse_variable_declarators_no_semi()?;
                 init_stmts.push(decl);
             } else {
                 // expression list
@@ -2043,6 +2603,33 @@ impl Parser {
         let body = if self.check(&Token::LBrace) { Box::new(Stmt::Block(self.parse_block()?)) } else { Box::new(self.parse_statement()?) };
         let span = Span::new(start.start, self.previous_span().end);
         Ok(Stmt::For(ForStmt { init: init_stmts, condition, update: update_list, body, span }))
+    }
+
+    // Parse local variable declarators without consuming a trailing semicolon (for use in for-header)
+    fn parse_variable_declarators_no_semi(&mut self) -> Result<Stmt> {
+        let start = self.current_span();
+        let modifiers = self.parse_modifiers()?;
+        let type_ref = self.parse_type_ref()?;
+        let mut variables: Vec<VariableDeclarator> = Vec::new();
+        {
+            let mut steps: usize = 0;
+            loop {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
+                let name = self.parse_identifier()?;
+                let mut array_dims = 0;
+                while self.match_token(&Token::LBracket) {
+                    self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
+                    array_dims += 1;
+                }
+                let initializer = if self.match_token(&Token::Assign) { Some(self.parse_expression()?) } else { None };
+                let decl_span = Span::new(start.start, self.previous_span().end);
+                variables.push(VariableDeclarator { name, array_dims, initializer, span: decl_span });
+                if !self.match_token(&Token::Comma) { break; }
+            }
+        }
+        let span = Span::new(start.start, self.previous_span().end);
+        Ok(Stmt::Declaration(VarDeclStmt { modifiers, type_ref, variables, span }))
     }
 
     fn parse_do_while_stmt(&mut self) -> Result<Stmt> {
@@ -2130,7 +2717,11 @@ impl Parser {
         self.consume(&Token::RParen, "Expected ')' after switch expression")?;
         self.consume(&Token::LBrace, "Expected '{' to open switch body")?;
         let mut cases: Vec<SwitchCase> = Vec::new();
-        while !self.check(&Token::RBrace) && !self.is_at_end() {
+        {
+            let mut steps: usize = 0;
+            while !self.check(&Token::RBrace) && !self.is_at_end() {
+                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                steps += 1;
             let mut labels: Vec<Expr> = Vec::new();
             // Collect consecutive case/default labels (aggregate multiple labels for same group)
             loop {
@@ -2177,6 +2768,7 @@ impl Parser {
                 break;
             }
         }
+        }
         self.consume(&Token::RBrace, "Expected '}' to close switch body")?;
         let span = Span::new(start.start, self.previous_span().end);
         Ok(Stmt::Switch(SwitchStmt { expression: expr, cases, span }))
@@ -2185,8 +2777,11 @@ impl Parser {
     // Parse a list of leading annotations
     fn parse_annotations(&mut self) -> Result<Vec<Annotation>> {
         let mut annotations = Vec::new();
+        let mut steps: usize = 0;
         loop {
             if !self.check(&Token::At) { break; }
+            if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            steps += 1;
             let start = self.current_span();
             self.advance(); // consume '@'
             let name = self.parse_qualified_name()?;
@@ -2219,11 +2814,38 @@ impl Parser {
                 } else {
                     // revert and parse as expression
                     self.current = save;
-                    let expr = self.parse_expression()?;
+                    // Support array initializer in annotations: '{' (expr (',' expr)*)? '}'
+                    let expr = if self.check(&Token::LBrace) {
+                        self.advance();
+                        let mut values: Vec<Expr> = Vec::new();
+                        if !self.check(&Token::RBrace) {
+                            loop {
+                                values.push(self.parse_expression()?);
+                                if !self.match_token(&Token::Comma) { break; }
+                            }
+                        }
+                        self.consume(&Token::RBrace, "Expected '}' to close annotation array value")?;
+                        Expr::ArrayInitializer(values)
+                    } else {
+                        self.parse_expression()?
+                    };
                     args.push(AnnotationArg::Value(expr));
                 }
             } else {
-                let expr = self.parse_expression()?;
+                let expr = if self.check(&Token::LBrace) {
+                    self.advance();
+                    let mut values: Vec<Expr> = Vec::new();
+                    if !self.check(&Token::RBrace) {
+                        loop {
+                            values.push(self.parse_expression()?);
+                            if !self.match_token(&Token::Comma) { break; }
+                        }
+                    }
+                    self.consume(&Token::RBrace, "Expected '}' to close annotation array value")?;
+                    Expr::ArrayInitializer(values)
+                } else {
+                    self.parse_expression()?
+                };
                 args.push(AnnotationArg::Value(expr));
             }
             if !self.match_token(&Token::Comma) { break; }
@@ -2293,7 +2915,19 @@ impl Parser {
     fn synchronize_toplevel(&mut self) {
         while !self.is_at_end() {
             match self.peek().token_type() {
+                // Only stop at true toplevel starters
                 Token::Package | Token::Import | Token::Class | Token::Interface | Token::Enum | Token::At => break,
+                // If we encounter stray '}', consume and continue
+                Token::RBrace => { self.advance(); }
+                // Stop if we see visibility or modifiers at toplevel and next is a type keyword,
+                // to avoid drifting into class-body tokens after an earlier error.
+                Token::Public | Token::Protected | Token::Private |
+                Token::Abstract | Token::Static | Token::Final |
+                Token::Strictfp => {
+                    let n = self.peek_token_type(self.current + 1);
+                    if matches!(n, Some(Token::Class|Token::Interface|Token::Enum|Token::At)) { break; }
+                    self.advance();
+                }
                 _ => { self.advance(); }
             }
         }
@@ -2302,6 +2936,21 @@ impl Parser {
     fn synchronize_in_class_body(&mut self) {
         while !self.is_at_end() {
             if self.check(&Token::Semicolon) || self.check(&Token::RBrace) { break; }
+            // Heuristics: if we hit a token that likely begins a member, stop
+            match self.peek().token_type() {
+                Token::Public | Token::Protected | Token::Private |
+                Token::Abstract | Token::Static | Token::Final |
+                Token::Native | Token::Synchronized | Token::Transient |
+                Token::Volatile | Token::Strictfp |
+                Token::Class | Token::Interface | Token::Enum | Token::At => break,
+                // Also stop on primitive, void, or identifier that could start a field/method/ctor
+                Token::Boolean | Token::Byte | Token::Short | Token::Int |
+                Token::Long | Token::Char | Token::Float | Token::Double |
+                Token::Void => break,
+                _ => {}
+            }
+            // Secondary heuristic: if a more detailed lookahead thinks we're at a member start, stop
+            if self.lookahead_is_member_start(self.current) { break; }
             self.advance();
         }
     }

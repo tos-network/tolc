@@ -260,7 +260,7 @@ impl Token {
             Token::Public | Token::Protected | Token::Private |
             Token::Abstract | Token::Final | Token::Native |
             Token::Synchronized | Token::Transient | Token::Volatile |
-            Token::Strictfp | Token::Class | Token::Interface |
+            Token::Strictfp | Token::Default | Token::Class | Token::Interface |
             Token::Enum | Token::Extends | Token::Implements |
             Token::New | Token::This | Token::Super |
             Token::InstanceOf | Token::Void | Token::Boolean |
