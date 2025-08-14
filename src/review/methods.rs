@@ -223,9 +223,19 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                                                 // Allow covariance: here <: super via hierarchy or if super is Object
                                                 if ret_super == "Object" {
                                                     // ok: any reference is covariant to Object
-                                                } else if !super::statements::is_reference_assignable(global, &ret_here, &ret_super) {
-                                                    log::debug!("override error: non-covariant return: here={}, super={}", ret_here, ret_super);
-                                                    return Err(ReviewError::DuplicateMember(format!("incompatible return type for override of '{}'", m.name)));
+                                                } else {
+                                                    // Stage A generics-aware subtype probe (no behavior change fallback)
+                                                    let env = crate::review::generics::TypeEnv::default();
+                                                    let here_tr = crate::ast::TypeRef { name: ret_here.clone(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: m.span };
+                                                    let super_tr = crate::ast::TypeRef { name: ret_super.clone(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: m.span };
+                                                    let here_rt = crate::review::generics::resolve_type_ref(&here_tr, &env, global);
+                                                    let super_rt = crate::review::generics::resolve_type_ref(&super_tr, &env, global);
+                                                    let cov_ok = crate::review::generics::is_subtype(&here_rt, &super_rt, &env, global)
+                                                        || super::statements::is_reference_assignable(global, &ret_here, &ret_super);
+                                                    if !cov_ok {
+                                                        log::debug!("override error: non-covariant return: here={}, super={}", ret_here, ret_super);
+                                                        return Err(ReviewError::DuplicateMember(format!("incompatible return type for override of '{}'", m.name)));
+                                                    }
                                                 }
                                             }
                                         }

@@ -10,6 +10,7 @@ mod fields;
 mod methods;
 mod statements;
 mod consts;
+pub mod generics; // Stage A scaffolding for generics (ReviewedType/TypeEnv)
 
 pub type ReviewResult<T> = Result<T, ReviewError>;
 

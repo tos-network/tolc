@@ -782,6 +782,8 @@ pub(crate) fn review_body_checked_exceptions(
                     if let Some(mt) = crate::review::types::resolve_type_in_index(global, &current_class.name) {
                         let arity = mc.arguments.len();
                         let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        // Stage A: compute a placeholder generics-aware environment (not used to reject)
+                        let _env_for_generics = crate::review::generics::TypeEnv::default();
                         let mut thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
                         // Always augment with AST scan mapped by method type param bounds to avoid index gaps
                         let mut union_throws: HashSet<String> = HashSet::new();
@@ -845,7 +847,8 @@ pub(crate) fn review_body_checked_exceptions(
                     if let Some(tname) = expr_static_type(current_class, t, global, scopes) {
                         if let Some(mt) = crate::review::types::resolve_type_in_index(global, &tname) {
                             let arity = mc.arguments.len();
-                            let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let _env_for_generics = crate::review::generics::TypeEnv::default();
                             let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
                             super::debug_log(format!("call throws (instance-target): {}.{}({}) -> {:?}", tname, mc.name, arity, thr));
                             for t in &thr { require(t)?; }
@@ -855,7 +858,8 @@ pub(crate) fn review_body_checked_exceptions(
                         if id.name != current_class.name {
                             if let Some(mt) = crate::review::types::resolve_type_in_index(global, &id.name) {
                                 let arity = mc.arguments.len();
-                                let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let _env_for_generics = crate::review::generics::TypeEnv::default();
                                 let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
                                 super::debug_log(format!("call throws (cross-type): {}.{}({}) -> {:?}", id.name, mc.name, arity, thr));
                                 for t in &thr { require(t)?; }
@@ -867,7 +871,8 @@ pub(crate) fn review_body_checked_exceptions(
                     if let Some(ty) = global.static_explicit.get(&mc.name) {
                         if let Some(mt) = crate::review::types::resolve_type_in_index(global, ty) {
                             let arity = mc.arguments.len();
-                            let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let arg_types = collect_arg_types(current_class, &mc.arguments, global, scopes);
+                        let _env_for_generics = crate::review::generics::TypeEnv::default();
                             let thr = select_method_throws(mt, &mc.name, arity, arg_types.as_ref());
                             super::debug_log(format!("call throws (static import): {}.{}({}) -> {:?}", ty, mc.name, arity, thr));
                             for t in &thr { require(t)?; }
@@ -1323,7 +1328,10 @@ pub(crate) fn review_body_locals_and_inits(
     global: Option<&crate::review::types::GlobalMemberIndex>,
 ) -> ReviewResult<()> {
     let mut scope_stack: Vec<HashMap<String, bool>> = vec![HashMap::new()]; // bool: definitely assigned
-    walk_stmt_locals(body, &mut scope_stack, final_params, false, global)
+    walk_stmt_locals(body, &mut scope_stack, final_params, false, global)?;
+    // After DA/DU, enforce simple local assignment type-compat using generics-aware assignability
+    if let Some(g) = global { enforce_local_assignment_types_in_block(body, g)?; }
+    Ok(())
 }
 
 // Walk a block and enforce field accessibility for instance targets based on static type
@@ -1581,6 +1589,7 @@ fn walk_stmt_locals(
                                 return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: found.to_string() });
                             }
                         }
+                        // Stage A generics integration placeholder reserved for future use
                         // mark as definitely assigned
                         if let Some(scope) = scopes.last_mut() { if let Some(flag) = scope.get_mut(&var.name) { *flag = true; } }
                     }
@@ -2230,37 +2239,22 @@ pub(crate) fn resolve_type_in_index<'a>(global: &'a crate::review::types::Global
 /// Returns true if `src` is the same type as `dst`, or if any superclass of `src` (following `super_name`) matches `dst`.
 /// Treats `Object` as a universal super type.
 pub(crate) fn is_reference_assignable(global: &crate::review::types::GlobalMemberIndex, src: &str, dst: &str) -> bool {
-    if dst == "Object" { return true; }
-    // array covariance and Object/Cloneable/Serializable
-    if src.ends_with("[]") && dst.ends_with("[]") {
-        let s = &src[..src.len()-2];
-        let d = &dst[..dst.len()-2];
-        return is_reference_assignable(global, s, d);
-    }
-    if src.ends_with("[]") && (dst == "Object" || dst == "Cloneable" || dst == "Serializable") { return true; }
-    if src == dst { return true; }
-    // Walk up from src following super_name; also consider interfaces
-    let mut cur_name = src.to_string();
-    let mut seen = std::collections::HashSet::new();
-    // Safety cap to prevent pathological cycles or excessively deep chains
-    let mut steps: usize = 0;
-    loop {
-        if steps > crate::consts::REVIEW_MAX_HIERARCHY_STEPS { return false; }
-        steps += 1;
-        if let Some(mt) = resolve_type_in_index(global, &cur_name) {
-            // check interfaces implemented by current type at each step
-            for itf in &mt.interfaces {
-                if itf == dst { return true; }
-            }
-            if let Some(sup) = &mt.super_name {
-                if sup == dst { return true; }
-                if !seen.insert(sup.clone()) { return false; }
-                cur_name = sup.clone();
-                continue;
-            }
+    // Delegate to generics-aware assignability using simple ReviewedType shapes
+    use crate::review::generics::{ReviewedType as RT, is_assignable, TypeEnv};
+    // Quick array mapping: "T[]" -> Array(Class(T))
+    fn parse_simple(name: &str) -> RT {
+        if name == "Object" { return RT::Object; }
+        if name.ends_with("[]") {
+            let base = &name[..name.len()-2];
+            return RT::Array { of: Box::new(parse_simple(base)) };
         }
-        return false;
+        // treat as raw class without args
+        RT::Class { name: name.to_string(), args: Vec::new() }
     }
+    let s = parse_simple(src);
+    let d = parse_simple(dst);
+    let env = TypeEnv::default();
+    is_assignable(&s, &d, &env, global)
 }
 
 // Returns Some(arity) if the type is known locally or explicitly imported; unknown types via wildcard imports return None
@@ -3042,6 +3036,75 @@ fn is_assignable_literal(expected: &str, found: &str) -> bool {
     }
 }
 
+// Enforce invariance for generic locals in simple assignments: a = b;
+fn enforce_local_assignment_types_in_block(
+    body: &Block,
+    global: &crate::review::types::GlobalMemberIndex,
+) -> ReviewResult<()> {
+    use crate::ast::*;
+    use crate::review::generics::{resolve_type_ref, is_assignable, TypeEnv};
+    use crate::review::generics::ReviewedType as RT;
+    // Track local variable declared types (full TypeRef)
+    fn walk_block(
+        block: &Block,
+        locals: &mut Vec<HashMap<String, TypeRef>>,
+        global: &crate::review::types::GlobalMemberIndex,
+    ) -> ReviewResult<()> {
+        locals.push(HashMap::new());
+        for s in &block.statements {
+            match s {
+                Stmt::Block(b) => { walk_block(b, locals, global)?; }
+                Stmt::Declaration(vd) => {
+                    for var in &vd.variables {
+                        if locals.last().unwrap().contains_key(&var.name) {
+                            return Err(ReviewError::DuplicateLocalVar(var.name.clone()));
+                        }
+                        locals.last_mut().unwrap().insert(var.name.clone(), vd.type_ref.clone());
+                        // Do not enforce initializer compatibility here to avoid over-eager errors
+                    }
+                }
+                Stmt::Expression(es) => {
+                    if let Expr::Assignment(a) = &es.expr {
+                        if let Expr::Identifier(id_dst) = &*a.target {
+                            if let Some(dst_tr) = lookup_local_type(locals, &id_dst.name) {
+                                if let Some(src_tr) = lookup_ident_expr_typeref(&a.value, locals) {
+                                    // Enforce invariance only when both locals share the same raw generic type and have concrete args
+                                    if dst_tr.name == src_tr.name && !dst_tr.type_args.is_empty() && !src_tr.type_args.is_empty() {
+                                        if dst_tr.type_args.len() == src_tr.type_args.len() {
+                                            for (da, sa) in dst_tr.type_args.iter().zip(src_tr.type_args.iter()) {
+                                                if let (crate::ast::TypeArg::Type(dt), crate::ast::TypeArg::Type(st)) = (da, sa) {
+                                                    if dt.name != st.name || dt.array_dims != st.array_dims {
+                                                        return Err(ReviewError::IncompatibleInitializer { expected: dst_tr.name.clone(), found: src_tr.name.clone() });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        locals.pop();
+        Ok(())
+    }
+    // No static expr type resolution used in this lightweight check
+    fn lookup_ident_expr_typeref<'a>(e: &Expr, locals: &'a Vec<HashMap<String, TypeRef>>) -> Option<TypeRef> {
+        if let Expr::Identifier(id) = e { return lookup_local_type(locals, &id.name).cloned(); }
+        None
+    }
+    fn lookup_local_type<'a>(locals: &'a Vec<HashMap<String, TypeRef>>, name: &str) -> Option<&'a TypeRef> {
+        for scope in locals.iter().rev() { if let Some(t) = scope.get(name) { return Some(t); } }
+        None
+    }
+    fn describe_rt(t: &RT) -> String { crate::review::generics::describe_type(t) }
+    let mut locals: Vec<HashMap<String, TypeRef>> = Vec::new();
+    walk_block(body, &mut locals, global)
+}
+
 fn is_assignable_primitive_or_string(expected: &str, found: &str) -> bool {
     if found == "null" { return expected != "int" && expected != "long" && expected != "double" && expected != "float" && expected != "boolean" && expected != "char"; }
     if expected == found { return true; }
@@ -3109,6 +3172,10 @@ fn conversion_cost_with_boxing(expected: &str, found: &str) -> Option<u32> {
         if p == found { return Some(2); }
         // primitive -> wrapper with widening then boxing is not standard; treat as incompatible here
     }
+    // boxing to general reference (e.g., Object or type variable T): allow primitive to be boxed
+    if !is_primitive_type(expected) && is_primitive_type(found) {
+        return Some(3);
+    }
     // unboxing: expected primitive, found wrapper
     if is_primitive_type(expected) {
         if let Some(p) = unboxing_partner_of(found) {
@@ -3134,6 +3201,11 @@ fn conversion_cost_with_boxing_ctx(
 ) -> Option<u32> {
     // first try primitive/boxing path
     if let Some(c) = conversion_cost_with_boxing(expected, found) { return Some(c); }
+    // Treat single-letter or uppercase-leading identifiers as method type variables (e.g., T)
+    // Minimal poly-expression inference: accept any argument for such parameters with small cost
+    if !is_primitive_type(expected) && expected.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+        return Some(1);
+    }
     // then try reference assignability when we have a global index
     if let Some(g) = global {
         if !is_primitive_type(expected) && !is_primitive_type(found) {

@@ -112,5 +112,3 @@ Planned sequencing to reach 100%
 - Generics
   - Implement capture conversion scaffolding (wildcard capture) and apply in assignability/overload checks; add targeted tests
   - Add poly-expression (generic method) inference scaffolding for applicability and most-specific selection; add tests
-- Blank-final DA/DU (optional)
-  - Ongoing: add more ordering edge-case tests as encountered in real codebases (current set covers delegation chains, effective-constructor initializer counting, try/finally variants, early-return and loop cases, throwing constructors, and multiple-finals interactions)
