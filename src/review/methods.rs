@@ -742,12 +742,16 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
                 if body_has { Range { min: 0, max: 2, has_normal: true } } else { Range::zero() }
             }
             Stmt::Block(b) => {
-                // Model block as sequential composition: additions accumulate
+                // Model block as sequential composition with early termination semantics
                 let mut acc = Range::zero();
                 for s in &b.statements {
+                    // Early return completes normally; stop accumulating further statements
+                    if matches!(s, Stmt::Return(_)) { return acc; }
+                    // Throw aborts normal completion; no further normal path exists
+                    if matches!(s, Stmt::Throw(_)) { return Range::none(); }
                     let r = count_in_stmt(field, s);
                     acc = acc.add(r);
-                    if !acc.has_normal { break; }
+                    if !acc.has_normal { return acc; }
                 }
                 acc
             }
@@ -761,7 +765,8 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
                 for r in crs { union = Range::min_max_merge(union, r); }
                 union.add(fr)
             }
-            Stmt::Return(_) | Stmt::Throw(_) => Range::none(),
+            Stmt::Return(_) => Range::zero(),
+            Stmt::Throw(_) => Range::none(),
             Stmt::Switch(sw) => {
                 // Treat switch as selecting exactly one case (or default). For must-assign semantics, we
                 // require that every possible selected case assigns to guarantee min>=1. Fallthrough is
@@ -896,9 +901,9 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
             match inv {
                 crate::ast::ExplicitCtorInvocation::This { arg_count } => {
                     // try exact type match first
-                    if let Some((j, _)) = ctors.iter().enumerate().find(|(_, cc)| cc.parameters.len() == *arg_count && cc.parameters.iter().zip(&c.parameters).all(|(a,b)| a.type_ref.name == b.type_ref.name && a.type_ref.array_dims == b.type_ref.array_dims)) {
+                    if let Some((j, _)) = ctors.iter().enumerate().find(|(jj, cc)| *jj != i && cc.parameters.len() == *arg_count && cc.parameters.iter().zip(&c.parameters).all(|(a,b)| a.type_ref.name == b.type_ref.name && a.type_ref.array_dims == b.type_ref.array_dims)) {
                         delegate_to[i] = Some(j);
-                    } else if let Some((j, _)) = ctors.iter().enumerate().find(|(_, cc)| cc.parameters.len() == *arg_count) {
+                    } else if let Some((j, _)) = ctors.iter().enumerate().find(|(jj, cc)| *jj != i && cc.parameters.len() == *arg_count) {
                         delegate_to[i] = Some(j);
                     }
                 }
