@@ -45,7 +45,7 @@ impl Parser {
     /// Parse the source code into an AST (strict: returns Err if any parse error occurred)
     pub fn parse(mut self) -> Result<Ast> {
         let start_span = self.current_span();
-        let initial_gas = self.global_gas;
+        let _initial_gas = self.global_gas;
         // Hard-gate unsupported Java 8+ syntaxes early: lambda (->) and method references (::)
         // so callers get a clear, immediate error.
         for tok in &self.tokens {
@@ -2388,7 +2388,7 @@ impl Parser {
                 Token::Identifier
             ) {
                 // Use a speculative parse of a type ref
-                if let Ok(mut ty) = (|| -> Result<TypeRef> { Ok(self.parse_type_ref()?) })() {
+                if let Ok(ty) = (|| -> Result<TypeRef> { Ok(self.parse_type_ref()?) })() {
                     if self.check(&Token::Dot) && self.peek_token_type(self.current + 1) == Some(&Token::Class) {
                         self.advance(); // '.'
                         self.advance(); // 'class'

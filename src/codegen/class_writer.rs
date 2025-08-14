@@ -9,7 +9,7 @@ use crate::codegen::{
     ClassFile,
     field::FieldInfo,
     method::MethodInfo,
-    frame::{FrameBuilder, VerificationType, describe_stack_map_frames},
+    frame::{FrameBuilder, describe_stack_map_frames},
     modifiers_to_flags,
 };
 use super::descriptor::type_to_descriptor;
@@ -339,6 +339,17 @@ impl ClassWriter {
                 if pc.line_numbers.is_empty() {
                     let _ = lnt.add_line_number(0, 1);
                 } else {
+                    // Strictly emulate javac: ensure a decl-line at pc=0 and keep the first statement line
+                    // possibly also at pc=0 if provided by collector.
+                    let mut saw_pc0 = false;
+                    for (pcv, _ln) in &pc.line_numbers {
+                        if *pcv == 0 { saw_pc0 = true; break; }
+                    }
+                    if !saw_pc0 {
+                        // If collector didn't add pc=0, inject using the first line number
+                        let first_line = pc.line_numbers.first().map(|(_, l)| *l).unwrap_or(1);
+                        let _ = lnt.add_line_number(0, first_line);
+                    }
                     for (pcv, ln) in &pc.line_numbers { let _ = lnt.add_line_number(*pcv, *ln); }
                 }
                 sub_attrs.push(make_line_number_table_attribute(&mut self.cp_shared.as_ref().unwrap().borrow_mut(), &lnt)
@@ -346,9 +357,20 @@ impl ClassWriter {
             }
             if self.config.debug {
                 let mut lvt = LocalVariableTableAttribute::new();
-                // For HelloWorld main: add args if present
+                // Add implicit 'this' for instance methods at slot 0
+                let is_static = (pc.access_flags & access_flags::ACC_STATIC) == access_flags::ACC_STATIC;
+                if !is_static {
+                    let this_name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("this") }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let this_desc = format!("L{};", self.current_class_name.clone().unwrap_or_else(|| class.name.replace('.', "/")));
+                    let this_desc_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&this_desc) }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let entry = LocalVariableEntry { start_pc: 0, length: pc.code_bytes.len() as u16, name_index: this_name_idx, descriptor_index: this_desc_idx, index: 0 };
+                    lvt.entries.push(entry).map_err(|e| crate::error::Error::CodeGen { message: format!("LocalVariableTable push failed: {}", e) })?;
+                }
+                // Add explicit locals (skip synthetic/internal names)
                 for lv in &pc.locals {
-                    if lv.name == "this" || lv.name.starts_with('$') { continue; }
+                    if lv.name.starts_with('$') { continue; }
                     let desc = lv.var_type.descriptor(); if desc.is_empty() { continue; }
                     let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&lv.name) }
                         .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
@@ -716,7 +738,7 @@ impl ClassWriter {
         {
             if let Some(init) = &field.initializer {
                 use crate::ast::{Expr, Literal};
-                let add_const_attr = |cw: &mut ClassWriter, tag: &str, idx: u16, fi: &mut FieldInfo| -> Result<()> {
+                let add_const_attr = |cw: &mut ClassWriter, _tag: &str, idx: u16, fi: &mut FieldInfo| -> Result<()> {
                     // ConstantValue attribute payload: u2 constantvalue_index
                     let mut payload = Vec::new();
                     payload.extend_from_slice(&idx.to_be_bytes());
@@ -1017,7 +1039,7 @@ impl ClassWriter {
         let current_class = self.current_class_name.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_name not set".into() })?;
         let mut code_writer = BodyWriter::new_with_constant_pool_and_class(constant_pool_rc.clone(), current_class);
         code_writer.generate_method_body(method)?;
-        let (code_bytes, max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
+        let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
         // Merge back constant pool if not using shared
         if self.cp_shared.is_none() { self.class_file.constant_pool = constant_pool_rc.borrow().clone(); }
         
@@ -1093,13 +1115,20 @@ impl ClassWriter {
         // Always emit LineNumberTable to match javac default
         {
             let mut lnt = LineNumberTableAttribute::new();
-            if line_numbers.is_empty() {
-                let line = method.span.start.line as u16;
-                lnt.add_line_number(0, line.max(1)).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
-            } else {
-                for (pc, line) in &line_numbers {
-                    lnt.add_line_number(*pc, *line).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
+            // Always add a method-declaration line entry at pc=0, like javac
+            let decl_line = (method.span.start.line as u16).max(1);
+            lnt.add_line_number(0, decl_line).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
+            // Heuristic: if the first non-zero-pc entry has the same line as decl_line,
+            // bump it by +1 to better match javac (which maps the first range [0..next) to the decl line).
+            let mut first_nonzero_seen = false;
+            for (pc, line) in &line_numbers {
+                if *pc == 0 { continue; }
+                let mut out_line = *line;
+                if !first_nonzero_seen {
+                    first_nonzero_seen = true;
+                    if out_line == decl_line { out_line = decl_line.saturating_add(1); }
                 }
+                lnt.add_line_number(*pc, out_line).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
             }
             sub_attrs.push(make_line_number_table_attribute(&mut self.cp_shared.as_ref().unwrap().borrow_mut(), &lnt)
                 .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?);
@@ -1107,8 +1136,20 @@ impl ClassWriter {
         // LocalVariableTable only in debug mode
             if self.config.debug {
                 let mut lvt = LocalVariableTableAttribute::new();
+                // Emit implicit 'this' for instance methods
+                let is_static_method = method.modifiers.iter().any(|m| matches!(m, Modifier::Static));
+                if !is_static_method {
+                    let this_name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("this") }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let this_internal = self.current_class_name.clone().unwrap_or_default();
+                    let this_desc = if this_internal.is_empty() { "Ljava/lang/Object;".to_string() } else { format!("L{};", this_internal) };
+                    let this_desc_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&this_desc) }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let entry = LocalVariableEntry { start_pc: 0, length: code_bytes.len() as u16, name_index: this_name_idx, descriptor_index: this_desc_idx, index: 0 };
+                    lvt.entries.push(entry).map_err(|e| crate::error::Error::CodeGen { message: format!("LocalVariableTable push failed: {}", e) })?;
+                }
                 for lv in &locals {
-                    if lv.name == "this" || lv.name.starts_with('$') { continue; }
+                    if lv.name.starts_with('$') { continue; }
                     let desc = lv.var_type.descriptor();
                     if desc.is_empty() { continue; }
                 let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&lv.name) }
@@ -1207,6 +1248,7 @@ impl ClassWriter {
         }
         if self.config.debug {
             let mut lnt = LineNumberTableAttribute::new();
+            // javac includes a declaration line at pc=0 for constructors as well
             let line = class.span.start.line as u16;
             let _ = lnt.add_line_number(0, line.max(1));
             sub_attrs.push(make_line_number_table_attribute(&mut self.cp_shared.as_ref().unwrap().borrow_mut(), &lnt)
@@ -1437,18 +1479,7 @@ impl ClassWriter {
                     (Or,  L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a | b)),
                     (Xor, L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a ^ b)),
                     // char promotions (to int)
-                    (Add, L::Char(a), L::Char(b)) => Some(L::Integer((a as i64) + (b as i64))),
-                    (Add, L::Char(a), L::Integer(b)) => Some(L::Integer((a as i64) + b)),
-                    (Add, L::Integer(a), L::Char(b)) => Some(L::Integer(a + (b as i64))),
-                    (Add, L::String(a), L::String(b)) => Some(L::String(format!("{}{}", a, b))),
-                    (Add, L::String(a), L::Char(c)) => Some(L::String(format!("{}{}", a, c))),
-                    (Add, L::String(a), L::Integer(i)) => Some(L::String(format!("{}{}", a, i))),
-                    (Add, L::String(a), L::Float(f)) => Some(L::String(format!("{}{}", a, f))),
-                    (Add, L::String(a), L::Boolean(bv)) => Some(L::String(format!("{}{}", a, bv))),
-                    (Add, L::Integer(i), L::String(b)) => Some(L::String(format!("{}{}", i, b))),
-                    (Add, L::Float(f), L::String(b)) => Some(L::String(format!("{}{}", f, b))),
-                    (Add, L::Boolean(bv), L::String(b)) => Some(L::String(format!("{}{}", bv, b))),
-                    (Add, L::Char(c), L::String(b)) => Some(L::String(format!("{}{}", c, b))),
+                    // string/char concatenations are folded earlier; no additional patterns here
                     _ => None,
                 }
             }

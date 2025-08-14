@@ -144,9 +144,10 @@ impl MethodWriter {
         // Enter new lexical scope
         self.scope_stack.push(Scope::default());
         for stmt in &block.statements {
-            // record a line number entry at the start of each statement
-            self.record_stmt_line(stmt);
+            // Generate statement first, then record its source line at the next pc.
+            // This avoids colliding with the method-declaration line at pc=0 (javac style).
             self.generate_statement(stmt)?;
+            self.record_stmt_line(stmt);
         }
         // Exit scope: close locals (length=end-start)
         if let Some(scope) = self.scope_stack.pop() {

@@ -384,7 +384,7 @@ fn same_param_arity(a: &str, b: &str) -> bool {
     fn count(desc: &str) -> usize {
         let mut it = desc.chars();
         while let Some(c) = it.next() { if c == '(' { break; } }
-        let mut n = 0usize; let mut depth = 0i32;
+        let mut n = 0usize; let _depth = 0i32;
         while let Some(c) = it.next() {
             match c {
                 ')' => break,

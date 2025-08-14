@@ -228,7 +228,20 @@ impl LocalType {
             LocalType::Long => "J".to_string(),
             LocalType::Float => "F".to_string(),
             LocalType::Double => "D".to_string(),
-            LocalType::Reference(class_name) => format!("L{};", class_name),
+            LocalType::Reference(class_name) => {
+                // Use internal names (pkg/Type). Map well-known java.lang simple names only.
+                let simple = !class_name.contains('/') && !class_name.contains('.') && !class_name.is_empty();
+                let internal = if simple {
+                    if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
+                        format!("java/lang/{}", class_name)
+                    } else {
+                        class_name.replace('.', "/")
+                    }
+                } else {
+                    class_name.replace('.', "/")
+                };
+                format!("L{};", internal)
+            }
             LocalType::Array(element_type) => format!("[{}", element_type.descriptor()),
         }
     }

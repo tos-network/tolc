@@ -1,6 +1,7 @@
 //! Utilities to build method/field descriptors
 
 use crate::ast::TypeRef;
+use crate::consts::JAVA_LANG_SIMPLE_TYPES;
 
 pub fn type_to_descriptor(ty: &TypeRef) -> String {
     let mut desc = String::new();
@@ -18,11 +19,10 @@ pub fn type_to_descriptor(ty: &TypeRef) -> String {
         _ => {
             // Map common java.lang simple names to fully-qualified internal names
             let simple = ty.name.as_str();
-            let mapped = match simple {
-                "String" | "Object" | "Throwable" | "Cloneable" | "Serializable" | "Integer" | "Long" | "Float" | "Double" | "Boolean" | "Character" | "Short" | "Byte" | "Void" => {
-                    format!("java/lang/{}", simple)
-                }
-                _ => ty.name.replace('.', "/"),
+            let mapped = if JAVA_LANG_SIMPLE_TYPES.contains(&simple) {
+                format!("java/lang/{}", simple)
+            } else {
+                ty.name.replace('.', "/")
             };
             return format!("{}L{};", desc, mapped);
         },

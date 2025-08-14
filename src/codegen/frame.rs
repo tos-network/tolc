@@ -1027,7 +1027,7 @@ fn set_local_type(state: &mut FrameState, idx: usize, t: VerificationType) {
     }
 }
 
-fn compress_frame(delta: u16, prev_locals: &Vec<VerificationType>, prev_stack: &Vec<VerificationType>, locals: &Vec<VerificationType>, stack: &Vec<VerificationType>) -> StackMapFrame {
+fn compress_frame(delta: u16, prev_locals: &Vec<VerificationType>, _prev_stack: &Vec<VerificationType>, locals: &Vec<VerificationType>, stack: &Vec<VerificationType>) -> StackMapFrame {
     // Normalize trailing Top in locals to improve compression
     fn trim_tops(v: &Vec<VerificationType>) -> Vec<VerificationType> {
         use VerificationType::Top;
@@ -1207,7 +1207,7 @@ fn map_return_type_from_desc(cp: &mut ConstantPool, desc: &str) -> Option<Verifi
     }
 }
 
-fn parse_field_type(bytes: &[u8], mut i: usize, cp: &mut ConstantPool) -> (Option<VerificationType>, usize) {
+fn parse_field_type(bytes: &[u8], i: usize, cp: &mut ConstantPool) -> (Option<VerificationType>, usize) {
     use VerificationType::*;
     if i >= bytes.len() { return (None, i); }
     match bytes[i] {
