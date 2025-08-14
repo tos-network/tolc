@@ -11,6 +11,22 @@ fn narrowing_assignments_in_range_ok_out_of_range_error() {
 }
 
 #[test]
+fn narrowing_accepts_constant_expressions_in_range() {
+    ok(r#"package p; class T { void t(){
+        byte b = 100 + 27 - 0;         // 127 fits
+        short s = (1 << 14) - 1;       // 16383 fits
+        char c = 'A' + 1;              // 66 fits in char
+    } }"#);
+}
+
+#[test]
+fn narrowing_rejects_constant_expressions_out_of_range() {
+    err_contains(r#"package p; class T { void t(){ byte b = 100 + 28; } }"#, "Incompatible initializer");
+    err_contains(r#"package p; class T { void t(){ short s = (1 << 15); } }"#, "Incompatible initializer");
+    err_contains(r#"package p; class T { void t(){ char c = -1; } }"#, "Incompatible initializer");
+}
+
+#[test]
 fn const_division_by_zero_reports() {
     err_contains(
         r#"package p; class T { void t(){ int x = 1/0; } }"#,

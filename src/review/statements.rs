@@ -1558,29 +1558,27 @@ fn walk_stmt_locals(
                     if let Some(init) = &var.initializer {
                         // Check DA on initializer
                         check_expr_definite_assignment(init, scopes, final_params)?;
-                        // Only check literal compatibility for now
-                        if let Some(found) = infer_literal_primitive_or_string(init) {
-                            let expected = vd.type_ref.name.as_str();
+                        let expected = vd.type_ref.name.as_str();
+                        // Accept constant integral expressions for byte/short/char when in range.
+                        // If not a constant expression, defer to regular typing (do not reject here).
+                        if matches!(expected, "byte"|"short"|"char") {
+                            if let Some((val, _k)) = eval_const_int_kind(init) {
+                                let ok = match expected {
+                                    "byte" => val >= i8::MIN as i64 && val <= i8::MAX as i64,
+                                    "short" => val >= i16::MIN as i64 && val <= i16::MAX as i64,
+                                    "char" => val >= 0 && val <= u16::MAX as i64,
+                                    _ => true,
+                                };
+                                if !ok { return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: "int".to_string() }); }
+                            } else if let Some(found) = infer_literal_primitive_or_string(init) {
+                                if !is_assignable_literal(expected, found) {
+                                    return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: found.to_string() });
+                                }
+                            } // non-constant: allow; general checks happen elsewhere
+                        } else if let Some(found) = infer_literal_primitive_or_string(init) {
+                            // General literal compatibility checks
                             if !is_assignable_literal(expected, found) {
                                 return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: found.to_string() });
-                            } else {
-                                // Constant narrowing conversions for byte/short/char when in range
-                                match expected {
-                                    "byte" | "short" | "char" => {
-                                        if let Some((val, _k)) = eval_const_int_kind(init) {
-                                            let ok = match expected {
-                                                "byte" => val >= i8::MIN as i64 && val <= i8::MAX as i64,
-                                                "short" => val >= i16::MIN as i64 && val <= i16::MAX as i64,
-                                                "char" => val >= 0 && val <= u16::MAX as i64,
-                                                _ => true,
-                                            };
-                                            if !ok {
-                                                return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: found.to_string() });
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
                             }
                         }
                         // mark as definitely assigned
@@ -3030,9 +3028,9 @@ fn expr_kind(expr: &Expr) -> &'static str {
 fn is_assignable_literal(expected: &str, found: &str) -> bool {
     if found == "null" { return true; }
     match expected {
-        // Narrowing allowed only for literal expressions checked elsewhere; type here is a hint
-        "byte" => matches!(found, "int"|"char"),
-        "short" => matches!(found, "int"|"char"),
+        // Narrowing allowed for constants; also accept explicit casts recognized by inference
+        "byte" => matches!(found, "byte"|"int"|"char"),
+        "short" => matches!(found, "short"|"int"|"char"),
         "char" => matches!(found, "char"|"int"),
         "int" => found == "int",
         "long" => matches!(found, "int"),
@@ -3048,10 +3046,17 @@ fn is_assignable_primitive_or_string(expected: &str, found: &str) -> bool {
     if found == "null" { return expected != "int" && expected != "long" && expected != "double" && expected != "float" && expected != "boolean" && expected != "char"; }
     if expected == found { return true; }
     match expected {
-        "double" => matches!(found, "float"|"int"|"long"),
-        "float" => matches!(found, "int"|"long"),
-        "long" => matches!(found, "int"),
-        "int" => matches!(found, "char"),
+        // Primitive widening conversions
+        // byte -> short -> int -> long -> float -> double
+        // short -> int -> long -> float -> double
+        // char -> int -> long -> float -> double
+        // int -> long -> float -> double
+        // long -> float -> double
+        // float -> double
+        "double" => matches!(found, "float"|"long"|"int"|"short"|"byte"|"char"),
+        "float" => matches!(found, "long"|"int"|"short"|"byte"|"char"),
+        "long" => matches!(found, "int"|"short"|"byte"|"char"),
+        "int" => matches!(found, "short"|"byte"|"char"),
         "String" => found == "String",
         _ => false,
     }
@@ -3061,9 +3066,7 @@ fn is_wrapper_type(t: &str) -> bool {
     matches!(t, "Integer"|"Long"|"Float"|"Double"|"Boolean"|"Character"|"String")
 }
 
-fn is_primitive_type(t: &str) -> bool {
-    matches!(t, "int"|"long"|"float"|"double"|"boolean"|"char")
-}
+fn is_primitive_type(t: &str) -> bool { matches!(t, "byte"|"short"|"int"|"long"|"float"|"double"|"boolean"|"char") }
 
 fn boxing_partner_of(prim: &str) -> Option<&'static str> {
     match prim {
@@ -3172,8 +3175,10 @@ fn infer_expr_primitive_or_string(expr: &Expr) -> Option<&'static str> {
         Expr::Parenthesized(inner) => infer_expr_primitive_or_string(inner),
         // cast to a known primitive or String
         Expr::Cast(c) => match c.target_type.name.as_str() {
-            "int" | "long" | "float" | "double" | "boolean" | "char" | "String" => Some(
+            "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "String" => Some(
                 match c.target_type.name.as_str() {
+                    "byte" => "byte",
+                    "short" => "short",
                     "int" => "int",
                     "long" => "long",
                     "float" => "float",

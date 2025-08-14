@@ -24,7 +24,7 @@ Notes
 | Field structure | ConstantValue only on static; constant kind valid | ✓ | `verify/fields.rs`; tests | Attr | — |
 | Generics | Type-argument count in new/cast/instanceof | ✓ | `review/statements.rs`; tests | Attr | Strict match; in compat mode only raw (0 args) usage is tolerated |
 | Generics | Upper-bound checks (local index/explicit imports) | ✓ | `review/types.rs`, `review/statements.rs`; tests: `review_generics_upper_bounds_tests.rs` | Attr | Bounds validated across new/cast/instanceof, including intersection (A & I) upper bounds; wildcard erasure subset: `? extends B` treated as `B`, bare `?` as `Object`; wildcards disallowed in constructor type args. Full capture/inference remains out of scope. |
-| indy/dynamic | Dynamic/InvokeDynamic require BootstrapMethods | ✓ | `verify/constant_pool.rs` | JVMS | Structural; no actual invokedynamic semantics |
+| indy/dynamic | Dynamic/InvokeDynamic require BootstrapMethods | ✗ | — | JVMS | Not supported: no `invokedynamic` emission or acceptance. Classfiles using `invokedynamic` are rejected. Lambdas are not lowered via `LambdaMetafactory`. |
 | InnerClasses | Index kinds; linkage; name/owner consistency | ✓ | `verify/attributes.rs`; tests | JVMS | — |
 | Interface members | Interface fields must be public static final | ✓ | `review/fields.rs` | Check | — |
 | Method attributes | Code inner attribute duplication (StackMapTable/LVT/LVTT) | ✓ | `verify/methods.rs` | Attr | — |
@@ -70,7 +70,7 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 | Generics | Generic method type inference (poly expressions) | ✗ | JLS 15.12.2; most-specific selection with inferred type args |
 | Generics | Wildcards in constructor type args and nested use sites | ◐ | Basic checks done; full legality and capture missing |
 | Overload resolution | Complete JLS ordering (boxing/unboxing, varargs vs fixed, primitive promotions, most-specific by subtyping) | ◐ | Implemented simplified ranking; needs full tie-breaks (JLS 15.12) and applicability-by-subtyping pass |
-| Lambdas/method refs | Parsing, target typing, inference, exception typing | ✗ | Java 8 feature; out-of-scope so far |
+| Lambdas/method refs | Parsing, target typing, inference, exception typing | ✗ | Unsupported: lambda `->` and method reference `::` syntax cause parser errors by design; no `invokedynamic`/`LambdaMetafactory` support. |
 | Flow/DA | Blank final fields: definite assignment across constructors/this()/super() and DA/DU rules | ◐ | Implemented path-sensitive checks across constructors with this(...) delegation and instance initializer blocks in `review/methods.rs`: each constructor path must assign each instance final exactly once (or have an initializer), and multiple assignments are rejected; assignments after this(...) caller only. Heuristics cover unresolved delegate targets. Remaining: full JLS edge-cases and super() ordering nuances. |
 | Flow/DA | Full reachability (DR) and DA for complex labeled break/continue with try/finally nesting | ◐ | Core cases handled; needs exhaustive label/try/finally interactions |
 | Flow/DA | Switch analysis parity (strings/enums constant folding, exhaustive per-entry fallthrough paths) | ◐ | Added String/enum constant folding, duplicate-label checks, and enum-exhaustive coverage (no empty path when all constants are listed). Remaining: broader String constant detection beyond literals, and deeper per-label reachability nuances. |
@@ -80,17 +80,23 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 | Overrides | Generic override checks with erasure/bridges, ACC_SYNTHETIC bridge expectations | ✓ | Visibility/covariant returns/throws narrowing enforced. Bridge methods synthesized at codegen: `Comparable<T>#compareTo(T)` → `compareTo(Object)`, `Comparator<T>#compare(T,T)` → `compare(Object,Object)`, `List<E>#get(I)` → `get(I)Ljava/lang/Object;`. Verification enforces `ACC_BRIDGE|ACC_SYNTHETIC` on bridges and checks erased-target descriptor exists in the declaring class. |
 | Parser | Lambda/method ref grammar, full annotation positions, multi-resource TWR details | ◐/✗ | Parser covers most statements/expressions; lambda/mref not yet |
 | Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Baseline bounds and monotonic checks; full type lattice merge not implemented |
-| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Progressed: extended folding to include long/double arithmetic and char→int promotions; guarded div/mod by zero (no fold). Covered in switch (int/String/enum) and codegen ConstantValue for `static final` across primitives/String. Where: `review/statements.rs` (switch folding), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`. Remaining: mixed-type folding with casts/widening, boolean ops, and full javac parity incl. diagnostics for constant-time div/mod by zero. |
+| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Advanced: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; broadened String concatenation (either side String); shift masking parity (int 5-bit, long 6-bit when left is long). Guarded div/mod by zero (no fold) with review-time diagnostic. Where: `review/statements.rs` (switch folding + diagnostic), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`, `tests/review_flow_tests.rs`. Remaining: fuller long parity in bitwise/shift without explicit casts, JLS NaN/Infinity comparison semantics, broader String concat shapes, and constant narrowing rules. |
 
 Planned sequencing to reach 100%
 - Short-term: switch DA parity (enum/String) ✓, name-resolution precedence ✓, override-bridge checks ✓, annotation placement matrix (declaration-site duplicates ✓; type-use matrix ✓ with retention-based visible/invisible emission), generics upper-bound corner cases ✓, full overload tie-breaks ✓.
- - Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ✗, StackMap merge improvements ◐, constant expression evaluation ◐ (extended long/double/char folding; div/mod-by-zero guard; next: mixed-type casts/widening and diagnostics).
+- Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ✗, StackMap merge improvements ◐, constant expression evaluation ◐ (long/double/char folding; mixed-type casts/widening; boolean/shift folding; relational comparisons; String concat broadened; div/mod-by-zero guard + diagnostic; NaN/Infinity semantics done; next: long parity without casts, constant narrowing). 
 
 #### Mid-term progress updates (Aug 2025)
 - Constant expressions
-  - Extended compile-time folding: long/double arithmetic; char→int promotions; string concat folding retained
-  - Guarded div/mod by zero during folding (no fold performed)
-  - Implemented in `review/statements.rs` (switch folding) and `codegen/class_writer.rs` (field `ConstantValue` folding)
-  - Tests added in `tests/const_folding_tests.rs`
-  - Next: emit diagnostics for constant-time div/mod by zero; add mixed-type cast/widening-aware folding; broaden boolean/shift semantics to match javac
-- Long-term: lambdas/method references (parser + type inference + flow), full verification type lattice, repeated annotations semantics.
+  - Extended compile-time folding: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; int/long shift masking parity; broadened String concatenation
+  - Guarded div/mod by zero during folding (no fold) and review-time diagnostic for constant div/mod by zero
+  - Implemented in `review/statements.rs` (switch folding + diagnostic) and `codegen/class_writer.rs` (field `ConstantValue` folding)
+  - Tests added in `tests/const_folding_tests.rs` and diagnostic checks in `tests/review_flow_tests.rs`
+  - Completed: JLS-consistent NaN/Infinity comparison semantics in constant folding
+  - Next: handle long parity without explicit casts; implement constant narrowing conversions (byte/short/char when in range)
+
+- Long-term:
+  - Lambdas/method refs: explicitly unsupported by design; parser reports errors for `->` and `::`; no `invokedynamic`/`LambdaMetafactory` emission or acceptance. Revisit only if policy changes.
+  - Full verification type lattice and StackMap frame merging per JVMS (beyond linear bounds checks).
+  - Repeated annotations semantics across declaration and TYPE_USE positions.
+  - Generics capture conversion and full generic method type inference (poly expressions) if scope expands.

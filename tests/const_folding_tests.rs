@@ -57,4 +57,14 @@ fn static_final_long_shift_masking_behavior() {
     ok(r#"package p; class C { static final int I = ((int)((long)1 << 65)); static final int J = (int)( ( (9223372036854775807L) >> 70) ); }"#);
 }
 
+#[test]
+fn static_final_long_bitwise_urshift_and_mask() {
+    ok(r#"package p; class C { static final int U = (int)(((long)-1) >>> 40); int x(){ return U; } }"#);
+}
+
+#[test]
+fn static_final_string_concat_more_shapes() {
+    ok(r#"package p; class C { static final String S = ("a" + 'b') + 3 + false; }"#);
+}
+
 
