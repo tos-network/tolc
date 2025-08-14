@@ -373,8 +373,32 @@ impl ClassWriter {
         }
 
         // Synthesize bridge methods for common erased generics patterns (subset).
-        // Currently supports: Comparable<T>#compareTo(T) -> bridge compareTo(Object)
+        // Supports:
+        // - Comparable<T>#compareTo(T) -> bridge compareTo(Object)
+        // - Comparator<T>#compare(T,T) -> bridge compare(Object,Object)
+        // - List<E>#get(int):E -> bridge get(int):Object
         self.synthesize_bridges(class)?;
+
+        // Class-level type-use annotations: extends / implements / class type parameter bounds
+        {
+            let mut visible: Vec<crate::codegen::attribute::TypeAnnotationEntry> = Vec::new();
+            let mut invisible: Vec<crate::codegen::attribute::TypeAnnotationEntry> = Vec::new();
+            if let Some(ext) = &class.extends { self.collect_type_use_entries_split(ext, &mut visible, &mut invisible)?; }
+            for imp in &class.implements { self.collect_type_use_entries_split(imp, &mut visible, &mut invisible)?; }
+            for tp in &class.type_params { for b in &tp.bounds { self.collect_type_use_entries_split(b, &mut visible, &mut invisible)?; } }
+            if !visible.is_empty() {
+                let name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("RuntimeVisibleTypeAnnotations") }
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                let attr = crate::codegen::attribute::RuntimeVisibleTypeAnnotationsAttribute { annotations: visible };
+                self.class_file.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeVisibleTypeAnnotations(attr)));
+            }
+            if !invisible.is_empty() {
+                let name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("RuntimeInvisibleTypeAnnotations") }
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                let attr = crate::codegen::attribute::RuntimeInvisibleTypeAnnotationsAttribute { annotations: invisible };
+                self.class_file.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeInvisibleTypeAnnotations(attr)));
+            }
+        }
 
         // Add SourceFile attribute after methods
         let filename = format!("{}.java", class.name);
@@ -470,6 +494,109 @@ impl ClassWriter {
         let named = NamedAttribute::new(code_name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload: attribute_bytes }));
         method_info.attributes.push(named);
         self.class_file.methods.push(method_info);
+        // Comparator<T>#compare(T,T) -> compare(Object,Object)I
+        self.synthesize_comparator_bridge(class)?;
+        // List<E>#get(I)TE -> get(I)Ljava/lang/Object;
+        self.synthesize_list_get_bridge(class)?;
+        Ok(())
+    }
+
+    fn synthesize_comparator_bridge(&mut self, class: &ClassDecl) -> Result<()> {
+        let implements_comparator = class.implements.iter().any(|t| t.name == "Comparator" || t.name.ends_with("Comparator"));
+        if !implements_comparator { return Ok(()) }
+        // Find concrete compare(T,T)
+        let target = class.body.iter().find_map(|m| {
+            if let ClassMember::Method(md) = m {
+                if md.name == "compare" && md.parameters.len() == 2 {
+                    let p0 = &md.parameters[0].type_ref.name; let p1 = &md.parameters[1].type_ref.name;
+                    let is_prim = |s: &str| matches!(s, "int"|"long"|"float"|"double"|"boolean"|"char"|"short"|"byte");
+                    if !is_prim(p0) && !is_prim(p1) && p0 != "Object" && p1 != "Object" {
+                        return Some(md);
+                    }
+                }
+            }
+            None
+        });
+        let Some(target) = target else { return Ok(()) };
+        let mut code_bytes: Vec<u8> = Vec::new();
+        // aload_0, aload_1, checkcast T0, aload_2, checkcast T1, invokevirtual compare(T0,T1)I, ireturn
+        code_bytes.push(opcodes::ALOAD_0);
+        code_bytes.push(opcodes::ALOAD_1);
+        let t0_desc = super::descriptor::type_to_descriptor(&target.parameters[0].type_ref);
+        let t0_cls = if t0_desc.starts_with('L') && t0_desc.ends_with(';') { t0_desc[1..t0_desc.len()-1].to_string() } else { "java/lang/Object".to_string() };
+        let t0_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_class(&t0_cls) }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        code_bytes.push(opcodes::CHECKCAST); code_bytes.extend_from_slice(&t0_idx.to_be_bytes());
+        code_bytes.push(opcodes::ALOAD_2);
+        let t1_desc = super::descriptor::type_to_descriptor(&target.parameters[1].type_ref);
+        let t1_cls = if t1_desc.starts_with('L') && t1_desc.ends_with(';') { t1_desc[1..t1_desc.len()-1].to_string() } else { "java/lang/Object".to_string() };
+        let t1_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_class(&t1_cls) }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        code_bytes.push(opcodes::CHECKCAST); code_bytes.extend_from_slice(&t1_idx.to_be_bytes());
+        let this_internal = self.current_class_name.clone().unwrap_or_else(|| class.name.replace('.', "/"));
+        let desc_concrete = format!("({}{})I", super::descriptor::type_to_descriptor(&target.parameters[0].type_ref), super::descriptor::type_to_descriptor(&target.parameters[1].type_ref));
+        let mref = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(&this_internal, "compare", &desc_concrete) }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        code_bytes.push(opcodes::INVOKEVIRTUAL); code_bytes.extend_from_slice(&mref.to_be_bytes());
+        code_bytes.push(opcodes::IRETURN);
+        // simple max_stack
+        let computed_max_stack: u16 = 3; // this + 2 checked casts is safe upper bound for this stub
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&computed_max_stack.to_be_bytes());
+        payload.extend_from_slice(&3u16.to_be_bytes()); // max_locals: this, o1, o2
+        payload.extend_from_slice(&(code_bytes.len() as u32).to_be_bytes()); payload.extend_from_slice(&code_bytes);
+        payload.extend_from_slice(&0u16.to_be_bytes()); payload.extend_from_slice(&0u16.to_be_bytes());
+        let access = access_flags::ACC_PUBLIC | access_flags::ACC_BRIDGE | access_flags::ACC_SYNTHETIC;
+        let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("compare") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let descriptor_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("(Ljava/lang/Object;Ljava/lang/Object;)I") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let mut mi = MethodInfo::new(access, name_index, descriptor_index);
+        let code_name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Code") }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        mi.attributes.push(NamedAttribute::new(code_name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload })));
+        self.class_file.methods.push(mi);
+        Ok(())
+    }
+
+    fn synthesize_list_get_bridge(&mut self, class: &ClassDecl) -> Result<()> {
+        let implements_list = class.implements.iter().any(|t| t.name == "List" || t.name.ends_with("List"));
+        if !implements_list { return Ok(()) }
+        // Find concrete get(int)
+        let target = class.body.iter().find_map(|m| {
+            if let ClassMember::Method(md) = m {
+                if md.name == "get" && md.parameters.len() == 1 && md.parameters[0].type_ref.name == "int" {
+                    // Return type must be reference and not Object to warrant a bridge
+                    if let Some(rt) = &md.return_type { if rt.name != "Object" { return Some(md); } }
+                }
+            }
+            None
+        });
+        let Some(target) = target else { return Ok(()) };
+        // aload_0, iload_1, invokevirtual get(I)T, areturn
+        let mut code_bytes: Vec<u8> = Vec::new();
+        code_bytes.push(opcodes::ALOAD_0);
+        code_bytes.push(0x1B); // ILOAD_1
+        let this_internal = self.current_class_name.clone().unwrap_or_else(|| class.name.replace('.', "/"));
+        let desc_concrete = format!("(I){}", super::descriptor::type_to_descriptor(&target.return_type.clone().unwrap()));
+        let mref = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(&this_internal, "get", &desc_concrete) }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        code_bytes.push(opcodes::INVOKEVIRTUAL); code_bytes.extend_from_slice(&mref.to_be_bytes());
+        code_bytes.push(opcodes::ARETURN);
+        let computed_max_stack: u16 = 2;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&computed_max_stack.to_be_bytes());
+        payload.extend_from_slice(&2u16.to_be_bytes()); // this + int
+        payload.extend_from_slice(&(code_bytes.len() as u32).to_be_bytes()); payload.extend_from_slice(&code_bytes);
+        payload.extend_from_slice(&0u16.to_be_bytes()); payload.extend_from_slice(&0u16.to_be_bytes());
+        let access = access_flags::ACC_PUBLIC | access_flags::ACC_BRIDGE | access_flags::ACC_SYNTHETIC;
+        let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("get") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let descriptor_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("(I)Ljava/lang/Object;") }
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let mut mi = MethodInfo::new(access, name_index, descriptor_index);
+        let code_name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Code") }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        mi.attributes.push(NamedAttribute::new(code_name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload })));
+        self.class_file.methods.push(mi);
         Ok(())
     }
     
@@ -633,6 +760,24 @@ impl ClassWriter {
                 }
             }
         }
+        // Emit field type-use annotations (visible/invisible)
+        {
+            let mut visible: Vec<crate::codegen::attribute::TypeAnnotationEntry> = Vec::new();
+            let mut invisible: Vec<crate::codegen::attribute::TypeAnnotationEntry> = Vec::new();
+            self.collect_type_use_entries_split(&field.type_ref, &mut visible, &mut invisible)?;
+            if !visible.is_empty() {
+                let name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("RuntimeVisibleTypeAnnotations") }
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                let attr = crate::codegen::attribute::RuntimeVisibleTypeAnnotationsAttribute { annotations: visible };
+                field_info.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeVisibleTypeAnnotations(attr)));
+            }
+            if !invisible.is_empty() {
+                let name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("RuntimeInvisibleTypeAnnotations") }
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                let attr = crate::codegen::attribute::RuntimeInvisibleTypeAnnotationsAttribute { annotations: invisible };
+                field_info.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeInvisibleTypeAnnotations(attr)));
+            }
+        }
         self.class_file.fields.push(field_info);
         
         Ok(())
@@ -660,9 +805,99 @@ impl ClassWriter {
             let named = NamedAttribute::new(_name_index.into(), code_attr_info);
             method_info.attributes.push(named);
         }
+
+        // Emit RuntimeVisible/InvisibleTypeAnnotations for method return/params/throws and method type parameter bounds
+        let mut visible: Vec<crate::codegen::attribute::TypeAnnotationEntry> = Vec::new();
+        let mut invisible: Vec<crate::codegen::attribute::TypeAnnotationEntry> = Vec::new();
+        if let Some(rt) = &method.return_type { self.collect_type_use_entries_split(rt, &mut visible, &mut invisible)?; }
+        for p in &method.parameters { self.collect_type_use_entries_split(&p.type_ref, &mut visible, &mut invisible)?; }
+        for t in &method.throws { self.collect_type_use_entries_split(t, &mut visible, &mut invisible)?; }
+        for tp in &method.type_params { for b in &tp.bounds { self.collect_type_use_entries_split(b, &mut visible, &mut invisible)?; } }
+        if !visible.is_empty() {
+            let name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("RuntimeVisibleTypeAnnotations") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let attr = crate::codegen::attribute::RuntimeVisibleTypeAnnotationsAttribute { annotations: visible };
+            method_info.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeVisibleTypeAnnotations(attr)));
+        }
+        if !invisible.is_empty() {
+            let name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("RuntimeInvisibleTypeAnnotations") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let attr = crate::codegen::attribute::RuntimeInvisibleTypeAnnotationsAttribute { annotations: invisible };
+            method_info.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeInvisibleTypeAnnotations(attr)));
+        }
         
         self.class_file.methods.push(method_info);
         
+        Ok(())
+    }
+
+    fn collect_type_use_entries_deep(&mut self, tref: &TypeRef, out: &mut Vec<crate::codegen::attribute::TypeAnnotationEntry>) -> Result<()> {
+        // Current node
+        if !tref.annotations.is_empty() {
+            for ann in &tref.annotations {
+                let type_name_utf = {
+                    let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                    let desc = if ann.name.starts_with('L') && ann.name.ends_with(';') {
+                        ann.name.clone()
+                    } else {
+                        let mut s = ann.name.replace('.', "/");
+                        if !s.starts_with('L') { s = format!("L{};", s); }
+                        s
+                    };
+                    cp.try_add_utf8(&desc).map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
+                };
+                out.push(crate::codegen::attribute::TypeAnnotationEntry {
+                    type_name: type_name_utf.into(),
+                    retention: Some(crate::codegen::attribute::RetentionPolicy::Runtime),
+                    targets: vec![crate::codegen::attribute::AnnotationTarget::TypeUse],
+                });
+            }
+        }
+        // Recurse into type arguments
+        for ta in &tref.type_args {
+            match ta {
+                crate::ast::TypeArg::Type(inner) => { self.collect_type_use_entries_deep(inner, out)?; }
+                crate::ast::TypeArg::Wildcard(w) => {
+                    if let Some((_k, btr)) = &w.bound { self.collect_type_use_entries_deep(btr, out)?; }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_type_use_entries_split(&mut self, tref: &TypeRef, out_visible: &mut Vec<crate::codegen::attribute::TypeAnnotationEntry>, out_invisible: &mut Vec<crate::codegen::attribute::TypeAnnotationEntry>) -> Result<()> {
+        // Current node
+        if !tref.annotations.is_empty() {
+            for ann in &tref.annotations {
+                let type_name_utf = {
+                    let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                    let desc = if ann.name.starts_with('L') && ann.name.ends_with(';') {
+                        ann.name.clone()
+                    } else {
+                        let mut s = ann.name.replace('.', "/");
+                        if !s.starts_with('L') { s = format!("L{};", s); }
+                        s
+                    };
+                    cp.try_add_utf8(&desc).map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
+                };
+                // TODO: infer retention from @Retention on the annotation type; default to Runtime (visible)
+                let entry = crate::codegen::attribute::TypeAnnotationEntry {
+                    type_name: type_name_utf.into(),
+                    retention: Some(crate::codegen::attribute::RetentionPolicy::Runtime),
+                    targets: vec![crate::codegen::attribute::AnnotationTarget::TypeUse],
+                };
+                out_visible.push(entry);
+            }
+        }
+        // Recurse into type arguments and wildcard bounds
+        for ta in &tref.type_args {
+            match ta {
+                crate::ast::TypeArg::Type(inner) => { self.collect_type_use_entries_split(inner, out_visible, out_invisible)?; }
+                crate::ast::TypeArg::Wildcard(w) => {
+                    if let Some((_k, btr)) = &w.bound { self.collect_type_use_entries_split(btr, out_visible, out_invisible)?; }
+                }
+            }
+        }
         Ok(())
     }
     

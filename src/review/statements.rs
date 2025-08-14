@@ -402,23 +402,51 @@ fn fold_case_value_for_int_switch(expr: &Expr) -> Option<i32> {
 
 // String switch support (subset): treat only literal strings and parenthesized literals as constants
 fn fold_selector_value_for_string_switch(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Literal(lit) => {
-            if let crate::ast::Literal::String(s) = &lit.value { Some(s.clone()) } else { None }
+    // Extend: allow constant concatenations of strings and char/int literals where fully constant
+    fn fold_str(e: &Expr) -> Option<String> {
+        match e {
+            Expr::Literal(lit) => match &lit.value {
+                crate::ast::Literal::String(s) => Some(s.clone()),
+                crate::ast::Literal::Char(c) => Some(((*c as u32) as u8 as char).to_string()),
+                crate::ast::Literal::Integer(i) => Some(i.to_string()),
+                _ => None,
+            },
+            Expr::Parenthesized(inner) => fold_str(inner),
+            Expr::Binary(b) => {
+                use crate::ast::BinaryOp::Add;
+                if matches!(b.operator, Add) {
+                    if let (Some(ls), Some(rs)) = (fold_str(&b.left), fold_str(&b.right)) { return Some(format!("{}{}", ls, rs)); }
+                }
+                None
+            }
+            _ => None,
         }
-        Expr::Parenthesized(inner) => fold_selector_value_for_string_switch(inner),
-        _ => None,
     }
+    fold_str(expr)
 }
 
 fn fold_case_value_for_string_switch(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Literal(lit) => {
-            if let crate::ast::Literal::String(s) = &lit.value { Some(s.clone()) } else { None }
+    // Match semantics of selector folding
+    fn fold_str(e: &Expr) -> Option<String> {
+        match e {
+            Expr::Literal(lit) => match &lit.value {
+                crate::ast::Literal::String(s) => Some(s.clone()),
+                crate::ast::Literal::Char(c) => Some(((*c as u32) as u8 as char).to_string()),
+                crate::ast::Literal::Integer(i) => Some(i.to_string()),
+                _ => None,
+            },
+            Expr::Parenthesized(inner) => fold_str(inner),
+            Expr::Binary(b) => {
+                use crate::ast::BinaryOp::Add;
+                if matches!(b.operator, Add) {
+                    if let (Some(ls), Some(rs)) = (fold_str(&b.left), fold_str(&b.right)) { return Some(format!("{}{}", ls, rs)); }
+                }
+                None
+            }
+            _ => None,
         }
-        Expr::Parenthesized(inner) => fold_case_value_for_string_switch(inner),
-        _ => None,
     }
+    fold_str(expr)
 }
 
 // Enum switch support (subset, using global index): support qualified enum constants in selector,

@@ -91,12 +91,7 @@ impl MethodWriter {
             self.generate_return(return_type)?;
         } else {
             // Create a void type reference for void methods
-            let void_type = TypeRef {
-                name: "void".to_string(),
-                type_args: Vec::new(),
-                array_dims: 0,
-                span: method.span,
-            };
+            let void_type = TypeRef { name: "void".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: method.span };
             self.generate_return(&void_type)?;
         }
         
@@ -130,12 +125,7 @@ impl MethodWriter {
     /// Convert AST TypeRef to LocalType
     fn convert_type_ref_to_local_type(&self, type_ref: &TypeRef) -> LocalType {
         if type_ref.array_dims > 0 {
-            let element_type = self.convert_type_ref_to_local_type(&TypeRef {
-                name: type_ref.name.clone(),
-                type_args: type_ref.type_args.clone(),
-                array_dims: 0,
-                span: type_ref.span,
-            });
+            let element_type = self.convert_type_ref_to_local_type(&TypeRef { name: type_ref.name.clone(), type_args: type_ref.type_args.clone(), annotations: Vec::new(), array_dims: 0, span: type_ref.span });
             LocalType::Array(Box::new(element_type))
         } else {
             match type_ref.name.as_str() {
@@ -212,12 +202,7 @@ impl MethodWriter {
                 if let Some(expr) = &return_stmt.value {
                     self.generate_expression(expr)?;
                 }
-                self.generate_return(&TypeRef {
-                    name: "void".to_string(),
-                    type_args: Vec::new(),
-                    array_dims: 0,
-                    span: return_stmt.span,
-                })?;
+                self.generate_return(&TypeRef { name: "void".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: return_stmt.span })?;
             }
             Stmt::Break(break_stmt) => {
                 let target = if let Some(ref name) = break_stmt.label {
@@ -265,7 +250,7 @@ impl MethodWriter {
                         }
                         TryResource::Expr { expr, .. } => {
                             self.generate_expression(expr)?;
-                            let tref = TypeRef { name: "java/lang/AutoCloseable".to_string(), type_args: Vec::new(), array_dims: 0, span: try_stmt.span };
+                            let tref = TypeRef { name: "java/lang/AutoCloseable".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: try_stmt.span };
                             let local_index = self.allocate_local_variable(&format!("$res{}", idx), &tref);
                             let local_type = self.convert_type_ref_to_local_type(&tref);
                             self.store_local_variable(local_index, &local_type)?;
@@ -290,7 +275,7 @@ impl MethodWriter {
                 self.emit_label_reference(after);
                 // Handler
                 self.mark_label(handler);
-                let thr_t = TypeRef { name: "java/lang/Throwable".to_string(), type_args: Vec::new(), array_dims: 0, span: try_stmt.span };
+                let thr_t = TypeRef { name: "java/lang/Throwable".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: try_stmt.span };
                 let primary_exc = self.allocate_local_variable("$primary_exc", &thr_t);
                 let thr_local_type = self.convert_type_ref_to_local_type(&thr_t);
                 self.store_local_variable(primary_exc, &thr_local_type)?;

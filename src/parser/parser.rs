@@ -593,6 +593,8 @@ impl Parser {
     
     fn parse_type_ref(&mut self) -> Result<TypeRef> {
         let start_span = self.current_span();
+        // Leading type-use annotations
+        let annotations = self.parse_annotations()?;
         // Either primitive or qualified identifier
         let name = match self.peek().token_type() {
             Token::Boolean | Token::Byte | Token::Short | Token::Int | Token::Long | Token::Char | Token::Float | Token::Double | Token::Void => {
@@ -616,28 +618,41 @@ impl Parser {
             Vec::new()
         };
         
+        // Array dimensions, allowing type-use annotations before each [] (e.g., String @A [] @B [])
         let mut array_dims = 0;
         {
             let mut steps: usize = 0;
-            while self.match_token(&Token::LBracket) {
+            loop {
                 if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
-            let before = self.current;
-            self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
-            array_dims += 1;
-            if self.current == before { if !self.is_at_end() { self.advance(); } }
+                // Consume any annotations appearing before an array dimension
+                if self.check(&Token::At) {
+                    // We only allow these annotations here if they are immediately followed by a '[' dimension
+                    let _dim_anns = self.parse_annotations()?;
+                    // Require a '[' right after annotated dimension
+                    if !self.match_token(&Token::LBracket) { break; }
+                    let before = self.current;
+                    self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
+                    array_dims += 1;
+                    if self.current == before { if !self.is_at_end() { self.advance(); } }
+                    continue;
+                }
+                // Or a plain [] without annotations
+                if self.match_token(&Token::LBracket) {
+                    let before = self.current;
+                    self.consume(&Token::RBracket, "Expected ']' after array dimension")?;
+                    array_dims += 1;
+                    if self.current == before { if !self.is_at_end() { self.advance(); } }
+                    continue;
+                }
+                break;
             }
         }
         
         let end_span = self.previous_span();
         let span = Span::new(start_span.start, end_span.end);
         
-        Ok(TypeRef {
-            name,
-            type_args,
-            array_dims,
-            span,
-        })
+        Ok(TypeRef { name, type_args, annotations, array_dims, span })
     }
     
     fn parse_type_arguments(&mut self) -> Result<Vec<TypeRef>> { unreachable!("legacy parse_type_arguments should not be called") }
@@ -1179,6 +1194,8 @@ impl Parser {
     fn parse_annotation_decl(&mut self, modifiers: Vec<Modifier>) -> Result<AnnotationDecl> {
         self.consume(&Token::At, "Expected '@' for annotation declaration")?;
         self.consume(&Token::Interface, "Expected 'interface' keyword")?;
+        // Leading annotations on the annotation type declaration (e.g., @Retention, @Target)
+        let annotations = self.parse_annotations()?;
         let name = self.parse_identifier()?;
         
         // Parse annotation body
@@ -1201,12 +1218,7 @@ impl Parser {
             self.previous_span().end,
         );
         
-        Ok(AnnotationDecl {
-            modifiers,
-            name,
-            body: members,
-            span,
-        })
+        Ok(AnnotationDecl { modifiers, annotations, name, body: members, span })
     }
     
     fn parse_method_decl(&mut self, mut modifiers: Vec<Modifier>) -> Result<MethodDecl> {
@@ -1480,7 +1492,7 @@ impl Parser {
             let start = self.current_span();
             self.advance();
             let end = self.previous_span();
-            TypeRef { name: "void".to_string(), type_args: Vec::new(), array_dims: 0, span: Span::new(start.start, end.end) }
+            TypeRef { name: "void".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: Span::new(start.start, end.end) }
         } else {
             self.parse_type_ref()?
         };
@@ -2580,14 +2592,14 @@ impl Parser {
             let end_span = self.previous_span();
             let span = Span::new(start_span.start, end_span.end);
             let type_span = span;
-            let target_type = TypeRef { name, type_args, array_dims: 0, span: type_span };
+            let target_type = TypeRef { name, type_args, annotations: Vec::new(), array_dims: 0, span: type_span };
             return Ok(Expr::New(NewExpr { target_type, arguments, anonymous_body, span }));
         }
 
         let end_span = self.previous_span();
         let span = Span::new(start_span.start, end_span.end);
         let type_span = span; // approximate span
-        let target_type = TypeRef { name, type_args, array_dims: array_dims_count, span: type_span };
+        let target_type = TypeRef { name, type_args, annotations: Vec::new(), array_dims: array_dims_count, span: type_span };
         Ok(Expr::New(NewExpr { target_type, arguments, anonymous_body: None, span }))
     }
 

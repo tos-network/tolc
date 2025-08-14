@@ -199,6 +199,7 @@ pub enum AnnotationArg {
 pub struct TypeRef {
     pub name: String,
     pub type_args: Vec<TypeArg>,
+    pub annotations: Vec<Annotation>,
     pub array_dims: usize,
     pub span: Span,
 }
@@ -694,6 +695,7 @@ pub struct EnumConstant {
 #[derive(Debug, Clone)]
 pub struct AnnotationDecl {
     pub modifiers: Vec<Modifier>,
+    pub annotations: Vec<Annotation>,
     pub name: String,
     pub body: Vec<AnnotationMember>,
     pub span: Span,

@@ -586,7 +586,7 @@ pub(crate) fn review_methods_of_interface(iface: &InterfaceDecl) -> ReviewResult
 }
 
 
-fn enforce_final_field_rules_in_block(block: &Block, current_class: &str, global: &GlobalMemberIndex) -> ReviewResult<()> {
+    fn enforce_final_field_rules_in_block(block: &Block, current_class: &str, global: &GlobalMemberIndex) -> ReviewResult<()> {
     for s in &block.statements { enforce_final_field_rules_in_stmt(s, current_class, global)?; }
     Ok(())
 }
@@ -927,6 +927,17 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
             } else { count_in_block(&field_name, &c.body) };
             local_ranges.push(post_block);
         }
+
+        // Include instance initializer blocks as prefix to every constructor path
+        let mut init_prefix = Range::zero();
+        for m in &class.body {
+            if let ClassMember::Initializer(init) = m {
+                if !init.modifiers.iter().any(|mm| matches!(mm, crate::ast::Modifier::Static)) {
+                    init_prefix = init_prefix.add(count_in_block(&field_name, &init.body));
+                }
+            }
+        }
+        for r in &mut local_ranges { *r = init_prefix.add(*r); }
 
         // Heuristic: if a constructor delegates via this(...) but we couldn't resolve
         // the target overload (delegate_to[i] == None), assume the target assigns this

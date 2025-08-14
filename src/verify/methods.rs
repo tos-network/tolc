@@ -26,6 +26,8 @@ pub enum MethodVerifyError {
     ReturnMismatch { expected: &'static str, found: String },
     #[error("Invalid method attribute: duplicate exceptions declared")]
     DuplicateExceptions,
+    #[error("Bridge method must be ACC_SYNTHETIC|ACC_BRIDGE and signature-erased variant of a generic method")]
+    InvalidBridgeFlagsOrTarget,
 }
 
 pub type Result<T> = std::result::Result<T, MethodVerifyError>;
@@ -42,6 +44,7 @@ pub fn verify(class_file: &ClassFile) -> Result<()> {
         verify_name_index(class_file, method.name_index)?;
         verify_descriptor_index(class_file, method.descriptor_index)?;
         verify_method_attributes(class_file, method)?;
+        verify_bridge_expectations(class_file, method)?;
     }
     Ok(())
 }
@@ -349,6 +352,101 @@ fn matches_return_opcode(last: u8, expected: &ExpectedReturn) -> bool {
     expected.opcodes.contains(&last)
 }
 
+fn verify_bridge_expectations(class_file: &ClassFile, method: &crate::codegen::method::MethodInfo) -> Result<()> {
+    use crate::codegen::flag::access_flags;
+    let is_bridge = method.access_flags & access_flags::ACC_BRIDGE != 0;
+    let is_synth = method.access_flags & access_flags::ACC_SYNTHETIC != 0;
+    if !is_bridge && !is_synth { return Ok(()); }
+    // Require both flags present for bridge methods
+    if is_bridge && !is_synth { return Err(MethodVerifyError::InvalidBridgeFlagsOrTarget); }
+    if is_synth && !is_bridge { return Ok(()); }
+    // Heuristic: ensure there exists a non-bridge method with same name whose descriptor erases to this descriptor
+    let this_desc = cp_utf8(class_file, method.descriptor_index)?;
+    let this_name = cp_utf8(class_file, method.name_index)?;
+    // Scan other methods
+    for other in &class_file.methods {
+        if std::ptr::eq(other, method) { continue; }
+        let oname = cp_utf8(class_file, other.name_index)?;
+        if oname != this_name { continue; }
+        // If other is not marked bridge/synthetic and argument counts match, consider it a candidate
+        if other.access_flags & access_flags::ACC_BRIDGE == 0 {
+            let odesc = cp_utf8(class_file, other.descriptor_index)?;
+            if same_param_arity(&this_desc, &odesc) {
+                // Very shallow erasure check: parameters in bridge are Object where the non-bridge has L...; or identical for primitives/ints
+                if descriptor_erases_to(&odesc, &this_desc) { return Ok(()); }
+            }
+        }
+    }
+    Err(MethodVerifyError::InvalidBridgeFlagsOrTarget)
+}
+
+fn same_param_arity(a: &str, b: &str) -> bool {
+    fn count(desc: &str) -> usize {
+        let mut it = desc.chars();
+        while let Some(c) = it.next() { if c == '(' { break; } }
+        let mut n = 0usize; let mut depth = 0i32;
+        while let Some(c) = it.next() {
+            match c {
+                ')' => break,
+                '[' => {},
+                'L' => { while let Some(cc) = it.next() { if cc == ';' { break; } } n += 1; },
+                _ => { n += 1; },
+            }
+        }
+        n
+    }
+    count(a) == count(b)
+}
+
+fn descriptor_erases_to(source: &str, target: &str) -> bool {
+    // Compare parameter descriptors ignoring reference specificity: any L...; in source may become Ljava/lang/Object; in target
+    let (sa, sr) = split_params_and_ret(source);
+    let (ta, tr) = split_params_and_ret(target);
+    if sr != tr { return false; }
+    let sp = split_params(sa); let tp = split_params(ta);
+    if sp.len() != tp.len() { return false; }
+    for (s, t) in sp.iter().zip(tp.iter()) {
+        if s == t { continue; }
+        // allow Lpkg/Type; -> Ljava/lang/Object;
+        if !(s.starts_with('L') && s.ends_with(';') && t == "Ljava/lang/Object;") { return false; }
+    }
+    true
+}
+
+fn split_params_and_ret(desc: &str) -> (String, String) {
+    let mut it = desc.chars();
+    let mut params = String::new();
+    let mut ret = String::new();
+    let mut in_params = false;
+    while let Some(c) = it.next() {
+        if c == '(' { in_params = true; params.push(c); continue; }
+        if in_params { params.push(c); if c == ')' { in_params = false; } continue; }
+        ret.push(c);
+    }
+    (params, ret)
+}
+
+fn split_params(params_with_parens: String) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut it = params_with_parens.chars();
+    // assume starts with '(' and ends with ')'
+    // skip '('
+    while let Some(c) = it.next() { if c == '(' { break; } }
+    let mut cur = String::new();
+    let mut in_ref = false;
+    while let Some(c) = it.next() {
+        if c == ')' { if !cur.is_empty() { v.push(cur.clone()); } break; }
+        cur.push(c);
+        match c {
+            '[' => {},
+            'L' => { in_ref = true; },
+            ';' => { if in_ref { v.push(cur.clone()); cur.clear(); in_ref = false; } },
+            'B'|'C'|'D'|'F'|'I'|'J'|'S'|'Z' => { if !in_ref { v.push(cur.clone()); cur.clear(); } },
+            _ => {},
+        }
+    }
+    v
+}
 fn cp_utf8(class_file: &ClassFile, idx_u16: u16) -> Result<String> {
     let idx = (idx_u16 as usize).saturating_sub(1);
     match class_file.constant_pool.constants.get(idx) {
