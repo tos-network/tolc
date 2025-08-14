@@ -79,24 +79,36 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 | Name resolution | Ambiguous/duplicate imports precedence, inner-class vs top-level shadowing, star-import specificity | ✓ | `review/types.rs`; tests: `review_import_precedence_tests.rs` | Resolution precedence aligned with javac; inner-class vs top-level shadowing and star-import specificity match common scenarios. |
 | Overrides | Generic override checks with erasure/bridges, ACC_SYNTHETIC bridge expectations | ✓ | Visibility/covariant returns/throws narrowing enforced. Bridge methods synthesized at codegen: `Comparable<T>#compareTo(T)` → `compareTo(Object)`, `Comparator<T>#compare(T,T)` → `compare(Object,Object)`, `List<E>#get(I)` → `get(I)Ljava/lang/Object;`. Verification enforces `ACC_BRIDGE|ACC_SYNTHETIC` on bridges and checks erased-target descriptor exists in the declaring class. |
 | Parser | Lambda/method ref grammar, full annotation positions, multi-resource TWR details | ◐/✗ | Parser covers most statements/expressions; lambda/mref not yet |
-| Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Baseline bounds and monotonic checks; full type lattice merge not implemented |
-| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Advanced: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; broadened String concatenation (either side String); shift masking parity (int 5-bit, long 6-bit when left is long). Guarded div/mod by zero (no fold) with review-time diagnostic. Where: `review/statements.rs` (switch folding + diagnostic), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`, `tests/review_flow_tests.rs`. Remaining: fuller long parity in bitwise/shift without explicit casts, JLS NaN/Infinity comparison semantics, broader String concat shapes, and constant narrowing rules. |
+| Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Minimal verification-type lattice and CFG-based StackMap computation implemented in `codegen/frame.rs`. Precise typing for `getfield`/`getstatic`/`invoke*`, `new`/`<init>` uninitialized-to-initialized transitions (converting matching locals/stack), and `aload` preserving locals' exact types. Category-2 handling (`long`/`double`), `WIDE` forms, and handler catch-type typing supported. Frame compression (Same/SameExt/SameLocals1*/Append/Chop/Full) emitted. Tests: `tests/stackmap_merge_tests.rs`, `tests/stackmap_compute_tests.rs`, `tests/stackmap_invoke_tests.rs`, `tests/stackmap_precise_types_tests.rs`. Remaining: broaden `dup*_x*` around object construction, richer array/object stores edge-cases, and integration into emitted `StackMapTable`. |
+| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Advanced: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; broadened String concatenation (either side String); shift masking parity (int 5-bit, long 6-bit when lhs effectively long). Guarded div/mod by zero (no fold) with review-time diagnostic. Where: `review/statements.rs` (switch folding + diagnostic), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`, `tests/review_flow_tests.rs`. Remaining: corner-case constant-expression shapes and documentation polish. |
 
 Planned sequencing to reach 100%
 - Short-term: switch DA parity (enum/String) ✓, name-resolution precedence ✓, override-bridge checks ✓, annotation placement matrix (declaration-site duplicates ✓; type-use matrix ✓ with retention-based visible/invisible emission), generics upper-bound corner cases ✓, full overload tie-breaks ✓.
-- Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ✗, StackMap merge improvements ◐, constant expression evaluation ◐ (long/double/char folding; mixed-type casts/widening; boolean/shift folding; relational comparisons; String concat broadened; div/mod-by-zero guard + diagnostic; NaN/Infinity semantics done; next: long parity without casts, constant narrowing). 
+- Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ✗, StackMap merge improvements ◐, constant expression evaluation ◐ (long/double/char folding; mixed-type casts/widening; boolean/shift folding; relational comparisons; String concat broadened; div/mod-by-zero guard + diagnostic; NaN/Infinity semantics done; long parity without explicit casts done; constant narrowing conversions done). 
 
 #### Mid-term progress updates (Aug 2025)
 - Constant expressions
-  - Extended compile-time folding: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; int/long shift masking parity; broadened String concatenation
+  - Extended compile-time folding: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; int/long shift masking parity; broadened String concatenation (including nested forms); long bitwise parity across `&`/`|`/`^` when lhs effectively long
   - Guarded div/mod by zero during folding (no fold) and review-time diagnostic for constant div/mod by zero
   - Implemented in `review/statements.rs` (switch folding + diagnostic) and `codegen/class_writer.rs` (field `ConstantValue` folding)
   - Tests added in `tests/const_folding_tests.rs` and diagnostic checks in `tests/review_flow_tests.rs`
-  - Completed: JLS-consistent NaN/Infinity comparison semantics in constant folding
-  - Next: handle long parity without explicit casts; implement constant narrowing conversions (byte/short/char when in range)
+  - Completed: JLS-consistent NaN/Infinity comparison semantics; long-shift parity without explicit casts (6-bit mask when lhs effectively long); long bitwise parity across `&`/`|`/`^`; constant narrowing conversions for byte/short/char with range checks in review; more String concat shapes (nested forms)
+- Next: blank-final DA/DU constructor-path edge cases (this()/super() ordering nuances); integrate StackMap frames into emission; expand simulation for `dup*_x*` and arrays; generics capture conversion and poly-expression inference scaffolding
 
 - Long-term:
   - Lambdas/method refs: explicitly unsupported by design; parser reports errors for `->` and `::`; no `invokedynamic`/`LambdaMetafactory` emission or acceptance. Revisit only if policy changes.
   - Full verification type lattice and StackMap frame merging per JVMS (beyond linear bounds checks).
   - Repeated annotations semantics across declaration and TYPE_USE positions.
   - Generics capture conversion and full generic method type inference (poly expressions) if scope expands.
+  
+### Next to do
+- StackMap
+  - Integrate `FrameBuilder` frames into bytecode emission for methods (`StackMapTable` generation)
+  - Expand simulation coverage: `dup*_x*` object-construction patterns; array/object loads/stores edge-cases; additional category-2 stack ops
+  - Add tests covering method returns of primitives/long/double/arrays; verify locals update post-`<init>` across multiple constructor paths
+- Constant expressions
+  - Audit parity for long-specific bitwise/shift without explicit casts; add missing corner cases
+- Blank-final DA/DU
+  - Expand constructor path analysis for strict `this()`/`super()` ordering and instance initializer nuances
+- Generics
+  - Add scaffolding for capture conversion and poly-expression inference (affects overload applicability)
