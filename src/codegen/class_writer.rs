@@ -725,8 +725,10 @@ impl ClassWriter {
                     fi.attributes.push(NamedAttribute::new(name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload })));
                     Ok(())
                 };
-                match init {
-                    Expr::Literal(lit) => match &lit.value {
+                // Evaluate compile-time constant expression if possible
+                let folded = Self::eval_compile_time_constant(init).or_else(|| match init { Expr::Literal(l) => Some(l.value.clone()), _ => None });
+                if let Some(val) = folded {
+                    match &val {
                         Literal::Integer(i) => {
                             let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(*i as i32) };
                             add_const_attr(self, "Integer", idx, &mut field_info)?;
@@ -739,16 +741,6 @@ impl ClassWriter {
                             } else {
                                 let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_double(*f) };
                                 add_const_attr(self, "Double", idx, &mut field_info)?;
-                            }
-                        }
-                        Literal::Integer(i) => {
-                            // Use Integer if fits 32-bit, else Long
-                            if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
-                                let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(*i as i32) };
-                                add_const_attr(self, "Integer", idx, &mut field_info)?;
-                            } else {
-                                let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_long(*i as i64) };
-                                add_const_attr(self, "Long", idx, &mut field_info)?;
                             }
                         }
                         Literal::Char(c) => {
@@ -765,8 +757,7 @@ impl ClassWriter {
                             add_const_attr(self, "String", idx, &mut field_info)?;
                         }
                         _ => {}
-                    },
-                    _ => {}
+                    }
                 }
             }
         }
@@ -1263,5 +1254,58 @@ impl ClassWriter {
     /// Get the generated class file
     pub fn get_class_file(self) -> ClassFile {
         self.class_file
+    }
+
+    // Minimal compile-time constant evaluator for ConstantValue eligibility
+    fn eval_compile_time_constant(expr: &Expr) -> Option<Literal> {
+        use crate::ast::{Expr::*, Literal as L, BinaryOp, UnaryOp};
+        fn lit(e: &Expr) -> Option<L> { if let Literal(le) = e { Some(le.value.clone()) } else { None } }
+        match expr {
+            Literal(le) => Some(le.value.clone()),
+            Parenthesized(inner) => Self::eval_compile_time_constant(inner),
+            Unary(u) => {
+                match u.operator {
+                    UnaryOp::Plus => Self::eval_compile_time_constant(&u.operand),
+                    UnaryOp::Minus => match Self::eval_compile_time_constant(&u.operand)? { L::Integer(i) => Some(L::Integer(-i)), L::Float(f) => Some(L::Float(-f)), _ => None },
+                    UnaryOp::BitNot => match Self::eval_compile_time_constant(&u.operand)? { L::Integer(i) => Some(L::Integer(!(i))), _ => None },
+                    UnaryOp::Not => match Self::eval_compile_time_constant(&u.operand)? { L::Boolean(b) => Some(L::Boolean(!b)), _ => None },
+                    _ => None,
+                }
+            }
+            Binary(b) => {
+                use BinaryOp::*;
+                let l = Self::eval_compile_time_constant(&b.left).or_else(|| lit(&b.left))?;
+                let r = Self::eval_compile_time_constant(&b.right).or_else(|| lit(&b.right))?;
+                match (b.operator.clone(), l, r) {
+                    // int arithmetic and bitwise
+                    (Add, L::Integer(a), L::Integer(b)) => Some(L::Integer(a + b)),
+                    (Sub, L::Integer(a), L::Integer(b)) => Some(L::Integer(a - b)),
+                    (Mul, L::Integer(a), L::Integer(b)) => Some(L::Integer(a * b)),
+                    (Div, L::Integer(a), L::Integer(b)) => { if b == 0 { return None; } Some(L::Integer(a / b)) },
+                    (Mod, L::Integer(a), L::Integer(b)) => { if b == 0 { return None; } Some(L::Integer(a % b)) },
+                    (And, L::Integer(a), L::Integer(b)) => Some(L::Integer(a & b)),
+                    (Or,  L::Integer(a), L::Integer(b)) => Some(L::Integer(a | b)),
+                    (Xor, L::Integer(a), L::Integer(b)) => Some(L::Integer(a ^ b)),
+                    (LShift, L::Integer(a), L::Integer(b)) => Some(L::Integer(a << (b as u32))),
+                    (RShift, L::Integer(a), L::Integer(b)) => Some(L::Integer(a >> (b as u32))),
+                    (URShift, L::Integer(a), L::Integer(b)) => Some(L::Integer(((a as u64) >> (b as u32)) as i64)),
+                    // double arithmetic
+                    (Add, L::Float(a), L::Float(b)) => Some(L::Float(a + b)),
+                    (Sub, L::Float(a), L::Float(b)) => Some(L::Float(a - b)),
+                    (Mul, L::Float(a), L::Float(b)) => Some(L::Float(a * b)),
+                    (Div, L::Float(a), L::Float(b)) => { if b == 0.0 { return None; } Some(L::Float(a / b)) },
+                    (Mod, L::Float(a), L::Float(b)) => { if b == 0.0 { return None; } Some(L::Float(a % b)) },
+                    // char promotions (to int)
+                    (Add, L::Char(a), L::Char(b)) => Some(L::Integer((a as i64) + (b as i64))),
+                    (Add, L::Char(a), L::Integer(b)) => Some(L::Integer((a as i64) + b)),
+                    (Add, L::Integer(a), L::Char(b)) => Some(L::Integer(a + (b as i64))),
+                    (Add, L::String(a), L::String(b)) => Some(L::String(format!("{}{}", a, b))),
+                    (Add, L::String(a), L::Char(c)) => Some(L::String(format!("{}{}", a, c))),
+                    (Add, L::String(a), L::Integer(i)) => Some(L::String(format!("{}{}", a, i))),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 }
