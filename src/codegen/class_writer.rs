@@ -1324,9 +1324,19 @@ impl ClassWriter {
                     (Mul, L::Integer(a), L::Integer(b)) => Some(L::Integer(a * b)),
                     (Div, L::Integer(a), L::Integer(b)) => { if b == 0 { return None; } Some(L::Integer(a / b)) },
                     (Mod, L::Integer(a), L::Integer(b)) => { if b == 0 { return None; } Some(L::Integer(a % b)) },
-                    (And, L::Integer(a), L::Integer(b)) => Some(L::Integer(a & b)),
-                    (Or,  L::Integer(a), L::Integer(b)) => Some(L::Integer(a | b)),
-                    (Xor, L::Integer(a), L::Integer(b)) => Some(L::Integer(a ^ b)),
+                    // bitwise ops (integral promotions): when chars appear, promote to int; treat long-effective lhs transparently via i64
+                    (And, L::Integer(a), L::Integer(bv)) => Some(L::Integer(a & bv)),
+                    (Or,  L::Integer(a), L::Integer(bv)) => Some(L::Integer(a | bv)),
+                    (Xor, L::Integer(a), L::Integer(bv)) => Some(L::Integer(a ^ bv)),
+                    (And, L::Char(a), L::Integer(bv))    => Some(L::Integer((a as i64) & bv)),
+                    (And, L::Integer(av), L::Char(b))    => Some(L::Integer(av & (b as i64))),
+                    (And, L::Char(a), L::Char(b))        => Some(L::Integer((a as i64) & (b as i64))),
+                    (Or,  L::Char(a), L::Integer(bv))    => Some(L::Integer((a as i64) | bv)),
+                    (Or,  L::Integer(av), L::Char(b))    => Some(L::Integer(av | (b as i64))),
+                    (Or,  L::Char(a), L::Char(b))        => Some(L::Integer((a as i64) | (b as i64))),
+                    (Xor, L::Char(a), L::Integer(bv))    => Some(L::Integer((a as i64) ^ bv)),
+                    (Xor, L::Integer(av), L::Char(b))    => Some(L::Integer(av ^ (b as i64))),
+                    (Xor, L::Char(a), L::Char(b))        => Some(L::Integer((a as i64) ^ (b as i64))),
                     (LShift, L::Integer(a), L::Integer(rv)) => {
                         let sh = if lhs_is_long { mask_shift_for_long(rv) } else { mask_shift_for_int(rv) };
                         Some(L::Integer(a << sh))

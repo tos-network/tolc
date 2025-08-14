@@ -67,4 +67,14 @@ fn static_final_string_concat_more_shapes() {
     ok(r#"package p; class C { static final String S = ("a" + 'b') + 3 + false; }"#);
 }
 
+#[test]
+fn static_final_long_bitwise_parity_fold() {
+    ok(r#"package p; class C { static final int A = (int)(((long)1) & 3); static final int B = (int)(((long)1) | 2); static final int Cc = (int)(((long)1) ^ 3); }"#);
+}
+
+#[test]
+fn static_final_string_concat_nested_parens_shapes() {
+    ok(r#"package p; class C { static final String S = (("x"+"y") + (1+2)) + (true + "z"); }"#);
+}
+
 
