@@ -234,7 +234,6 @@ pub enum Error {
 - **Crate overview in `lib.rs`** (20–60 lines, `//!`): pipeline, modules, dataflow, constraints.
 - **Module header** (5–10 lines, `//!`): responsibility, inputs/outputs, who calls it.
 - **Public API rustdoc** (`///`) with **`# Examples`**: AI learns usage from examples.
-- **Repo docs** (`docs/ARCHITECTURE.md`, `docs/CODEMAP.md`): components, dataflow, decisions; module index.
 
 **Module header template**
 ```rust
@@ -299,7 +298,6 @@ pub enum Error {
 - [ ] Any file > 600 LOC considered for split; none > 1000 LOC.
 - [ ] No function > 100 LOC or with ≥ 3 nested blocks (refactor if so).
 - [ ] `lib.rs` overview updated if boundaries changed.
-- [ ] `docs/CODEMAP.md` updated for moved/renamed modules.
 - [ ] `clippy` & `rustfmt` pass; any `allow` has a reason.
 
 ---
