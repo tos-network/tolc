@@ -734,14 +734,176 @@ fn simulate_effect(op: u8, code: &[u8], pc: usize, st: &mut FrameState, cp: &mut
         opcodes::LALOAD => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Long); },
         opcodes::FALOAD => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Float); },
         opcodes::DALOAD => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Double); },
-        opcodes::AALOAD => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Object(obj_idx)); },
+        opcodes::AALOAD => {
+            // Pop index and arrayref; push element type from array descriptor if known, else Object
+            let _ = st.stack.pop();
+            let arr = st.stack.pop();
+            let vt = match arr {
+                Some(VerificationType::Object(ci)) => {
+                    // Snapshot class name to break immutable borrow before mutable use
+                    let arr_name_opt: Option<String> = match cp.constants.get((ci - 1) as usize) {
+                        Some(super::constpool::Constant::Class(name_idx)) => {
+                            match cp.constants.get((*name_idx - 1) as usize) {
+                                Some(super::constpool::Constant::Utf8(s)) => Some(s.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(arr_name) = arr_name_opt {
+                        if arr_name.starts_with('[') {
+                            let bytes = arr_name.as_bytes();
+                            let mut j = 0usize; while j < bytes.len() && bytes[j] == b'[' { j += 1; }
+                            let (elem, _) = parse_field_type(bytes, j, cp);
+                            elem.unwrap_or(Object(obj_idx))
+                        } else { Object(obj_idx) }
+                    } else { Object(obj_idx) }
+                }
+                _ => Object(obj_idx),
+            };
+            st.stack.push(vt);
+        },
         opcodes::BALOAD | opcodes::CALOAD | opcodes::SALOAD => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Integer); },
-        opcodes::IASTORE | opcodes::LASTORE | opcodes::FASTORE | opcodes::DASTORE | opcodes::AASTORE | opcodes::BASTORE | opcodes::CASTORE | opcodes::SASTORE => { let _ = st.stack.pop(); let _ = st.stack.pop(); let _ = st.stack.pop(); },
+        opcodes::IASTORE | opcodes::LASTORE | opcodes::FASTORE | opcodes::DASTORE | opcodes::AASTORE | opcodes::BASTORE | opcodes::CASTORE | opcodes::SASTORE => {
+            // Pop value, index, arrayref
+            let _ = st.stack.pop();
+            let _ = st.stack.pop();
+            let _ = st.stack.pop();
+        },
         // stack pop/dup
         opcodes::POP => { let _ = st.stack.pop(); },
         opcodes::POP2 => { let _ = st.stack.pop(); let _ = st.stack.pop(); },
         opcodes::DUP => { if let Some(t) = st.stack.last().cloned() { st.stack.push(t); } },
-        opcodes::DUP2 => { let len = st.stack.len(); if len >= 2 { let a = st.stack[len-2].clone(); let b = st.stack[len-1].clone(); st.stack.push(a); st.stack.push(b); } },
+        opcodes::DUP2 => {
+            let len = st.stack.len();
+            if len >= 2 {
+                let a = st.stack[len - 2].clone();
+                let b = st.stack[len - 1].clone();
+                st.stack.push(a);
+                st.stack.push(b);
+            }
+        },
+        opcodes::DUP_X1 => {
+            // Handle category-2: if top is category-2, behave like DUP2_X1
+            let len = st.stack.len();
+            if len >= 2 {
+                let cat2 = matches!(st.stack[len - 1], VerificationType::Long | VerificationType::Double);
+                if cat2 {
+                    // [..., v3, v2v1(cat2)] -> [..., v2v1, v3, v2v1]
+                    if len >= 2 {
+                        let vcat2 = st.stack.remove(len - 1);
+                        let v3 = st.stack.remove(len - 2);
+                        st.stack.push(vcat2.clone());
+                        st.stack.push(v3);
+                        st.stack.push(vcat2);
+                    }
+                } else {
+                    // category-1: [..., v2, v1] -> [..., v1, v2, v1]
+                    let v1 = st.stack.remove(len - 1);
+                    let v2 = st.stack.remove(len - 2);
+                    st.stack.push(v1.clone());
+                    st.stack.push(v2);
+                    st.stack.push(v1);
+                }
+            }
+        },
+        opcodes::DUP_X2 => {
+            // Cases (JVMS): handle cat-2 under top or next
+            let len = st.stack.len();
+            if len >= 2 {
+                let top_cat2 = matches!(st.stack[len - 1], VerificationType::Long | VerificationType::Double);
+                let next_cat2 = len >= 2 && matches!(st.stack[len - 2], VerificationType::Long | VerificationType::Double);
+                if top_cat2 {
+                    // [..., v2v1(cat2)] -> [..., v2v1, v2v1]
+                    let v = st.stack.remove(len - 1);
+                    st.stack.push(v.clone());
+                    st.stack.push(v);
+                } else if next_cat2 {
+                    // [..., v2v1(cat2), v0] -> [..., v0, v2v1, v0]
+                    let v0 = st.stack.remove(len - 1);
+                    let vcat2 = st.stack.remove(len - 2);
+                    st.stack.push(v0.clone());
+                    st.stack.push(vcat2);
+                    st.stack.push(v0);
+                } else if len >= 3 {
+                    // all cat-1: [..., v3, v2, v1] -> [..., v1, v3, v2, v1]
+                    let v1 = st.stack.remove(len - 1);
+                    let v2 = st.stack.remove(len - 2);
+                    let v3 = st.stack.remove(len - 3);
+                    st.stack.push(v1.clone());
+                    st.stack.push(v3);
+                    st.stack.push(v2);
+                    st.stack.push(v1);
+                }
+            }
+        },
+        opcodes::DUP2_X1 => {
+            let len = st.stack.len();
+            if len >= 2 {
+                let top_cat2 = matches!(st.stack[len - 1], VerificationType::Long | VerificationType::Double);
+                if top_cat2 {
+                    // [..., v3, v2v1(cat2)] -> [..., v2v1, v3, v2v1]
+                    let vcat2 = st.stack.remove(len - 1);
+                    let v3 = st.stack.remove(len - 2);
+                    st.stack.push(vcat2.clone());
+                    st.stack.push(v3);
+                    st.stack.push(vcat2);
+                } else if len >= 3 {
+                    // cat-1 pair: [..., v3, v2, v1] -> [..., v2, v1, v3, v2, v1]
+                    let v1 = st.stack.remove(len - 1);
+                    let v2 = st.stack.remove(len - 2);
+                    let v3 = st.stack.remove(len - 3);
+                    st.stack.push(v2.clone());
+                    st.stack.push(v1.clone());
+                    st.stack.push(v3);
+                    st.stack.push(v2);
+                    st.stack.push(v1);
+                }
+            }
+        },
+        opcodes::DUP2_X2 => {
+            let len = st.stack.len();
+            if len >= 2 {
+                let top_cat2 = matches!(st.stack[len - 1], VerificationType::Long | VerificationType::Double);
+                let next_cat2 = len >= 2 && matches!(st.stack[len - 2], VerificationType::Long | VerificationType::Double);
+                if top_cat2 && next_cat2 {
+                    // [..., v2v1(cat2), v0v_1(cat2)] -> [..., v0v_1, v2v1, v0v_1]
+                    let v0cat2 = st.stack.remove(len - 1);
+                    let v2cat2 = st.stack.remove(len - 2);
+                    st.stack.push(v0cat2.clone());
+                    st.stack.push(v2cat2);
+                    st.stack.push(v0cat2);
+                } else if top_cat2 && len >= 3 {
+                    // [..., v3, v2, v1v0(cat2)] -> [..., v1v0, v3, v2, v1v0]
+                    let vcat2 = st.stack.remove(len - 1);
+                    let v2 = st.stack.remove(len - 2);
+                    let v3 = st.stack.remove(len - 3);
+                    st.stack.push(vcat2.clone());
+                    st.stack.push(v3);
+                    st.stack.push(v2);
+                    st.stack.push(vcat2);
+                } else if next_cat2 && len >= 3 {
+                    // [..., v2v1(cat2), v0, vm] -> treat similar to DUP2_X1 then X1
+                    let v0 = st.stack.remove(len - 1);
+                    let vcat2 = st.stack.remove(len - 2);
+                    st.stack.push(v0.clone());
+                    st.stack.push(vcat2);
+                    st.stack.push(v0);
+                } else if len >= 4 {
+                    // all cat-1: [..., v4, v3, v2, v1] -> [..., v2, v1, v4, v3, v2, v1]
+                    let v1 = st.stack.remove(len - 1);
+                    let v2 = st.stack.remove(len - 2);
+                    let v3 = st.stack.remove(len - 3);
+                    let v4 = st.stack.remove(len - 4);
+                    st.stack.push(v2.clone());
+                    st.stack.push(v1.clone());
+                    st.stack.push(v4);
+                    st.stack.push(v3);
+                    st.stack.push(v2);
+                    st.stack.push(v1);
+                }
+            }
+        },
         // arithmetic: pop 2 push 1
         opcodes::IADD | opcodes::ISUB | opcodes::IMUL | opcodes::IDIV | opcodes::IREM => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Integer); },
         opcodes::LADD | opcodes::LSUB | opcodes::LMUL | opcodes::LDIV | opcodes::LREM => { let _ = st.stack.pop(); let _ = st.stack.pop(); st.stack.push(Long); },
@@ -959,7 +1121,11 @@ fn map_field_desc_to_vt(cp: &mut ConstantPool, desc: &str) -> Option<Verificatio
             i += 1; let mut j = i; while j < b.len() && b[j] != b';' { j += 1; }
             let name = String::from_utf8_lossy(&b[i..j]).to_string(); Some(Object(cp.add_class(&name)))
         }
-        b'[' => Some(Object(cp.add_class("java/lang/Object"))),
+        b'[' => {
+            // Preserve full array descriptor as class name (e.g., "[I", "[Ljava/lang/String;")
+            let name = String::from_utf8_lossy(&b[i..]).to_string();
+            Some(Object(cp.add_class(&name)))
+        }
         _ => None,
     }
 }
@@ -1031,12 +1197,12 @@ fn parse_field_type(bytes: &[u8], mut i: usize, cp: &mut ConstantPool) -> (Optio
             } else { (Some(Object(cp.add_class("java/lang/Object"))), j) }
         }
         b'[' => {
-            // array type: parse and reduce to Object(java/lang/Object) for minimal lattice
+            // array type: capture full array descriptor as class name
             let mut j = i;
             while j < bytes.len() && bytes[j] == b'[' { j += 1; }
-            // skip element type
             let (_, nj) = parse_field_type(bytes, j, cp);
-            let idx = cp.add_class("java/lang/Object");
+            let name = String::from_utf8_lossy(&bytes[i..nj]).to_string();
+            let idx = cp.add_class(&name);
             (Some(Object(idx)), nj)
         }
         _ => (None, i + 1),

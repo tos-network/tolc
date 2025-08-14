@@ -1054,13 +1054,35 @@ impl ClassWriter {
         // Build sub-attributes after body emissions (so CP first-touches are from code first)
         let mut sub_attrs: Vec<NamedAttribute> = Vec::new();
         if self.config.emit_frames {
-            let handler_pcs: Vec<u16> = exceptions.iter().map(|e| e.handler_pc).collect();
-        let throwable_cp = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_class("java/lang/Throwable") }
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
-            let smt = FrameBuilder::new().compute_from_with_handler_stack(
+            // Build handler types map from exception table entries
+            let mut handlers: Vec<(u16, Option<String>)> = Vec::new();
+            {
+                let cp_ref = self.cp_shared.as_ref().unwrap();
+                let cp_borrow = cp_ref.borrow();
+                for e in &exceptions {
+                    let ty = if e.catch_type != 0 {
+                        // Resolve Class name index → Utf8
+                        if let Some(crate::codegen::constpool::Constant::Class(name_idx)) = cp_borrow.constants.get((e.catch_type - 1) as usize) {
+                            if let Some(crate::codegen::constpool::Constant::Utf8(s)) = cp_borrow.constants.get((*name_idx - 1) as usize) {
+                                Some(s.clone())
+                            } else { None }
+                        } else { None }
+                    } else { None };
+                    handlers.push((e.handler_pc, ty));
+                }
+            }
+            let is_static = method.modifiers.iter().any(|m| matches!(m, Modifier::Static));
+            let is_constructor = false;
+            let this_internal = self.current_class_name.clone().unwrap_or_default();
+            let method_desc = self.generate_method_descriptor(method);
+            let smt = FrameBuilder::new().compute_with_types_with_handlers(
                 &code_bytes,
-                &handler_pcs,
-                VerificationType::Object(throwable_cp),
+                &handlers,
+                is_static,
+                is_constructor,
+                &this_internal,
+                &method_desc,
+                &mut self.cp_shared.as_ref().unwrap().borrow_mut(),
             );
             if self.config.debug {
                 for line in describe_stack_map_frames(&smt) { eprintln!("[frames] {}", line); }
@@ -1163,7 +1185,20 @@ impl ClassWriter {
         // Sub-attributes of Code
         let mut sub_attrs: Vec<NamedAttribute> = Vec::new();
         if self.config.emit_frames {
-            let smt = FrameBuilder::new().compute_from(&code_bytes, &[]);
+            let handlers: Vec<(u16, Option<String>)> = Vec::new();
+            let is_static = false;
+            let is_constructor = true;
+            let this_internal = self.current_class_name.clone().unwrap_or_else(|| class.name.replace('.', "/"));
+            let method_desc = "()V".to_string();
+            let smt = FrameBuilder::new().compute_with_types_with_handlers(
+                &code_bytes,
+                &handlers,
+                is_static,
+                is_constructor,
+                &this_internal,
+                &method_desc,
+                &mut self.cp_shared.as_ref().unwrap().borrow_mut(),
+            );
             if self.config.debug {
                 for line in describe_stack_map_frames(&smt) { eprintln!("[frames] {}", line); }
             }
@@ -1226,7 +1261,20 @@ impl ClassWriter {
         // Sub-attributes of Code
         let mut sub_attrs: Vec<NamedAttribute> = Vec::new();
         if self.config.emit_frames {
-            let smt = FrameBuilder::new().compute_from(&code_bytes, &[]);
+            let handlers: Vec<(u16, Option<String>)> = Vec::new();
+            let is_static = false;
+            let is_constructor = true;
+            let this_internal = self.current_class_name.clone().unwrap_or_else(|| constructor.name.clone());
+            let method_desc = self.generate_constructor_descriptor(constructor);
+            let smt = FrameBuilder::new().compute_with_types_with_handlers(
+                &code_bytes,
+                &handlers,
+                is_static,
+                is_constructor,
+                &this_internal,
+                &method_desc,
+                &mut self.cp_shared.as_ref().unwrap().borrow_mut(),
+            );
             if self.config.debug {
                 for line in describe_stack_map_frames(&smt) { eprintln!("[frames] {}", line); }
             }
