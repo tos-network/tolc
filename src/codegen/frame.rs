@@ -740,7 +740,7 @@ fn simulate_effect(op: u8, code: &[u8], pc: usize, st: &mut FrameState, cp: &mut
             let arr = st.stack.pop();
             let vt = match arr {
                 Some(VerificationType::Object(ci)) => {
-                    // Snapshot class name to break immutable borrow before mutable use
+                    // Snapshot class name
                     let arr_name_opt: Option<String> = match cp.constants.get((ci - 1) as usize) {
                         Some(super::constpool::Constant::Class(name_idx)) => {
                             match cp.constants.get((*name_idx - 1) as usize) {
@@ -752,11 +752,30 @@ fn simulate_effect(op: u8, code: &[u8], pc: usize, st: &mut FrameState, cp: &mut
                     };
                     if let Some(arr_name) = arr_name_opt {
                         if arr_name.starts_with('[') {
-                            let bytes = arr_name.as_bytes();
-                            let mut j = 0usize; while j < bytes.len() && bytes[j] == b'[' { j += 1; }
-                            let (elem, _) = parse_field_type(bytes, j, cp);
-                            elem.unwrap_or(Object(obj_idx))
-                        } else { Object(obj_idx) }
+                            let rem = &arr_name[1..];
+                            let b = rem.as_bytes();
+                            match b.first().copied().unwrap_or(0) {
+                                b'[' => {
+                                    // Still an array
+                                    VerificationType::Object(cp.add_class(rem))
+                                }
+                                b'L' => {
+                                    // Reference element: Ljava/lang/String;
+                                    let mut i = 1usize; let mut j = i;
+                                    while j < b.len() && b[j] != b';' { j += 1; }
+                                    let name = String::from_utf8_lossy(&b[i..j]).to_string();
+                                    VerificationType::Object(cp.add_class(&name))
+                                }
+                                // Primitive element (should not happen for AALOAD, but be conservative)
+                                b'B' | b'C' | b'I' | b'S' | b'Z' => VerificationType::Integer,
+                                b'J' => VerificationType::Long,
+                                b'F' => VerificationType::Float,
+                                b'D' => VerificationType::Double,
+                                _ => Object(obj_idx),
+                            }
+                        } else {
+                            Object(obj_idx)
+                        }
                     } else { Object(obj_idx) }
                 }
                 _ => Object(obj_idx),
@@ -773,6 +792,20 @@ fn simulate_effect(op: u8, code: &[u8], pc: usize, st: &mut FrameState, cp: &mut
         // stack pop/dup
         opcodes::POP => { let _ = st.stack.pop(); },
         opcodes::POP2 => { let _ = st.stack.pop(); let _ = st.stack.pop(); },
+        opcodes::SWAP => {
+            // Only valid for two category-1 values
+            let len = st.stack.len();
+            if len >= 2 {
+                let a = st.stack[len - 2].clone();
+                let b = st.stack[len - 1].clone();
+                let a_cat2 = matches!(a, VerificationType::Long | VerificationType::Double);
+                let b_cat2 = matches!(b, VerificationType::Long | VerificationType::Double);
+                if !a_cat2 && !b_cat2 {
+                    st.stack[len - 2] = b;
+                    st.stack[len - 1] = a;
+                }
+            }
+        },
         opcodes::DUP => { if let Some(t) = st.stack.last().cloned() { st.stack.push(t); } },
         opcodes::DUP2 => {
             let len = st.stack.len();
@@ -1004,8 +1037,8 @@ fn compress_frame(delta: u16, prev_locals: &Vec<VerificationType>, prev_stack: &
     }
     let pl = trim_tops(prev_locals);
     let cl = trim_tops(locals);
-    // Same frame
-    if cl == pl && stack.is_empty() && prev_stack.is_empty() {
+    // Same frame: locals identical and current stack empty (previous stack content is irrelevant)
+    if cl == pl && stack.is_empty() {
         if delta <= 63 { return StackMapFrame::Same { offset_delta: delta }; }
         return StackMapFrame::SameExtended { offset_delta: delta };
     }
@@ -1015,7 +1048,7 @@ fn compress_frame(delta: u16, prev_locals: &Vec<VerificationType>, prev_stack: &
         return StackMapFrame::SameLocals1StackItemExtended { offset_delta: delta, stack: stack[0].clone() };
     }
     // Append/Chop up to 3 locals difference when stack empty
-    if stack.is_empty() && prev_stack.is_empty() {
+    if stack.is_empty() {
         if cl.len() > pl.len() && cl.len() - pl.len() <= 3 && pl == cl[0..pl.len()] {
             let k = (cl.len() - pl.len()) as u8;
             let tail: Vec<VerificationType> = cl[pl.len()..].to_vec();

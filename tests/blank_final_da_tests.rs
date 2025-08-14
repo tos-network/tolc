@@ -42,4 +42,16 @@ fn multi_level_this_delegation_single_assignment_ok() {
     ok(r#"package p; class T { final int x; T(){ this(1); } T(int a){ this(2, a); } T(int a, int b){ x = a + b - a; } }"#);
 }
 
+// Delegating ctor may not assign after returning from this(...) target (already covered), but the effective target can assign before super()
+#[test]
+fn delegating_then_target_assigns_before_super_ok() {
+    ok(r#"package p; class S { S(){} } class T extends S { final int x; T(){ this(1); } T(int a){ x=a; super(); } }"#);
+}
+
+// Instance initializer executes only once along effective ctor path: ensure ordering is target(super)->init->body
+#[test]
+fn instance_initializer_ordering_applied_once() {
+    ok(r#"package p; class S { S(){} } class T extends S { final int x; { x = 1; } T(){ this(2); } T(int a){ super(); } }"#);
+}
+
 

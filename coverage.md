@@ -79,8 +79,8 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 | Name resolution | Ambiguous/duplicate imports precedence, inner-class vs top-level shadowing, star-import specificity | ✓ | `review/types.rs`; tests: `review_import_precedence_tests.rs` | Resolution precedence aligned with javac; inner-class vs top-level shadowing and star-import specificity match common scenarios. |
 | Overrides | Generic override checks with erasure/bridges, ACC_SYNTHETIC bridge expectations | ✓ | Visibility/covariant returns/throws narrowing enforced. Bridge methods synthesized at codegen: `Comparable<T>#compareTo(T)` → `compareTo(Object)`, `Comparator<T>#compare(T,T)` → `compare(Object,Object)`, `List<E>#get(I)` → `get(I)Ljava/lang/Object;`. Verification enforces `ACC_BRIDGE|ACC_SYNTHETIC` on bridges and checks erased-target descriptor exists in the declaring class. |
 | Parser | Lambda/method ref grammar, full annotation positions, multi-resource TWR details | ◐/✗ | Parser covers most statements/expressions; lambda/mref not yet |
-| Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Minimal verification-type lattice and CFG-based StackMap computation implemented in `codegen/frame.rs`. Precise typing for `getfield`/`getstatic`/`invoke*`, `new`/`<init>` uninitialized-to-initialized transitions (converting matching locals/stack), and `aload` preserving locals' exact types. Category-2 handling (`long`/`double`), `WIDE` forms, and handler catch-type typing supported. `dup*_x*` respects category-2 widths; `aaload` derives element type from array descriptors. Frame compression (Same/SameExt/SameLocals1*/Append/Chop/Full) emitted. Tests: `tests/stackmap_merge_tests.rs`, `tests/stackmap_compute_tests.rs`, `tests/stackmap_invoke_tests.rs`, `tests/stackmap_precise_types_tests.rs`, `tests/stackmap_return_shapes_tests.rs`, `tests/stackmap_array_and_dup_tests.rs`. Remaining: refine array/object store/load edge-cases and deeper `dup*_x*` object-construction sequences. |
-| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Advanced: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; broadened String concatenation (either side String); shift masking parity (int 5-bit, long 6-bit when lhs effectively long). Guarded div/mod by zero (no fold) with review-time diagnostic. Where: `review/statements.rs` (switch folding + diagnostic), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`, `tests/review_flow_tests.rs`. Remaining: corner-case constant-expression shapes and documentation polish. |
+| Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Minimal verification-type lattice and CFG-based StackMap computation implemented in `codegen/frame.rs`. Precise typing for `getfield`/`getstatic`/`invoke*`, `new`/`<init>` uninitialized-to-initialized transitions (converting matching locals/stack), and `aload` preserving locals' exact types. Category-2 handling (`long`/`double`), `WIDE` forms, and handler catch-type typing supported. `dup*_x*` respects category-2 widths; `aaload` derives element type from array descriptors. Frame compression (Same/SameExt/SameLocals1*/Append/Chop/Full) emitted. Tests: `tests/stackmap_merge_tests.rs`, `tests/stackmap_compute_tests.rs`, `tests/stackmap_invoke_tests.rs`, `tests/stackmap_precise_types_tests.rs`, `tests/stackmap_return_shapes_tests.rs`, `tests/stackmap_array_and_dup_tests.rs`, `tests/stackmap_array_shapes_tests.rs`, `tests/stackmap_dup_deep_construction_tests.rs`. Remaining: optional compression heuristics polish only. |
+| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Advanced: long/double arithmetic; char→int promotions; mixed-type casts/widening; boolean `&`/`|`/`^`; relational comparisons; broadened String concatenation (either side String); shift masking parity (int 5-bit, long 6-bit when lhs effectively long). Guarded div/mod by zero (no fold) with review-time diagnostic. Where: `review/statements.rs` (switch folding + diagnostic), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`, `tests/const_folding_long_parity_tests.rs`, `tests/const_folding_mixed_relational_tests.rs`, `tests/review_flow_tests.rs`. Remaining: minor corner-case shapes and documentation polish. |
 
 Planned sequencing to reach 100%
 - Short-term: switch DA parity (enum/String) ✓, name-resolution precedence ✓, override-bridge checks ✓, annotation placement matrix (declaration-site duplicates ✓; type-use matrix ✓ with retention-based visible/invisible emission), generics upper-bound corner cases ✓, full overload tie-breaks ✓.
@@ -93,6 +93,8 @@ Planned sequencing to reach 100%
   - Implemented in `review/statements.rs` (switch folding + diagnostic) and `codegen/class_writer.rs` (field `ConstantValue` folding)
   - Tests added in `tests/const_folding_tests.rs` and diagnostic checks in `tests/review_flow_tests.rs`
   - Completed: JLS-consistent NaN/Infinity comparison semantics; long-shift parity without explicit casts (6-bit mask when lhs effectively long); long bitwise parity across `&`/`|`/`^`; constant narrowing conversions for byte/short/char with range checks in review; more String concat shapes (nested forms)
+- StackMap
+  - Added precise element typing for `aaload` from array descriptors; expanded `dup*_x*` simulation with category-2 awareness; integrated StackMapTable emission and added deep `new/dup*_x*/<init>` stress tests. Functionality is complete; compression polish remains optional.
 - Next: blank-final DA/DU constructor-path edge cases (this()/super() ordering nuances); expand simulation for arrays/object stores and additional `dup*_x*` shapes; generics capture conversion and poly-expression inference scaffolding
 
 - Long-term:
@@ -102,12 +104,10 @@ Planned sequencing to reach 100%
   - Generics capture conversion and full generic method type inference (poly expressions) if scope expands.
   
 ### Next to do
-- StackMap
-  - Expand simulation coverage: `dup*_x*` around object construction; array/object loads and stores edge-cases; additional category-2 stack ops
-  - Add tests for more array element shapes (multi-dim, primitive arrays) and deeper `<init>` flows combining `new`/`dup*_x*`
-- Constant expressions
-  - Audit parity for long-specific bitwise/shift without explicit casts; add missing corner cases
-- Blank-final DA/DU
-  - Expand constructor path analysis for strict `this()`/`super()` ordering and instance initializer nuances
 - Generics
-  - Add scaffolding for capture conversion and poly-expression inference (affects overload applicability)
+  - Implement capture conversion scaffolding (wildcard capture) and apply in assignability/overload checks; add targeted tests
+  - Add poly-expression (generic method) inference scaffolding for applicability and most-specific selection; add tests
+- StackMap (optional)
+  - Micro-optimizations for frame compression to further match javac (prefer Same/SameLocals1/Append/Chop when possible)
+- Blank-final DA/DU (optional)
+  - Add more ordering edge-case tests if encountered in real codebases

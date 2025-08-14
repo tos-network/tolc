@@ -33,7 +33,7 @@ fn dup_x_patterns_with_category2_do_not_panic_and_produce_frames() {
     // 1) iconst_1, lconst_0, dup_x1, goto +3
     // 2) lconst_0, lconst_0, dup2_x2, goto +3
     // 3) iconst_1, lconst_0, dup2_x1, goto +3
-    // 4) iconst_1, iconst_0, dup_x2, goto +3
+    // 4) iconst_1, iconst_0, dup_x2, swap, goto +3
     // tail: return
     let mut code: Vec<u8> = Vec::new();
     // 1
@@ -43,7 +43,7 @@ fn dup_x_patterns_with_category2_do_not_panic_and_produce_frames() {
     // 3
     code.extend_from_slice(&[0x04, 0x09, 0x5d, 0xa7, 0x00, 0x03]);
     // 4
-    code.extend_from_slice(&[0x04, 0x03, 0x5b, 0xa7, 0x00, 0x03]);
+    code.extend_from_slice(&[0x04, 0x03, 0x5b, 0x5f, 0xa7, 0x00, 0x03]);
     // return
     code.push(0xb1);
 
