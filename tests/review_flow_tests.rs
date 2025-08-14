@@ -2,6 +2,30 @@ use tolc::parser::parse_and_verify;
 
 fn ok(src: &str) { let _ = parse_and_verify(src).expect("expected ok"); }
 fn err_contains(src: &str, needle: &str) { let e = parse_and_verify(src).unwrap_err().to_string(); assert!(e.contains(needle), "{e}"); }
+#[test]
+fn narrowing_assignments_in_range_ok_out_of_range_error() {
+    // in range
+    ok(r#"package p; class T { void t(){ byte b = 127; short s = -32768; char c = 65; } }"#);
+    // out of range should error at review-time compatibility
+    err_contains(r#"package p; class T { void t(){ byte b = 128; } }"#, "Incompatible initializer");
+}
+
+#[test]
+fn const_division_by_zero_reports() {
+    err_contains(
+        r#"package p; class T { void t(){ int x = 1/0; } }"#,
+        "division or modulo by zero in constant expression",
+    );
+}
+
+#[test]
+fn const_mod_by_zero_reports() {
+    err_contains(
+        r#"package p; class T { void t(){ int x = 5%0; } }"#,
+        "division or modulo by zero in constant expression",
+    );
+}
+
 
 #[test]
 fn use_before_init_errors() {

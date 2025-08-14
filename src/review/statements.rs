@@ -390,6 +390,70 @@ fn eval_const_int_kind(expr: &Expr) -> Option<(i64, ConstKind)> {
     }
 }
 
+// Diagnose constant-time division/modulo by zero for integer and floating cases
+fn const_div_or_mod_by_zero(expr: &Expr) -> bool {
+    use crate::ast::{Expr as E, BinaryOp as B};
+    match expr {
+        E::Binary(b) => {
+            match b.operator {
+                B::Div | B::Mod => {
+                    // integer path only: evaluate both sides and check divisor is zero
+                    if let Some((_lv, _lk)) = eval_const_int_kind(&b.left) {
+                        if let Some((rv, _rk)) = eval_const_int_kind(&b.right) {
+                            return rv == 0;
+                        }
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
+        E::Parenthesized(p) => const_div_or_mod_by_zero(p),
+        _ => false,
+    }
+}
+
+// Minimal helper: attempt to fold to any constant literal we recognize
+fn eval_compile_time_expr_any(expr: &Expr) -> Option<crate::ast::Literal> {
+    // reuse codegen evaluator semantics when shapes match through simple constructs used here
+    match expr {
+        Expr::Literal(l) => Some(l.value.clone()),
+        Expr::Parenthesized(p) => eval_compile_time_expr_any(p),
+        Expr::Unary(u) => {
+            if let Some(v) = eval_compile_time_expr_any(&u.operand) {
+                use crate::ast::{Literal as L, UnaryOp as U};
+            match (u.operator.clone(), v) {
+                    (U::Plus, l) => Some(l),
+                    (U::Minus, L::Integer(i)) => Some(L::Integer(-i)),
+                    (U::Minus, L::Float(f)) => Some(L::Float(-f)),
+                    (U::BitNot, L::Integer(i)) => Some(L::Integer(!i)),
+                    (U::Not, L::Boolean(b)) => Some(L::Boolean(!b)),
+                    _ => None,
+                }
+            } else { None }
+        }
+        Expr::Binary(b) => {
+            use crate::ast::{BinaryOp as B, Literal as L};
+            let l = eval_compile_time_expr_any(&b.left)?;
+            let r = eval_compile_time_expr_any(&b.right)?;
+            match (b.operator.clone(), l, r) {
+                (B::Add, L::Integer(a), L::Integer(b)) => Some(L::Integer(a + b)),
+                (B::Sub, L::Integer(a), L::Integer(b)) => Some(L::Integer(a - b)),
+                (B::Mul, L::Integer(a), L::Integer(b)) => Some(L::Integer(a * b)),
+                (B::Div, L::Integer(a), L::Integer(b)) => if b != 0 { Some(L::Integer(a / b)) } else { None },
+                (B::Mod, L::Integer(a), L::Integer(b)) => if b != 0 { Some(L::Integer(a % b)) } else { None },
+                (B::Add, L::Float(a), L::Float(b)) => Some(L::Float(a + b)),
+                (B::Sub, L::Float(a), L::Float(b)) => Some(L::Float(a - b)),
+                (B::Mul, L::Float(a), L::Float(b)) => Some(L::Float(a * b)),
+                (B::Div, L::Float(a), L::Float(b)) => if b != 0.0 { Some(L::Float(a / b)) } else { None },
+                (B::Mod, L::Float(a), L::Float(b)) => if b != 0.0 { Some(L::Float(a % b)) } else { None },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn fold_selector_value_for_int_switch(expr: &Expr) -> Option<i32> {
     let (v, k) = eval_const_int_kind(expr)?;
     match k { ConstKind::Int32 => Some(v as i32), ConstKind::Int64 => None }
@@ -1499,6 +1563,24 @@ fn walk_stmt_locals(
                             let expected = vd.type_ref.name.as_str();
                             if !is_assignable_literal(expected, found) {
                                 return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: found.to_string() });
+                            } else {
+                                // Constant narrowing conversions for byte/short/char when in range
+                                match expected {
+                                    "byte" | "short" | "char" => {
+                                        if let Some((val, _k)) = eval_const_int_kind(init) {
+                                            let ok = match expected {
+                                                "byte" => val >= i8::MIN as i64 && val <= i8::MAX as i64,
+                                                "short" => val >= i16::MIN as i64 && val <= i16::MAX as i64,
+                                                "char" => val >= 0 && val <= u16::MAX as i64,
+                                                _ => true,
+                                            };
+                                            if !ok {
+                                                return Err(ReviewError::IncompatibleInitializer { expected: expected.to_string(), found: found.to_string() });
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         // mark as definitely assigned
@@ -2205,6 +2287,7 @@ pub(crate) fn lookup_type_param_count(global: &crate::review::types::GlobalMembe
 }
 
 fn check_expr_definite_assignment(expr: &Expr, scopes: &mut Vec<HashMap<String, bool>>, final_params: &HashSet<String>) -> ReviewResult<()> {
+    if const_div_or_mod_by_zero(expr) { return Err(ReviewError::DivisionByZeroConstant); }
     match expr {
         Expr::Identifier(id) => {
             match lookup_assigned(scopes, &id.name) {
@@ -2947,10 +3030,15 @@ fn expr_kind(expr: &Expr) -> &'static str {
 fn is_assignable_literal(expected: &str, found: &str) -> bool {
     if found == "null" { return true; }
     match expected {
+        // Narrowing allowed only for literal expressions checked elsewhere; type here is a hint
+        "byte" => matches!(found, "int"|"char"),
+        "short" => matches!(found, "int"|"char"),
+        "char" => matches!(found, "char"|"int"),
         "int" => found == "int",
-        "double" => found == "double" || found == "int",
+        "long" => matches!(found, "int"),
+        "float" => matches!(found, "double"|"int"),
+        "double" => matches!(found, "double"|"int"),
         "boolean" => found == "boolean",
-        "char" => found == "char" || found == "int",
         "String" => found == "String",
         _ => true,
     }

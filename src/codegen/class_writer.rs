@@ -1260,9 +1260,48 @@ impl ClassWriter {
     fn eval_compile_time_constant(expr: &Expr) -> Option<Literal> {
         use crate::ast::{Expr::*, Literal as L, BinaryOp, UnaryOp};
         fn lit(e: &Expr) -> Option<L> { if let Literal(le) = e { Some(le.value.clone()) } else { None } }
+        // Numeric promotion helper: returns (lhs, rhs, kind) coerced to a common numeric kind
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum NumKind { Int, Float }
+        fn promote_numeric(a: L, b: L) -> Option<(L, L, NumKind)> {
+            match (a, b) {
+                (L::Float(x), L::Float(y)) => Some((L::Float(x), L::Float(y), NumKind::Float)),
+                (L::Float(x), L::Integer(y)) => Some((L::Float(x), L::Float(y as f64), NumKind::Float)),
+                (L::Integer(x), L::Float(y)) => Some((L::Float(x as f64), L::Float(y), NumKind::Float)),
+                (L::Integer(x), L::Integer(y)) => Some((L::Integer(x), L::Integer(y), NumKind::Int)),
+                (L::Char(x), L::Integer(y)) => Some((L::Integer(x as i64), L::Integer(y), NumKind::Int)),
+                (L::Integer(x), L::Char(y)) => Some((L::Integer(x), L::Integer(y as i64), NumKind::Int)),
+                (L::Char(x), L::Char(y)) => Some((L::Integer(x as i64), L::Integer(y as i64), NumKind::Int)),
+                _ => None,
+            }
+        }
+        // Java shift count masks
+        fn mask_shift_for_int(n: i64) -> u32 { ((n as i64) & 0x1F) as u32 }
+        fn mask_shift_for_long(n: i64) -> u32 { ((n as i64) & 0x3F) as u32 }
+        fn infer_shift_is_long(left_expr: &Expr) -> bool {
+            fn is_long_cast(e: &Expr) -> bool {
+                match e {
+                    Cast(c) => c.target_type.name == "long",
+                    Parenthesized(p) => is_long_cast(p),
+                    Unary(u) => is_long_cast(&u.operand),
+                    _ => false,
+                }
+            }
+            is_long_cast(left_expr)
+        }
         match expr {
             Literal(le) => Some(le.value.clone()),
             Parenthesized(inner) => Self::eval_compile_time_constant(inner),
+            Cast(c) => {
+                let v = Self::eval_compile_time_constant(&c.expr).or_else(|| lit(&c.expr))?;
+                match c.target_type.name.as_str() {
+                    "int" => match v { L::Integer(i) => Some(L::Integer(i)), L::Char(ch) => Some(L::Integer(ch as i64)), L::Float(f) => Some(L::Integer(f as i64)), L::Boolean(b) => Some(L::Integer(if b {1} else {0})), _ => None },
+                    "float" | "double" => match v { L::Integer(i) => Some(L::Float(i as f64)), L::Char(ch) => Some(L::Float((ch as i64) as f64)), L::Float(f) => Some(L::Float(f)), _ => None },
+                    "char" => match v { L::Integer(i) => Some(L::Char(((i as i64) as u32 as u8) as char)), L::Char(ch) => Some(L::Char(ch)), _ => None },
+                    "boolean" => match v { L::Boolean(b) => Some(L::Boolean(b)), L::Integer(i) => Some(L::Boolean(i != 0)), _ => None },
+                    _ => None,
+                }
+            }
             Unary(u) => {
                 match u.operator {
                     UnaryOp::Plus => Self::eval_compile_time_constant(&u.operand),
@@ -1276,6 +1315,8 @@ impl ClassWriter {
                 use BinaryOp::*;
                 let l = Self::eval_compile_time_constant(&b.left).or_else(|| lit(&b.left))?;
                 let r = Self::eval_compile_time_constant(&b.right).or_else(|| lit(&b.right))?;
+                // Heuristic long detection without explicit cast: if constant lhs is outside i32 range
+                let lhs_is_long = infer_shift_is_long(&b.left) || matches!(l, L::Integer(iv) if iv < i32::MIN as i64 || iv > i32::MAX as i64);
                 match (b.operator.clone(), l, r) {
                     // int arithmetic and bitwise
                     (Add, L::Integer(a), L::Integer(b)) => Some(L::Integer(a + b)),
@@ -1286,15 +1327,57 @@ impl ClassWriter {
                     (And, L::Integer(a), L::Integer(b)) => Some(L::Integer(a & b)),
                     (Or,  L::Integer(a), L::Integer(b)) => Some(L::Integer(a | b)),
                     (Xor, L::Integer(a), L::Integer(b)) => Some(L::Integer(a ^ b)),
-                    (LShift, L::Integer(a), L::Integer(b)) => Some(L::Integer(a << (b as u32))),
-                    (RShift, L::Integer(a), L::Integer(b)) => Some(L::Integer(a >> (b as u32))),
-                    (URShift, L::Integer(a), L::Integer(b)) => Some(L::Integer(((a as u64) >> (b as u32)) as i64)),
+                    (LShift, L::Integer(a), L::Integer(rv)) => {
+                        let sh = if lhs_is_long { mask_shift_for_long(rv) } else { mask_shift_for_int(rv) };
+                        Some(L::Integer(a << sh))
+                    }
+                    (RShift, L::Integer(a), L::Integer(rv)) => {
+                        let sh = if lhs_is_long { mask_shift_for_long(rv) } else { mask_shift_for_int(rv) };
+                        Some(L::Integer(a >> sh))
+                    }
+                    (URShift, L::Integer(a), L::Integer(rv)) => {
+                        let sh = if lhs_is_long { mask_shift_for_long(rv) } else { mask_shift_for_int(rv) };
+                        Some(L::Integer(((a as u64) >> sh) as i64))
+                    }
                     // double arithmetic
                     (Add, L::Float(a), L::Float(b)) => Some(L::Float(a + b)),
                     (Sub, L::Float(a), L::Float(b)) => Some(L::Float(a - b)),
                     (Mul, L::Float(a), L::Float(b)) => Some(L::Float(a * b)),
-                    (Div, L::Float(a), L::Float(b)) => { if b == 0.0 { return None; } Some(L::Float(a / b)) },
-                    (Mod, L::Float(a), L::Float(b)) => { if b == 0.0 { return None; } Some(L::Float(a % b)) },
+                    (Div, L::Float(a), L::Float(b)) => Some(L::Float(a / b)),
+                    (Mod, L::Float(a), L::Float(b)) => Some(L::Float(a % b)),
+                    // mixed numeric promotions
+                    (op @ Add, l, r) | (op @ Sub, l, r) | (op @ Mul, l, r) | (op @ Div, l, r) | (op @ Mod, l, r) => {
+                        if let Some((pl, pr, kind)) = promote_numeric(l.clone(), r.clone()) {
+                            match (op, kind, pl, pr) {
+                                (Add, NumKind::Float, L::Float(a), L::Float(b)) => Some(L::Float(a + b)),
+                                (Sub, NumKind::Float, L::Float(a), L::Float(b)) => Some(L::Float(a - b)),
+                                (Mul, NumKind::Float, L::Float(a), L::Float(b)) => Some(L::Float(a * b)),
+                                (Div, NumKind::Float, L::Float(a), L::Float(b)) => Some(L::Float(a / b)),
+                                (Mod, NumKind::Float, L::Float(a), L::Float(b)) => Some(L::Float(a % b)),
+                                (Add, NumKind::Int, L::Integer(a), L::Integer(b)) => Some(L::Integer(a + b)),
+                                (Sub, NumKind::Int, L::Integer(a), L::Integer(b)) => Some(L::Integer(a - b)),
+                                (Mul, NumKind::Int, L::Integer(a), L::Integer(b)) => Some(L::Integer(a * b)),
+                                (Div, NumKind::Int, L::Integer(a), L::Integer(b)) => { if b == 0 { None } else { Some(L::Integer(a / b)) } },
+                                (Mod, NumKind::Int, L::Integer(a), L::Integer(b)) => { if b == 0 { None } else { Some(L::Integer(a % b)) } },
+                                _ => None,
+                            }
+                        } else { None }
+                    }
+                    // relational comparisons over numeric with promotion
+                    (Lt, l, r) | (Le, l, r) | (Gt, l, r) | (Ge, l, r) | (Eq, l, r) | (Ne, l, r) => {
+                        let op = b.operator.clone();
+                        if let Some((pl, pr, kind)) = promote_numeric(l.clone(), r.clone()) {
+                            match (kind, pl, pr) {
+                                (NumKind::Float, L::Float(a), L::Float(bf)) => Some(L::Boolean(match op { Lt => a < bf, Le => a <= bf, Gt => a > bf, Ge => a >= bf, Eq => a == bf, Ne => a != bf, _ => false })),
+                                (NumKind::Int, L::Integer(a), L::Integer(bi)) => Some(L::Boolean(match op { Lt => a < bi, Le => a <= bi, Gt => a > bi, Ge => a >= bi, Eq => a == bi, Ne => a != bi, _ => false })),
+                                _ => None,
+                            }
+                        } else { None }
+                    }
+                    // boolean logical ops
+                    (And, L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a & b)),
+                    (Or,  L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a | b)),
+                    (Xor, L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a ^ b)),
                     // char promotions (to int)
                     (Add, L::Char(a), L::Char(b)) => Some(L::Integer((a as i64) + (b as i64))),
                     (Add, L::Char(a), L::Integer(b)) => Some(L::Integer((a as i64) + b)),
@@ -1302,6 +1385,12 @@ impl ClassWriter {
                     (Add, L::String(a), L::String(b)) => Some(L::String(format!("{}{}", a, b))),
                     (Add, L::String(a), L::Char(c)) => Some(L::String(format!("{}{}", a, c))),
                     (Add, L::String(a), L::Integer(i)) => Some(L::String(format!("{}{}", a, i))),
+                    (Add, L::String(a), L::Float(f)) => Some(L::String(format!("{}{}", a, f))),
+                    (Add, L::String(a), L::Boolean(bv)) => Some(L::String(format!("{}{}", a, bv))),
+                    (Add, L::Integer(i), L::String(b)) => Some(L::String(format!("{}{}", i, b))),
+                    (Add, L::Float(f), L::String(b)) => Some(L::String(format!("{}{}", f, b))),
+                    (Add, L::Boolean(bv), L::String(b)) => Some(L::String(format!("{}{}", bv, b))),
+                    (Add, L::Char(c), L::String(b)) => Some(L::String(format!("{}{}", c, b))),
                     _ => None,
                 }
             }

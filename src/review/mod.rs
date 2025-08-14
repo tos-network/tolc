@@ -85,6 +85,8 @@ pub enum ReviewError {
     WildcardNotAllowedInNew,
     #[error("inaccessible member '{name}' in '{typename}'")]
     InaccessibleMember { typename: String, name: String },
+    #[error("division or modulo by zero in constant expression")]
+    DivisionByZeroConstant,
 }
 
 /// AST-level review before codegen

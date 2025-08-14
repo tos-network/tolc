@@ -1,5 +1,5 @@
 # Codeing Guidelines
-_For use with Cursor, ChatGPT, Claude, etc. Tailored to your current directory layout._
+_For use with Cursor, ChatGPT, Claude, etc._
 
 ## 1) Purpose
 Make this repository easy for AI tools to **index, retrieve, and reason about**. These rules align code/doc structure with how LLMs chunk and search content, so suggestions are more accurate and safer to apply.

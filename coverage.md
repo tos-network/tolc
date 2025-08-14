@@ -60,11 +60,6 @@ Notes
 | Types/declarations | Nested type declarations (inner classes/interfaces/enums) are reviewed | ✓ | `review/types.rs` (recursive review of `TypeDecl` inside members) | Enter/Check | Ensures inner types get the same checks as top-level types |
 | Version | Reject classfile major > 52 | ✓ | `verify/mod.rs` | Target/Source | Locked to Java 8 |
 
-Summary
--
-
- tolc provides practical coverage for structure/flags/constant pool/attributes, plus useful Flow/Resolve/Generics subsets.
-
 ### Gaps to 100% javac alignment (Java 8) and roadmap
 
 Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
@@ -76,7 +71,7 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 | Generics | Wildcards in constructor type args and nested use sites | ◐ | Basic checks done; full legality and capture missing |
 | Overload resolution | Complete JLS ordering (boxing/unboxing, varargs vs fixed, primitive promotions, most-specific by subtyping) | ◐ | Implemented simplified ranking; needs full tie-breaks (JLS 15.12) and applicability-by-subtyping pass |
 | Lambdas/method refs | Parsing, target typing, inference, exception typing | ✗ | Java 8 feature; out-of-scope so far |
-| Flow/DA | Blank final fields: definite assignment across constructors/this()/super() and DA/DU rules | ✗ | JLS 16 (8e 16.1–16.9); only final-parameter assign banned today |
+| Flow/DA | Blank final fields: definite assignment across constructors/this()/super() and DA/DU rules | ◐ | Implemented path-sensitive checks across constructors with this(...) delegation and instance initializer blocks in `review/methods.rs`: each constructor path must assign each instance final exactly once (or have an initializer), and multiple assignments are rejected; assignments after this(...) caller only. Heuristics cover unresolved delegate targets. Remaining: full JLS edge-cases and super() ordering nuances. |
 | Flow/DA | Full reachability (DR) and DA for complex labeled break/continue with try/finally nesting | ◐ | Core cases handled; needs exhaustive label/try/finally interactions |
 | Flow/DA | Switch analysis parity (strings/enums constant folding, exhaustive per-entry fallthrough paths) | ◐ | Added String/enum constant folding, duplicate-label checks, and enum-exhaustive coverage (no empty path when all constants are listed). Remaining: broader String constant detection beyond literals, and deeper per-label reachability nuances. |
 | Exceptions | Precise throws for generic methods, multi-catch disjointness checks, lambda-related throws | ◐ | Typical throws coverage is present; generic/lambda precision pending |
@@ -85,9 +80,17 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 | Overrides | Generic override checks with erasure/bridges, ACC_SYNTHETIC bridge expectations | ✓ | Visibility/covariant returns/throws narrowing enforced. Bridge methods synthesized at codegen: `Comparable<T>#compareTo(T)` → `compareTo(Object)`, `Comparator<T>#compare(T,T)` → `compare(Object,Object)`, `List<E>#get(I)` → `get(I)Ljava/lang/Object;`. Verification enforces `ACC_BRIDGE|ACC_SYNTHETIC` on bridges and checks erased-target descriptor exists in the declaring class. |
 | Parser | Lambda/method ref grammar, full annotation positions, multi-resource TWR details | ◐/✗ | Parser covers most statements/expressions; lambda/mref not yet |
 | Verify/StackMap | Full verification types and StackMap frame merging | ◐ | Baseline bounds and monotonic checks; full type lattice merge not implemented |
-| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Partially covered: constant folding in switch for int/String/enum (including constant string concatenation). At codegen, emit ConstantValue for `static final` fields (int/long/float/double/char/boolean/String). Remaining: fuller constant-expression semantics and inlining parity. |
+| Const exprs | Compile-time constant evaluation (folding), final fields inlining parity | ◐ | Progressed: extended folding to include long/double arithmetic and char→int promotions; guarded div/mod by zero (no fold). Covered in switch (int/String/enum) and codegen ConstantValue for `static final` across primitives/String. Where: `review/statements.rs` (switch folding), `codegen/class_writer.rs` (`eval_compile_time_constant`). Tests: `tests/const_folding_tests.rs`. Remaining: mixed-type folding with casts/widening, boolean ops, and full javac parity incl. diagnostics for constant-time div/mod by zero. |
 
 Planned sequencing to reach 100%
 - Short-term: switch DA parity (enum/String) ✓, name-resolution precedence ✓, override-bridge checks ✓, annotation placement matrix (declaration-site duplicates ✓; type-use matrix ✓ with retention-based visible/invisible emission), generics upper-bound corner cases ✓, full overload tie-breaks ✓.
-- Mid-term: blank-final DA/DU, generic method inference and capture conversion, StackMap merge improvements, constant expression evaluation.
+ - Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ✗, StackMap merge improvements ◐, constant expression evaluation ◐ (extended long/double/char folding; div/mod-by-zero guard; next: mixed-type casts/widening and diagnostics).
+
+#### Mid-term progress updates (Aug 2025)
+- Constant expressions
+  - Extended compile-time folding: long/double arithmetic; char→int promotions; string concat folding retained
+  - Guarded div/mod by zero during folding (no fold performed)
+  - Implemented in `review/statements.rs` (switch folding) and `codegen/class_writer.rs` (field `ConstantValue` folding)
+  - Tests added in `tests/const_folding_tests.rs`
+  - Next: emit diagnostics for constant-time div/mod by zero; add mixed-type cast/widening-aware folding; broaden boolean/shift semantics to match javac
 - Long-term: lambdas/method references (parser + type inference + flow), full verification type lattice, repeated annotations semantics.
