@@ -920,15 +920,15 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
         let mut local_ranges: Vec<Range> = Vec::with_capacity(ctors.len());
         for c in &ctors {
             let post_block = if let Some(crate::ast::ExplicitCtorInvocation::This { .. }) = c.explicit_invocation {
-                // statements after the first
-                let rest: Vec<Stmt> = c.body.statements.iter().skip(1).cloned().collect();
-                let blk = Block { statements: rest, span: c.body.span };
-                count_in_block(&field_name, &blk)
+                // In our AST, explicit this(...) is stored separately and not as a statement; the entire body
+                // statements execute after delegation returns. So analyze the whole body.
+                count_in_block(&field_name, &c.body)
             } else { count_in_block(&field_name, &c.body) };
             local_ranges.push(post_block);
         }
 
-        // Include instance initializer blocks as prefix to every constructor path
+        // Include instance initializer blocks exactly once per effective constructor path (the one that ultimately invokes super()).
+        // Do NOT add to delegating constructors (this(...)); it is executed only after the ultimate target's super() returns.
         let mut init_prefix = Range::zero();
         for m in &class.body {
             if let ClassMember::Initializer(init) = m {
@@ -937,7 +937,10 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
                 }
             }
         }
-        for r in &mut local_ranges { *r = init_prefix.add(*r); }
+        for (idx, r) in local_ranges.iter_mut().enumerate() {
+            let delegates_this = matches!(ctors[idx].explicit_invocation, Some(crate::ast::ExplicitCtorInvocation::This{..}));
+            if !delegates_this { *r = init_prefix.add(*r); }
+        }
 
         // Heuristic: if a constructor delegates via this(...) but we couldn't resolve
         // the target overload (delegate_to[i] == None), assume the target assigns this
@@ -953,11 +956,14 @@ fn enforce_constructor_final_field_rules(class: &ClassDecl, _ctor: &ConstructorD
         }
 
         // 4) DFS to compute total range per ctor by adding delegated target ranges
+        // Only the ultimate (non-delegating) constructor contributes instance initializers and must ensure exactly-once assignment before normal completion.
         fn compute_total(i: usize, delegate_to: &Vec<Option<usize>>, local: &Vec<Range>, memo: &mut Vec<Option<Range>>, visiting: &mut Vec<bool>) -> Range {
             if let Some(r) = &memo[i] { return *r; }
             if visiting[i] { return Range::none(); } // defensive against cycles
             visiting[i] = true;
             let res = if let Some(j) = delegate_to[i] {
+                // For delegating ctor, its own body executes before this(j), but final-field assignment is not permitted after super();
+                // we conservatively add its local before delegation plus the target's total.
                 local[i].add(compute_total(j, delegate_to, local, memo, visiting))
             } else {
                 local[i]
