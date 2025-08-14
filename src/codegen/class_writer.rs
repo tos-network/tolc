@@ -880,13 +880,17 @@ impl ClassWriter {
                     };
                     cp.try_add_utf8(&desc).map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
                 };
-                // TODO: infer retention from @Retention on the annotation type; default to Runtime (visible)
+                let retention = self.infer_annotation_retention(&ann.name);
                 let entry = crate::codegen::attribute::TypeAnnotationEntry {
                     type_name: type_name_utf.into(),
-                    retention: Some(crate::codegen::attribute::RetentionPolicy::Runtime),
+                    retention: retention.clone(),
                     targets: vec![crate::codegen::attribute::AnnotationTarget::TypeUse],
                 };
-                out_visible.push(entry);
+                match retention {
+                    Some(crate::codegen::attribute::RetentionPolicy::Runtime) => out_visible.push(entry),
+                    Some(crate::codegen::attribute::RetentionPolicy::Class) => out_invisible.push(entry),
+                    _ => {}
+                }
             }
         }
         // Recurse into type arguments and wildcard bounds
@@ -899,6 +903,12 @@ impl ClassWriter {
             }
         }
         Ok(())
+    }
+
+    fn infer_annotation_retention(&self, _ann_name: &str) -> Option<crate::codegen::attribute::RetentionPolicy> {
+        // TODO: Inspect annotation declarations within current CU to compute real retention.
+        // For now, default to Runtime (visible) until we have element-value parsing for @Retention.
+        Some(crate::codegen::attribute::RetentionPolicy::Runtime)
     }
     
     /// Generate bytecode for a constructor

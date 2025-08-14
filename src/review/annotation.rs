@@ -1,9 +1,9 @@
 use super::{ReviewError, ReviewResult};
 use crate::ast::{Annotation, AnnotationDecl, ConstructorDecl, FieldDecl, MethodDecl, Parameter, ClassDecl, InterfaceDecl, EnumDecl};
 
-pub(crate) fn review_annotation(_a: &AnnotationDecl) -> ReviewResult<()> {
-    // Placeholder for future annotation-specific checks
-    Ok(())
+pub(crate) fn review_annotation(a: &AnnotationDecl) -> ReviewResult<()> {
+    // Disallow duplicates on the annotation type itself
+    check_no_duplicate_annotations(&a.annotations)
 }
 
 // Declaration-site annotation placement and repeat checks (subset)
