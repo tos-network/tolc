@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::ast::*;
 use crate::error::Result;
 use super::method_writer::MethodWriter as BodyWriter;
+use std::collections::HashMap;
 
 /// Class writer for generating Java bytecode
 pub struct ClassWriter {
@@ -26,6 +27,8 @@ pub struct ClassWriter {
     package_name: Option<String>,
     cp_shared: Option<std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>>,
     pending_default_ctor_method_idx: Option<usize>,
+    // Annotation retention index for the current compilation unit: simple or FQ name -> retention
+    annotation_retention: HashMap<String, crate::codegen::attribute::RetentionPolicy>,
 }
 
 impl ClassWriter {
@@ -38,6 +41,7 @@ impl ClassWriter {
             package_name: None,
             cp_shared: None,
             pending_default_ctor_method_idx: None,
+            annotation_retention: HashMap::new(),
         }
     }
 
@@ -49,12 +53,18 @@ impl ClassWriter {
             package_name: None,
             cp_shared: None,
             pending_default_ctor_method_idx: None,
+            annotation_retention: HashMap::new(),
         }
     }
 
     /// Optionally set the package name (e.g., "mono" or "com.example")
     pub fn set_package_name<S: Into<String>>(&mut self, package: Option<S>) {
         self.package_name = package.map(|s| s.into());
+    }
+
+    /// Provide CU-wide annotation retention mapping
+    pub fn set_annotation_retention_index(&mut self, idx: HashMap<String, crate::codegen::attribute::RetentionPolicy>) {
+        self.annotation_retention = idx;
     }
 
     /// Enable or disable debug info (LineNumberTable, LocalVariableTable)
@@ -905,9 +915,21 @@ impl ClassWriter {
         Ok(())
     }
 
-    fn infer_annotation_retention(&self, _ann_name: &str) -> Option<crate::codegen::attribute::RetentionPolicy> {
-        // TODO: Inspect annotation declarations within current CU to compute real retention.
-        // For now, default to Runtime (visible) until we have element-value parsing for @Retention.
+    fn infer_annotation_retention(&self, ann_name: &str) -> Option<crate::codegen::attribute::RetentionPolicy> {
+        // Try exact match
+        if let Some(p) = self.annotation_retention.get(ann_name) { return Some(p.clone()); }
+        // Try fully-qualified with current package
+        if !ann_name.contains('.') {
+            if let Some(pkg) = &self.package_name {
+                let fq = format!("{}.{}", pkg, ann_name);
+                if let Some(p) = self.annotation_retention.get(&fq) { return Some(p.clone()); }
+            }
+        }
+        // Try simple-name from fq keys
+        if !ann_name.contains('.') {
+            for (k, v) in &self.annotation_retention { if k.rsplit('.').next() == Some(ann_name) { return Some(v.clone()); } }
+        }
+        // Default to Runtime when unknown
         Some(crate::codegen::attribute::RetentionPolicy::Runtime)
     }
     
