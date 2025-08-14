@@ -188,3 +188,23 @@ class A {
     let output = printer.print(&ast);
     assert!(output.contains("class A"));
 }
+
+#[test]
+fn lambda_syntax_is_rejected() {
+    let source = r#"
+package p;
+class A { void m(){ java.util.List<Integer> xs = null; xs.forEach(x -> {}); } }
+"#;
+    let err = tolc::parser::parse_tol(source).unwrap_err().to_string();
+    assert!(err.contains("lambda expressions are not supported"), "{err}");
+}
+
+#[test]
+fn method_reference_syntax_is_rejected() {
+    let source = r#"
+package p;
+class A { void m(){ java.util.function.Function<String,Integer> f = String::length; } }
+"#;
+    let err = tolc::parser::parse_tol(source).unwrap_err().to_string();
+    assert!(err.contains("method references are not supported"), "{err}");
+}

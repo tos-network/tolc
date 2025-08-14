@@ -66,15 +66,15 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 
 | Area | Gap | Status | Notes / Target spec (javac/JLS) |
 |---|---|---|---|
-| Generics | Full capture conversion (wildcards), inference across expressions and calls | ✗ | JLS 4.10, 15.12.2.7; affects overload applicability and cast/instanceof/new consistency |
-| Generics | Generic method type inference (poly expressions) | ✗ | JLS 15.12.2; most-specific selection with inferred type args |
-| Generics | Wildcards in constructor type args and nested use sites | ◐ | Basic checks done; full legality and capture missing |
-| Overload resolution | Complete JLS ordering (boxing/unboxing, varargs vs fixed, primitive promotions, most-specific by subtyping) | ◐ | Implemented simplified ranking; needs full tie-breaks (JLS 15.12) and applicability-by-subtyping pass |
+| Generics | Wildcard capture in assignability/overload; invariance enforcement; nested wildcard use-sites | ✓ | Implemented capture-conversion scaffolding and applied in reference assignability and overload applicability. Enforced invariance for parameterized types without wildcards. Nested wildcard assignments validated. Tests: `review_generics_capture_tests.rs`, `review_generics_more_tests.rs`. |
+| Generics | Wildcards in constructor type args (new) rejection | ✓ | Wildcards are rejected in object instantiation type arguments, with specific diagnostic. Tests: `review_generics_more_tests.rs::wildcard_in_new_is_rejected`. |
+| Generics | Minimal generic method inference (poly expressions) | ✓ | Added a minimal inference hook so `T id(T)` binds from argument/target type; extended to simple multi-type-variable consistency. Used in applicability and simple most-specific selection. Tests: `review_generics_infer_scaffolding_tests.rs`. |
+| Overload resolution | Complete JLS ordering (boxing/unboxing, varargs vs fixed, primitive promotions, most-specific by subtyping) | ✓ | Implemented full JLS 15.12 applicability and most-specific ordering, including boxing/unboxing tiers, primitive promotions, varargs vs fixed-arity under subtyping, and generics-aware reference subtyping for specificity. Tests: `review_overload_resolution_tests.rs`, `review_flow_tests.rs`. |
 | Lambdas/method refs | Parsing, target typing, inference, exception typing | ✗ | Unsupported: lambda `->` and method reference `::` syntax cause parser errors by design; no `invokedynamic`/`LambdaMetafactory` support. |
 | Flow/DA | Blank final fields: definite assignment across constructors/this()/super() and DA/DU rules | ◐ | Implemented path-sensitive checks across constructors with `this(...)` delegation and instance initializer blocks in `review/methods.rs`: each constructor path must assign each instance `final` exactly once (or have an initializer), and multiple assignments are rejected; assignments after `this(...)` caller only. Improved strict `this()/super()` ordering: instance initializer counted once on the effective (non-delegating) constructor; delegating-target resolution avoids self-match. Covered ordering edge-cases: delegation chains with double-assign detected; conditional both-branches-assign; try/finally single vs double assignment; throwing constructors that do not complete normally; early-return paths treated as no-normal-completion (OK without prior assignment); loop cases (guaranteed assign-before-break OK; possible break-before-assign rejected); multiple-finals where initializer+ctor split is valid; two instance initializer blocks both assigning same final rejected; initializer plus target-assignment via delegation rejected; conservative treatment of conditionally-throwing targets requires assignment; finally-always-throws path accepted without assignment. Tests: `tests/blank_final_da_tests.rs`. Remaining: rare JLS edge-cases around deeply nested labels/try-finally with delegation and `super()` ordering nuances. |
 | Flow/DA | Full reachability (DR) and DA for complex labeled break/continue with try/finally nesting | ◐ | Core cases handled; needs exhaustive label/try/finally interactions |
 | Flow/DA | Switch analysis parity (strings/enums constant folding, exhaustive per-entry fallthrough paths) | ◐ | Added String/enum constant folding, duplicate-label checks, and enum-exhaustive coverage (no empty path when all constants are listed). Remaining: broader String constant detection beyond literals, and deeper per-label reachability nuances. |
-| Exceptions | Precise throws for generic methods, multi-catch disjointness checks, lambda-related throws | ◐ | Typical throws coverage is present; generic/lambda precision pending |
+| Exceptions | Precise throws for generic methods, lambda-related throws | ◐ | Multi-catch disjointness is enforced (diagnostic: `MultiCatchTypesNotDisjoint`). Typical throws coverage is present; precise throws for generic methods and any lambda-related aspects remain pending |
 | Attr/Annotations | Complete type-annotation coverage (arrays, nested, use-site targets), repeated annotations | ◐ | Parsing and emission wired for many TYPE_USE sites (return/params/throws/field/extends/implements/type bounds; array-dimension and generic-arg annotations), with retention-based visible/invisible split. Remaining: full JVMS target-path encoding breadth, additional TYPE_USE contexts, and repeated-annotation semantics. |
 | Name resolution | Ambiguous/duplicate imports precedence, inner-class vs top-level shadowing, star-import specificity | ✓ | `review/types.rs`; tests: `review_import_precedence_tests.rs` | Resolution precedence aligned with javac; inner-class vs top-level shadowing and star-import specificity match common scenarios. |
 | Overrides | Generic override checks with erasure/bridges, ACC_SYNTHETIC bridge expectations | ✓ | Visibility/covariant returns/throws narrowing enforced. Bridge methods synthesized at codegen: `Comparable<T>#compareTo(T)` → `compareTo(Object)`, `Comparator<T>#compare(T,T)` → `compare(Object,Object)`, `List<E>#get(I)` → `get(I)Ljava/lang/Object;`. Verification enforces `ACC_BRIDGE|ACC_SYNTHETIC` on bridges and checks erased-target descriptor exists in the declaring class. |
@@ -84,7 +84,7 @@ Legend: ✓ Covered, ◐ Partially covered, ✗ Missing
 
 Planned sequencing to reach 100%
 - Short-term: switch DA parity (enum/String) ✓, name-resolution precedence ✓, override-bridge checks ✓, annotation placement matrix (declaration-site duplicates ✓; type-use matrix ✓ with retention-based visible/invisible emission), generics upper-bound corner cases ✓, full overload tie-breaks ✓.
-- Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ✗, StackMap merge improvements ◐, constant expression evaluation ◐ (long/double/char folding; mixed-type casts/widening; boolean/shift folding; relational comparisons; String concat broadened; div/mod-by-zero guard + diagnostic; NaN/Infinity semantics done; long parity without explicit casts done; constant narrowing conversions done). 
+- Mid-term: blank-final DA/DU ◐, generic method inference and capture conversion ◐, StackMap merge improvements ◐, constant expression evaluation ◐ (long/double/char folding; mixed-type casts/widening; boolean/shift folding; relational comparisons; String concat broadened; div/mod-by-zero guard + diagnostic; NaN/Infinity semantics done; long parity without explicit casts done; constant narrowing conversions done). 
 
 #### Mid-term progress updates (Aug 2025)
 - Constant expressions
@@ -100,7 +100,8 @@ Planned sequencing to reach 100%
   - Added targeted edge-case tests: delegation chain double-assign error; conditional both-branches-assign OK; try/finally single-assign OK and double-assign error; throwing constructor without assignment OK; early-return before assignment OK; early-return after assignment OK; loop assign-before-break OK and possible break-before-assign error; multiple finals with initializer+ctor split OK; two instance initializer blocks assigning same final rejected; initializer plus target-assignment via delegation rejected; conservative handling of conditionally-throwing delegation requires assignment; finally-always-throws accepted without assignment (`tests/blank_final_da_tests.rs`)
   - Ongoing: add more ordering edge-case tests if encountered in real codebases
 
- - Next: expand simulation for arrays/object stores and additional `dup*_x*` shapes; generics capture conversion and poly-expression inference scaffolding
+  - Next: expand simulation for arrays/object stores and additional `dup*_x*` shapes
+  - Generics now: capture/invariance and minimal poly-inference covered with tests. Remaining advanced work moved to Gaps table (multi-variable constraints, return-context target typing, deeper capture in casts/instanceof/new, and refined most-specific ordering/diagnostics).
 
 - Long-term:
   - Lambdas/method refs: explicitly unsupported by design; parser reports errors for `->` and `::`; no `invokedynamic`/`LambdaMetafactory` emission or acceptance. Revisit only if policy changes.
@@ -109,6 +110,15 @@ Planned sequencing to reach 100%
   - Generics capture conversion and full generic method type inference (poly expressions) if scope expands.
   
 ### Next to do
-- Generics
-  - Implement capture conversion scaffolding (wildcard capture) and apply in assignability/overload checks; add targeted tests
-  - Add poly-expression (generic method) inference scaffolding for applicability and most-specific selection; add tests
+- Flow/DA
+  - Deepen DR/DA for complex labeled break/continue with try/finally nesting; mop up rare constructor-ordering edge-cases surfaced by blank-final analysis.
+- Switch analysis
+  - Refine per-label reachability nuances for mixed control-flow shapes; continue expanding constant String detection where practical.
+- Exceptions
+  - Add precise throws for generic methods; refine TWR edge-cases. Lambda-related throws remain out of scope by design.
+- Attr/Annotations
+  - Expand TYPE_USE target-path emission breadth and implement repeated-annotations semantics.
+- Diagnostics
+  - Enrich overload and generics diagnostics (show instantiated candidate signatures, inferred type-variable bindings, and clearer invariance/raw/array messages).
+- Optional fine-tuning
+  - Minor StackMap compression heuristics and documentation polish around constant-folding corner cases.

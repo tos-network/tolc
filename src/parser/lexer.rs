@@ -183,6 +183,8 @@ pub enum Token {
     Question,
     #[token(":")]
     Colon,
+    #[token("::")]
+    DoubleColon,
     #[token("->")]
     Arrow,
     

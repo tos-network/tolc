@@ -88,10 +88,10 @@ package p;
 class Exception {}
 class IOException extends Exception {}
 class SecurityException extends Exception {}
-class T {
+    class T {
   void t(){
     try { throw new IOException(); }
-    catch (Exception | SecurityException e) { throw e; }
+    catch (IOException | SecurityException e) { throw e; }
   }
 }
 "#;

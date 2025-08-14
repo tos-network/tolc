@@ -88,6 +88,8 @@ pub enum ReviewError {
     InaccessibleMember { typename: String, name: String },
     #[error("division or modulo by zero in constant expression")]
     DivisionByZeroConstant,
+    #[error("multi-catch alternatives must be disjoint: '{t1}' and '{t2}'")]
+    MultiCatchTypesNotDisjoint { t1: String, t2: String },
 }
 
 /// AST-level review before codegen

@@ -46,6 +46,19 @@ impl Parser {
     pub fn parse(mut self) -> Result<Ast> {
         let start_span = self.current_span();
         let initial_gas = self.global_gas;
+        // Hard-gate unsupported Java 8+ syntaxes early: lambda (->) and method references (::)
+        // so callers get a clear, immediate error.
+        for tok in &self.tokens {
+            match tok.token_type() {
+                Token::Arrow => {
+                    return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
+                }
+                Token::DoubleColon => {
+                    return Err(ParseError::InvalidSyntax { message: "method references are not supported".to_string(), location: tok.location() }.into());
+                }
+                _ => {}
+            }
+        }
         
         // Parse package declaration
         let package_decl = if self.check(&Token::Package) {
@@ -1950,6 +1963,11 @@ impl Parser {
 
     fn parse_assignment_expr(&mut self) -> Result<Expr> {
         let left = self.parse_conditional_expr()?;
+        // If a lambda arrow follows a parsed primary/parenthesized ident list, reject explicitly
+        if self.check(&Token::Arrow) {
+            let tok = self.peek();
+            return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
+        }
         // Check for assignment or compound assignment operators
         let op = if self.match_token(&Token::Assign) {
             Some(AssignmentOp::Assign)
@@ -2249,6 +2267,15 @@ impl Parser {
         let mut expr = self.parse_primary_expr()?;
         // Chained operations: calls, field access, array access, post-inc/dec, anonymous class after constructor
         {
+            // Reject method references and lambdas encountered in postfix context
+            if self.check(&Token::DoubleColon) {
+                let tok = self.peek();
+                return Err(ParseError::InvalidSyntax { message: "method references are not supported".to_string(), location: tok.location() }.into());
+            }
+            if self.check(&Token::Arrow) {
+                let tok = self.peek();
+                return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
+            }
             let mut steps: usize = 0;
             loop {
                 if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
@@ -2341,6 +2368,15 @@ impl Parser {
     }
     
     fn parse_primary_expr(&mut self) -> Result<Expr> {
+        // Reject lambda and method reference syntax explicitly
+        if self.check(&Token::Arrow) {
+            let tok = self.peek();
+            return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
+        }
+        if self.check(&Token::DoubleColon) {
+            let tok = self.peek();
+            return Err(ParseError::InvalidSyntax { message: "method references are not supported".to_string(), location: tok.location() }.into());
+        }
         // Class literal: TypeName.class or primitiveType.class (optionally with array dims)
         {
             let save = self.current;

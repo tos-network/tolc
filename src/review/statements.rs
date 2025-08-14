@@ -689,11 +689,27 @@ pub(crate) fn review_body_checked_exceptions(
             arity: usize,
             arg_types: Option<&Vec<String>>,
         ) -> Vec<String> {
+            // Helper: expand method/class type variables in throws list to their upper bounds when available
+            fn expand_typevar_throws(mt: &crate::review::types::MemberTables, list: Vec<String>) -> Vec<String> {
+                use std::collections::HashSet;
+                let mut out: Vec<String> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
+                for t in list {
+                    if let Some(bounds) = mt.type_param_name_to_bounds.get(&t) {
+                        for b in bounds {
+                            if seen.insert(b.clone()) { out.push(b.clone()); }
+                        }
+                    } else {
+                        if seen.insert(t.clone()) { out.push(t); }
+                    }
+                }
+                out
+            }
             // Prefer by signature if arg types known
             if let Some(arg_sig) = arg_types {
                 if let Some(list) = mt.methods_throws_by_sig.get(name) {
                     for (sig, thr) in list {
-                        if sig == arg_sig { return thr.clone(); }
+                        if sig == arg_sig { return expand_typevar_throws(mt, thr.clone()); }
                     }
                 }
                 // Try partial match: among known signatures, keep those of same arity
@@ -710,7 +726,7 @@ pub(crate) fn review_body_checked_exceptions(
                     if candidates.len() == 1 {
                         if let Some(list) = mt.methods_throws_by_sig.get(name) {
                             for (sig, thr) in list {
-                                if sig == &candidates[0] { return thr.clone(); }
+                                if sig == &candidates[0] { return expand_typevar_throws(mt, thr.clone()); }
                             }
                         }
                     }
@@ -721,7 +737,7 @@ pub(crate) fn review_body_checked_exceptions(
             if let Some(list) = mt.methods_throws.get(name) {
                 for (a, thr) in list { if *a == arity { for t in thr { out.insert(t.clone()); } } }
             }
-            out.into_iter().collect()
+            expand_typevar_throws(mt, out.into_iter().collect())
         }
         fn select_ctor_throws(
             mt: &crate::review::types::MemberTables,
@@ -729,10 +745,25 @@ pub(crate) fn review_body_checked_exceptions(
             arity: usize,
             arg_types: Option<&Vec<String>>,
         ) -> Vec<String> {
+            fn expand_typevar_throws(mt: &crate::review::types::MemberTables, list: Vec<String>) -> Vec<String> {
+                use std::collections::HashSet;
+                let mut out: Vec<String> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
+                for t in list {
+                    if let Some(bounds) = mt.type_param_name_to_bounds.get(&t) {
+                        for b in bounds {
+                            if seen.insert(b.clone()) { out.push(b.clone()); }
+                        }
+                    } else {
+                        if seen.insert(t.clone()) { out.push(t); }
+                    }
+                }
+                out
+            }
             if let Some(arg_sig) = arg_types {
                 if let Some(list) = mt.ctors_throws_by_sig.get(self_type) {
                     for (sig, thr) in list {
-                        if sig == arg_sig { return thr.clone(); }
+                        if sig == arg_sig { return expand_typevar_throws(mt, thr.clone()); }
                     }
                 }
                 if let Some(sigs) = mt.ctors_signatures.get(self_type) {
@@ -747,7 +778,7 @@ pub(crate) fn review_body_checked_exceptions(
                     if candidates.len() == 1 {
                         if let Some(list) = mt.ctors_throws_by_sig.get(self_type) {
                             for (sig, thr) in list {
-                                if sig == &candidates[0] { return thr.clone(); }
+                                if sig == &candidates[0] { return expand_typevar_throws(mt, thr.clone()); }
                             }
                         }
                     }
@@ -757,7 +788,7 @@ pub(crate) fn review_body_checked_exceptions(
             if let Some(list) = mt.ctors_throws.get(self_type) {
                 for (a, thr) in list { if *a == arity { for t in thr { out.insert(t.clone()); } } }
             }
-            out.into_iter().collect()
+            expand_typevar_throws(mt, out.into_iter().collect())
         }
         // Helper to enforce coverage for a thrown exception type name
         let require = |exc: &str| -> ReviewResult<()> {
@@ -1098,6 +1129,18 @@ pub(crate) fn review_body_checked_exceptions(
                     // compute checked exceptions possibly thrown in try
                     let try_checked = collect_checked_exceptions_in_block(current_class, &t.try_block, global, scopes);
                     for c in &t.catch_clauses {
+                        // Multi-catch disjointness check: for each pair in (param.type_ref + alt_types), ensure no subtype relation
+                        let mut all_types: Vec<String> = vec![c.parameter.type_ref.name.clone()];
+                        for alt in &c.alt_types { all_types.push(alt.name.clone()); }
+                        for i in 0..all_types.len() {
+                            for j in (i+1)..all_types.len() {
+                                let a = &all_types[i];
+                                let b = &all_types[j];
+                                if is_reference_assignable(global, a, b) || is_reference_assignable(global, b, a) {
+                                    return Err(ReviewError::MultiCatchTypesNotDisjoint { t1: a.clone(), t2: b.clone() });
+                                }
+                            }
+                        }
                         scopes.push({ let mut m = HashMap::new(); m.insert(c.parameter.name.clone(), c.parameter.type_ref.name.clone()); m });
                         let mut ct: Vec<String> = vec![c.parameter.type_ref.name.clone()];
                         for alt in &c.alt_types { ct.push(alt.name.clone()); }
