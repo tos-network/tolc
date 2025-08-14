@@ -36,4 +36,10 @@ fn array_list_string_not_assignable_to_array_list_object_error() {
     );
 }
 
+// Nested wildcards use-sites
+#[test]
+fn nested_wildcards_extends_chain_ok() {
+    ok(r#"package p; class T { void f(java.util.List<? extends java.util.List<? extends Number>> a){ java.util.List<java.util.List<Integer>> b=null; a=b; } }"#);
+}
+
 

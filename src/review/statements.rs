@@ -2524,6 +2524,14 @@ fn walk_expr(
                                 let found = found_list.join(",");
                                 return Err(ReviewError::InapplicableMethod { name: mc.name.clone(), expected, found });
                             } else if applicable.len() > 1 {
+                                // Prefer candidates with exact per-position equality to found types
+                                let mut exact_type_eq: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s)
+                                    .filter(|sig| sig.len()==found_list.len() && sig.iter().zip(found_list.iter()).all(|(e,f)| e==f)).collect();
+                                if exact_type_eq.len() == 1 {
+                                    applicable.retain(|(s, _, _)| *s == exact_type_eq[0]);
+                                } else if exact_type_eq.len() > 1 {
+                                    // If multiple are exactly equal (unlikely), keep them and continue tie-breakers
+                                }
                                 // Tie-breaks:
                                 // 1) Prefer exact conversions (zero convs)
                                 let exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
@@ -2840,6 +2848,12 @@ fn walk_expr(
                 }
                 return Ok(());
             }
+            // Wildcards are not allowed in constructor type arguments
+            for targ in &n.target_type.type_args {
+                if let crate::ast::TypeArg::Wildcard(_) = targ {
+                    return Err(ReviewError::WildcardNotAllowedInNew);
+                }
+            }
             // validate constructor call only for current class
             if n.target_type.name == current_class_name {
                 let found_arity = n.arguments.len();
@@ -2908,11 +2922,14 @@ fn walk_expr(
                         }
                     }
                     // Basic bounds check: if bounds recorded, ensure each argument type simple name matches or is assignable to the bound simple name
+                    // Reject any wildcard in constructor type arguments
+                    for targ in &n.target_type.type_args {
+                        if let crate::ast::TypeArg::Wildcard(_) = targ {
+                            return Err(ReviewError::WildcardNotAllowedInNew);
+                        }
+                    }
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in n.target_type.type_args.iter().enumerate() {
-                            if let crate::ast::TypeArg::Wildcard(_) = targ {
-                                return Err(ReviewError::WildcardNotAllowedInNew);
-                            }
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
                                 if let Some(tname) = typearg_to_simple_name(targ) {
                                     for b in bounds {
@@ -3068,8 +3085,9 @@ fn enforce_local_assignment_types_in_block(
                         if let Expr::Identifier(id_dst) = &*a.target {
                             if let Some(dst_tr) = lookup_local_type(locals, &id_dst.name) {
                                 if let Some(src_tr) = lookup_ident_expr_typeref(&a.value, locals) {
-                                    // Enforce invariance only when both locals share the same raw generic type and have concrete args
-                                    if dst_tr.name == src_tr.name && !dst_tr.type_args.is_empty() && !src_tr.type_args.is_empty() {
+                                    // 1) Fast-path: enforce invariance when both sides are parameterized without wildcards
+                                    let both_param_no_wild = |tr: &TypeRef| tr.type_args.iter().all(|ta| matches!(ta, crate::ast::TypeArg::Type(_)));
+                                    if dst_tr.name == src_tr.name && !dst_tr.type_args.is_empty() && !src_tr.type_args.is_empty() && both_param_no_wild(dst_tr) && both_param_no_wild(&src_tr) {
                                         if dst_tr.type_args.len() == src_tr.type_args.len() {
                                             for (da, sa) in dst_tr.type_args.iter().zip(src_tr.type_args.iter()) {
                                                 if let (crate::ast::TypeArg::Type(dt), crate::ast::TypeArg::Type(st)) = (da, sa) {
@@ -3078,6 +3096,14 @@ fn enforce_local_assignment_types_in_block(
                                                     }
                                                 }
                                             }
+                                        }
+                                    } else {
+                                        // 2) General path: use generics-aware assignability with capture
+                                        let env = TypeEnv::default();
+                                        let dst_rt = crate::review::generics::capture(&resolve_type_ref(dst_tr, &env, global), &env);
+                                        let src_rt = crate::review::generics::capture(&resolve_type_ref(&src_tr, &env, global), &env);
+                                        if !crate::review::generics::is_assignable(&src_rt, &dst_rt, &env, global) {
+                                            return Err(ReviewError::IncompatibleInitializer { expected: dst_tr.name.clone(), found: src_tr.name.clone() });
                                         }
                                     }
                                 }
@@ -3416,11 +3442,30 @@ fn calc_cost_with_varargs(
     if !has_varargs && found_list.len() != fixed_len { return None; }
     let mut cost: u32 = 0;
     let mut convs: u32 = 0;
+    let mut tv_bindings: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    fn is_type_var_name(s: &str) -> bool {
+        if s.is_empty() { return false; }
+        let mut chars = s.chars();
+        let c0 = chars.next().unwrap();
+        if !c0.is_ascii_uppercase() { return false; }
+        // Disallow dotted names; keep simple identifiers as TVars
+        !s.contains('.')
+    }
     // fixed part
     for i in 0..(fixed_len.saturating_sub(if has_varargs {1} else {0})) {
         let exp = sig.get(i).unwrap();
         let f = *found_list.get(i).unwrap_or(&"");
-        if let Some(cc) = conversion_cost_with_boxing_ctx(exp.as_str(), f, global) {
+        if is_type_var_name(exp.as_str()) {
+            if let Some(bound) = tv_bindings.get::<str>(exp.as_str()) {
+                if *bound != f { return None; }
+            } else {
+                tv_bindings.insert(exp.as_str(), f);
+            }
+            // small cost for inferred TVars
+            let cc = if f == "null" { 2 } else { 1 };
+            if cc > 0 { convs += 1; }
+            cost += cc;
+        } else if let Some(cc) = conversion_cost_with_boxing_ctx(exp.as_str(), f, global) {
             if cc > 0 { convs += 1; }
             cost += cc;
         } else { return None; }
@@ -3429,7 +3474,16 @@ fn calc_cost_with_varargs(
         let var_t = sig.last().unwrap();
         for j in (fixed_len - 1)..found_list.len() {
             let f = found_list[j];
-            if let Some(cc) = conversion_cost_with_boxing_ctx(var_t.as_str(), f, global) {
+            if is_type_var_name(var_t.as_str()) {
+                if let Some(bound) = tv_bindings.get::<str>(var_t.as_str()) {
+                    if *bound != f { return None; }
+                } else {
+                    tv_bindings.insert(var_t.as_str(), f);
+                }
+                let cc = if f == "null" { 2 } else { 1 };
+                if cc > 0 { convs += 1; }
+                cost += cc;
+            } else if let Some(cc) = conversion_cost_with_boxing_ctx(var_t.as_str(), f, global) {
                 if cc > 0 { convs += 1; }
                 cost += cc;
             } else { return None; }

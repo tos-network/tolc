@@ -136,13 +136,7 @@ The compilation pipeline consists of three main stages:
 
 ## Licensing
 
-This project is licensed under MIT OR Apache-2.0. See the LICENSE file for details.
-
----
-
-## Versioning
-
-`tolc` uses semantic versions: `MAJOR.MINOR.PATCH`. The current version is 0.1.0.
+This project is licensed under Apache-2.0. See the LICENSE file for details.
 
 ---
 

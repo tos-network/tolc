@@ -10,4 +10,9 @@ fn method_invocation_with_simple_generic_signature_is_ok() {
     ok(r#"package p; class U { <T> T id(T t){ return t; } void g(){ Integer x = id(1); } }"#);
 }
 
+#[test]
+fn method_invocation_with_two_type_vars_prefers_consistent_binding() {
+    ok(r#"package p; class U { <A,B> A left(A a, B b){ return a; } void g(){ Integer x = left(1, 2L); } }"#);
+}
+
 
