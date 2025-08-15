@@ -18,7 +18,7 @@ pub mod frame;
 pub mod method;
 pub mod method_writer;
 pub mod opcodes;
-pub mod opcodor;
+pub mod opcode_generator;
 pub mod signature;
 pub mod typed_index;
 pub mod vec;
@@ -32,7 +32,7 @@ pub use constpool::{ConstantPool, Constant, ConstPoolError};
 pub use error::{ClassGenerationError, CodeGenResult};
 pub use method::*;
 pub use method_writer::*;
-pub use opcodor::*;
+pub use opcode_generator::*;
 
 pub use vec::*;
 pub use writer::*;

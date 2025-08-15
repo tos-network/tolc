@@ -3,13 +3,15 @@ use tolc::parser::parse_and_verify;
 use tolc::parser::parse_tol;
 use tolc::codegen::ClassWriter;
 use tolc::codegen::class_file_to_bytes;
-use tolc::ast::TypeDecl;
+use tolc::ast::{TypeDecl, ClassMember};
  
 
 /// Test HelloWorld program compilation
 /// This test verifies that the famous HelloWorld Java program can be correctly parsed and generate valid class files
 #[test]
 fn test_helloworld_compilation() {
+    println!("🚀 DEBUG: Starting test_helloworld_compilation test...");
+    
     // HelloWorld Java source code
     let source = r#"
 package mono;
@@ -21,26 +23,75 @@ public class HelloWorld {
 }
 "#;
     
+    println!("🔍 DEBUG: HelloWorld source code prepared");
+    
     // Parse source code
+    println!("🔍 DEBUG: About to parse source code...");
     let ast = parse_and_verify (source).expect("Failed to parse HelloWorld source");
+    println!("🔍 DEBUG: Source code parsed successfully");
+    println!("🔍 DEBUG: AST has {} type declarations", ast.type_decls.len());
     
     // Find HelloWorld class declaration
+    println!("🔍 DEBUG: Looking for HelloWorld class in AST...");
     let class_decl = ast.type_decls.iter()
         .find_map(|t| match t {
             TypeDecl::Class(c) if c.name == "HelloWorld" => Some(c),
             _ => None
         })
         .expect("HelloWorld class not found in AST");
+    println!("🔍 DEBUG: HelloWorld class found in AST");
     
     // Create ClassWriter and generate class file
+    println!("🔍 DEBUG: Creating ClassWriter...");
     let mut class_writer = ClassWriter::new();
-    // Align internal name with package for javap parity
-    class_writer.set_package_name(Some("mono"));
-    class_writer.set_debug(true);
-    class_writer.generate_class(class_decl).expect("Failed to generate class");
+    println!("🔍 DEBUG: ClassWriter created successfully");
     
+    // Align internal name with package for javap parity
+    println!("🔍 DEBUG: Setting package name to 'mono'...");
+    class_writer.set_package_name(Some("mono"));
+    println!("🔍 DEBUG: Package name set successfully");
+    
+    println!("🔍 DEBUG: Setting debug mode...");
+    class_writer.set_debug(true);
+    println!("🔍 DEBUG: Debug mode set successfully");
+    
+    println!("🔍 DEBUG: About to call generate_class()...");
+    println!("🔍 DEBUG: Class declaration has {} body members", class_decl.body.len());
+    
+    // Count methods and fields
+    let method_count = class_decl.body.iter()
+        .filter(|m| matches!(m, tolc::ast::ClassMember::Method(_)))
+        .count();
+    let field_count = class_decl.body.iter()
+        .filter(|m| matches!(m, tolc::ast::ClassMember::Field(_)))
+        .count();
+    let constructor_count = class_decl.body.iter()
+        .filter(|m| matches!(m, tolc::ast::ClassMember::Constructor(_)))
+        .count();
+    
+    println!("🔍 DEBUG: Class has {} methods, {} fields, {} constructors", method_count, field_count, constructor_count);
+    
+    let start_time = std::time::Instant::now();
+    let result = class_writer.generate_class(class_decl);
+    let duration = start_time.elapsed();
+    
+    match result {
+        Ok(_) => {
+            println!("✅ DEBUG: generate_class() completed successfully in {:?}", duration);
+        }
+        Err(e) => {
+            println!("❌ DEBUG: generate_class() failed after {:?}: {}", duration, e);
+            panic!("Failed to generate class: {}", e);
+        }
+    }
+    
+    println!("🔍 DEBUG: Getting generated class file...");
     // Get generated class file
     let class_file = class_writer.get_class_file();
+    println!("🔍 DEBUG: Class file retrieved successfully");
+    println!("🔍 DEBUG: Class file has {} methods", class_file.methods.len());
+    println!("🔍 DEBUG: Class file has {} fields", class_file.fields.len());
+    println!("🔍 DEBUG: Class file has {} attributes", class_file.attributes.len());
     
     // Verify basic structure of class file
     // Constant pool index starts from 1, so the first class reference should be 1
@@ -72,6 +123,8 @@ public class HelloWorld {
     
     println!("Successfully generated HelloWorld.class with {} bytes, major version {}", 
              class_bytes.len(), major_version);
+    
+    println!("🎉 DEBUG: test_helloworld_compilation test completed successfully!");
 }
 
 /// Test HelloWorld program execution

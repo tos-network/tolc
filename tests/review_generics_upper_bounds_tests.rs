@@ -1,4 +1,5 @@
 use tolc::parser::parse_and_verify;
+use tolc::parser::parse_tol;
 
 fn ok(src: &str) { let _ = parse_and_verify(src).expect("expected ok"); }
 fn err_contains(src: &str, needle: &str) { let e = parse_and_verify(src).unwrap_err().to_string(); assert!(e.contains(needle), "{e}"); }
@@ -12,7 +13,7 @@ class B extends A {}
 class G<T extends A> {}
 class T0 { void t(){ new G<A>(); new G<B>(); } }
 "#;
-    ok(src);
+    ok(src);  // 这个测试应该成功，因为B extends A是合法的
 }
 
 #[test]
@@ -75,6 +76,48 @@ class G<T extends A> {}
 class T0 { boolean t(Object o){ return o instanceof G<C>; } }
 "#;
     err_contains(src, "does not satisfy upper bound");
+}
+
+#[test]
+fn debug_simple_generic_check() {
+    let src = r#"
+package p;
+class A {}
+class B extends A {}
+class G<T extends A> {}
+class T0 { void t(){ new G<B>(); } }
+"#;
+    // 这个测试应该成功，因为B extends A是合法的
+    let result = tolc::parser::parse_and_verify(src);
+    match result {
+        Ok(_) => println!("✅ 测试通过：B extends A 是合法的"),
+        Err(e) => {
+            println!("❌ 测试失败：{}", e);
+            // 尝试只解析，不验证
+            match tolc::parser::parse_tol(src) {
+                Ok(ast) => {
+                    println!("✅ 解析成功");
+                    println!("包名: {:?}", ast.package_decl);
+                    println!("类型数量: {}", ast.type_decls.len());
+                    for td in &ast.type_decls {
+                        match td {
+                            tolc::ast::TypeDecl::Class(c) => {
+                                println!("类: {} (extends: {:?})", c.name, c.extends);
+                                println!("类型参数: {:?}", c.type_params);
+                                for tp in &c.type_params {
+                                    println!("  类型参数 {}: bounds = {:?}", tp.name, tp.bounds);
+                                }
+                            }
+                            _ => println!("其他类型: {:?}", td),
+                        }
+                    }
+                }
+                Err(parse_err) => println!("❌ 解析失败: {}", parse_err),
+            }
+        }
+    }
+    // 暂时注释掉这个调用，先调试
+    // ok(src);
 }
 
 

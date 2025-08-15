@@ -3,7 +3,7 @@
 //! This module defines the basic structures needed for generating Java .class files.
 
 use std::marker::PhantomData;
-use super::opcodor::OpcodeGenerator;
+use super::opcode_generator::OpcodeGenerator;
 use super::opcodes;
 use std::collections::HashMap;
 
@@ -310,6 +310,93 @@ impl BytecodeBuilder {
     /// Get the line number table
     pub fn into_line_numbers(self) -> Vec<(u16, u16)> {
         self.line_numbers
+    }
+    
+    /// Get current code for inspection (non-consuming)
+    pub fn code(&self) -> &Vec<u8> {
+        &self.code
+    }
+    
+    /// Get current locals
+    pub fn locals(&self) -> &Vec<LocalSlot> {
+        &self.stack_state.frame.locals
+    }
+    
+    /// Allocate a local variable
+    pub fn allocate(&mut self, name: String, var_type: LocalType) -> u16 {
+        self.stack_state.frame.allocate(name, var_type)
+    }
+    
+    /// Get max stack depth
+    pub fn max_stack(&self) -> u16 {
+        self.stack_state.max_stack()
+    }
+    
+    /// Get max locals count
+    pub fn max_locals(&self) -> u16 {
+        self.stack_state.max_locals()
+    }
+    
+    /// Update local variable lifetime
+    pub fn update_lifetime(&mut self, index: u16, start_pc: u16, end_pc: u16) {
+        self.stack_state.frame.update_lifetime(index, start_pc, end_pc);
+    }
+    
+    /// Mark a label at the current position
+    pub fn mark_label(&mut self, label: &str) {
+        let current_pc = self.code.len() as u16;
+        
+        // Update all references to this label
+        let mut resolved_indices = Vec::new();
+        for (i, (ref_label, ref_pc)) in self.labels.iter_mut().enumerate() {
+            if ref_label == label {
+                // JVM offset calculation: target_pc - (instruction_pc + 3)
+                // where instruction_pc is the position of the opcode
+                // +3 accounts for: 1 byte opcode + 2 bytes offset
+                // ref_pc is now the position of the instruction
+                let instruction_pc = *ref_pc;
+                let offset = current_pc - (instruction_pc + 3);
+                // Update the offset at instruction_pc + 1 (position where offset bytes start)
+                let offset_bytes = offset.to_be_bytes();
+                self.code[(instruction_pc + 1) as usize] = offset_bytes[0];
+                self.code[(instruction_pc + 1) as usize + 1] = offset_bytes[1];
+                
+
+                
+                // Mark this reference as resolved
+                resolved_indices.push(i);
+            }
+        }
+        
+        // Remove resolved references (in reverse order to maintain indices)
+        for &index in resolved_indices.iter().rev() {
+            self.labels.remove(index);
+        }
+    }
+    
+    /// Push raw bytes
+    pub fn push(&mut self, byte: u8) {
+        self.code.push(byte);
+    }
+    
+    /// Extend with bytes
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+    
+    /// Push instruction opcode
+    pub fn push_instruction(&mut self, opcode: u8) {
+        self.code.push(opcode);
+    }
+    
+    /// Push byte value
+    pub fn push_byte(&mut self, value: u8) {
+        self.code.push(value);
+    }
+    
+    /// Push short value (big-endian)
+    pub fn push_short(&mut self, value: i16) {
+        self.code.extend_from_slice(&value.to_be_bytes());
     }
     
     // Constants - Use OpcodeGenerator
@@ -1350,37 +1437,7 @@ impl BytecodeBuilder {
         self.emit_short(0);
     }
 
-    /// Mark a label at the current position
-    pub fn mark_label(&mut self, label: &str) {
-        let current_pc = self.code.len() as u16;
-        
-        // Update all references to this label
-        let mut resolved_indices = Vec::new();
-        for (i, (ref_label, ref_pc)) in self.labels.iter_mut().enumerate() {
-            if ref_label == label {
-                // JVM offset calculation: target_pc - (instruction_pc + 3)
-                // where instruction_pc is the position of the opcode
-                // +3 accounts for: 1 byte opcode + 2 bytes offset
-                // ref_pc is now the position of the instruction
-                let instruction_pc = *ref_pc;
-                let offset = current_pc - (instruction_pc + 3);
-                // Update the offset at instruction_pc + 1 (position where offset bytes start)
-                let offset_bytes = offset.to_be_bytes();
-                self.code[(instruction_pc + 1) as usize] = offset_bytes[0];
-                self.code[(instruction_pc + 1) as usize + 1] = offset_bytes[1];
-                
 
-                
-                // Mark this reference as resolved
-                resolved_indices.push(i);
-            }
-        }
-        
-        // Remove resolved references (in reverse order to maintain indices)
-        for &index in resolved_indices.iter().rev() {
-            self.labels.remove(index);
-        }
-    }
 
     /// Add a line number entry for debugging
     pub fn add_line_number(&mut self, line: u16) {
@@ -1746,8 +1803,8 @@ impl AdvancedBytecode {
         self.forward_refs.push((label.to_string(), self.pc()));
         self.emit_short(0); // Placeholder
     }
-
-    /// Mark label at current position
+    
+    /// Mark a label at current position
     pub fn mark_label(&mut self, label: &str) {
         let pc = self.pc();
         self.labels.insert(label.to_string(), pc);
@@ -1762,6 +1819,8 @@ impl AdvancedBytecode {
             }
         }
     }
+
+
 
     /// Add line number entry
     pub fn add_line_number(&mut self, line: u16) {

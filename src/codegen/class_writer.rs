@@ -238,7 +238,11 @@ impl ClassWriter {
         } else { class.name.clone() };
         self.current_class_name = Some(internal_name.clone());
         let deferred_this_class_name = internal_name.clone();
-        let deferred_super_class_name: String = class.extends.as_ref().map(|t| t.name.replace('.', "/")).unwrap_or("java/lang/Object".to_string());
+        let deferred_super_class_name: String = class
+            .extends
+            .as_ref()
+            .map(|t| super::classpath::resolve_class_name_with_fallback(&t.name, self.package_name.as_deref()))
+            .unwrap_or("java/lang/Object".to_string());
         
         // Set access flags
         let mut access_flags = access_flags::ACC_SUPER;
@@ -323,8 +327,12 @@ impl ClassWriter {
         fn collect_default_ctor_into(cw: &mut ClassWriter, class: &ClassDecl, out: &mut Vec<PendingCode>) -> Result<()> {
             let mut code_bytes = Vec::new();
             code_bytes.push(opcodes::ALOAD_0);
-            let super_class_name = class.extends.as_ref().map(|t| t.name.as_str()).unwrap_or("java/lang/Object");
-            let mref = { let mut cp = cw.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(super_class_name, "<init>", "()V") }
+            let super_class_name = class
+                .extends
+                .as_ref()
+                .map(|t| super::classpath::resolve_class_name_with_fallback(&t.name, cw.package_name.as_deref()))
+                .unwrap_or("java/lang/Object".to_string());
+            let mref = { let mut cp = cw.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(&super_class_name, "<init>", "()V") }
                 .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             code_bytes.push(opcodes::INVOKESPECIAL);
             code_bytes.extend_from_slice(&mref.to_be_bytes());
@@ -343,22 +351,121 @@ impl ClassWriter {
         if has_user_ctor {
             for member in &class.body {
                 if let ClassMember::Constructor(constructor) = member {
-                    // Build simple invokespecial <init>; body statements are not yet supported
+                    // Build constructor prologue and invoke the immediate super constructor
                     let mut code_bytes = Vec::new();
+                    // load `this`
                     code_bytes.push(opcodes::ALOAD_0);
-                    let super_class_name = "java/lang/Object";
-                    let mref = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(super_class_name, "<init>", "()V") }
+
+                    // Determine how many arguments to pass to super: use explicit `super(...)` if present; otherwise 0
+                    let super_arg_count: usize = match &constructor.explicit_invocation {
+                        Some(crate::ast::ExplicitCtorInvocation::Super { arg_count }) => *arg_count,
+                        _ => 0,
+                    };
+
+                    // Emit loads for the first `super_arg_count` parameters from local slots
+                    let mut local_index: u16 = 1; // slot 0 is `this`
+                    for (i, param) in constructor.parameters.iter().enumerate() {
+                        if i >= super_arg_count { break; }
+                        let ty_name = param.type_ref.name.as_str();
+                        // Choose load opcode based on type and index
+                        let (opcode, width): (u8, u16) = match ty_name {
+                            "long" => {
+                                let op = match local_index {
+                                    0 => opcodes::LLOAD_0,
+                                    1 => opcodes::LLOAD_1,
+                                    2 => opcodes::LLOAD_2,
+                                    3 => opcodes::LLOAD_3,
+                                    _ => opcodes::LLOAD,
+                                };
+                                (op, 2)
+                            }
+                            "double" => {
+                                let op = match local_index {
+                                    0 => opcodes::DLOAD_0,
+                                    1 => opcodes::DLOAD_1,
+                                    2 => opcodes::DLOAD_2,
+                                    3 => opcodes::DLOAD_3,
+                                    _ => opcodes::DLOAD,
+                                };
+                                (op, 2)
+                            }
+                            "float" => {
+                                let op = match local_index {
+                                    0 => opcodes::FLOAD_0,
+                                    1 => opcodes::FLOAD_1,
+                                    2 => opcodes::FLOAD_2,
+                                    3 => opcodes::FLOAD_3,
+                                    _ => opcodes::FLOAD,
+                                };
+                                (op, 1)
+                            }
+                            "int" | "short" | "byte" | "char" | "boolean" => {
+                                let op = match local_index {
+                                    0 => opcodes::ILOAD_0,
+                                    1 => opcodes::ILOAD_1,
+                                    2 => opcodes::ILOAD_2,
+                                    3 => opcodes::ILOAD_3,
+                                    _ => opcodes::ILOAD,
+                                };
+                                (op, 1)
+                            }
+                            _ => {
+                                // reference or array
+                                let op = match local_index {
+                                    0 => opcodes::ALOAD_0,
+                                    1 => opcodes::ALOAD_1,
+                                    2 => opcodes::ALOAD_2,
+                                    3 => opcodes::ALOAD_3,
+                                    _ => opcodes::ALOAD,
+                                };
+                                (op, 1)
+                            }
+                        };
+                        code_bytes.push(opcode);
+                        if opcode == opcodes::ILOAD || opcode == opcodes::LLOAD || opcode == opcodes::FLOAD || opcode == opcodes::DLOAD || opcode == opcodes::ALOAD {
+                            // generic form requires a u8 index operand
+                            code_bytes.push(local_index as u8);
+                        }
+                        local_index = local_index.saturating_add(width);
+                    }
+
+                    // Determine super class internal name
+                    let super_class_name = class
+                        .extends
+                        .as_ref()
+                        .map(|t| super::classpath::resolve_class_name_with_fallback(&t.name, self.package_name.as_deref()))
+                        .unwrap_or_else(|| "java/lang/Object".to_string());
+
+                    // Build descriptor for the chosen number of super args
+                    let mut super_params_desc = String::new();
+                    for (i, p) in constructor.parameters.iter().enumerate() {
+                        if i >= super_arg_count { break; }
+                        super_params_desc.push_str(&super::descriptor::type_to_descriptor(&p.type_ref));
+                    }
+                    let super_descriptor = format!("({})V", super_params_desc);
+
+                    // INVOKESPECIAL super.<init>(...)
+                    let mref = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(&super_class_name, "<init>", &super_descriptor) }
                         .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
                     code_bytes.push(opcodes::INVOKESPECIAL);
                     code_bytes.extend_from_slice(&mref.to_be_bytes());
+
+                    // RETURN
                     code_bytes.push(opcodes::RETURN);
+
                     let access_flags = modifiers_to_flags(&constructor.modifiers);
                     let name = "<init>".to_string();
                     let descriptor = self.generate_constructor_descriptor(constructor);
                     let exceptions: Vec<crate::codegen::attribute::ExceptionTableEntry> = Vec::new();
                     let locals: Vec<crate::codegen::bytecode::LocalSlot> = Vec::new();
                     let line_numbers = vec![(0, constructor.span.start.line as u16).into()];
-                    pending_methods.push(PendingCode { access_flags, name, descriptor, code_bytes, max_locals: 1, exceptions, locals, line_numbers });
+                    // Compute max_locals: this (1) + parameter slots (account for wide types)
+                    let mut max_locals: u16 = 1;
+                    for p in &constructor.parameters {
+                        let add = match p.type_ref.name.as_str() { "long" | "double" => 2, _ => 1 };
+                        max_locals = max_locals.saturating_add(add);
+                    }
+                    pending_methods.push(PendingCode { access_flags, name, descriptor, code_bytes, max_locals, exceptions, locals, line_numbers });
                 }
             }
         } else {
@@ -391,9 +498,45 @@ impl ClassWriter {
         for pc in &pending_methods {
             // Build Code attribute payload first, defer interning of "Code" name until after
             let mut attribute_bytes = Vec::new();
-            // compute max_stack by simulation
+            // compute max_stack by lightweight simulation
             let mut sim_depth: i32 = 0; let mut sim_max: i32 = 0; let mut i = 0usize;
-            while i < pc.code_bytes.len() { let op = pc.code_bytes[i]; match op { 0x2A => { sim_depth += 1; }, 0x12 => { sim_depth += 1; i += 1; }, 0x13 => { sim_depth += 1; i += 2; }, 0xB2 => { sim_depth += 1; i += 2; }, 0xB6 => { sim_depth -= 2; i += 2; }, 0xB7 => { sim_depth -= 1; i += 2; }, _ => {} } if sim_depth > sim_max { sim_max = sim_depth; } i += 1; }
+            while i < pc.code_bytes.len() {
+                let op = pc.code_bytes[i];
+                match op {
+                    // ALOAD_0..3, ILOAD_0..3, FLOAD_0..3, reference loads push 1
+                    0x2a | 0x2b | 0x2c | 0x2d | // ALOAD_0..3
+                    0x1a | 0x1b | 0x1c | 0x1d | // ILOAD_0..3
+                    0x22 | 0x23 | 0x24 | 0x25   // FLOAD_0..3
+                        => { sim_depth += 1; }
+                    // LLOAD_0..3, DLOAD_0..3 push 2
+                    0x1e | 0x1f | 0x20 | 0x21 | // LLOAD_0..3
+                    0x26 | 0x27 | 0x28 | 0x29   // DLOAD_0..3
+                        => { sim_depth += 2; }
+                    // Generic loads with index operand
+                    0x15 /* ILOAD */ => { sim_depth += 1; i += 1; }
+                    0x16 /* LLOAD */ => { sim_depth += 2; i += 1; }
+                    0x17 /* FLOAD */ => { sim_depth += 1; i += 1; }
+                    0x18 /* DLOAD */ => { sim_depth += 2; i += 1; }
+                    0x19 /* ALOAD */ => { sim_depth += 1; i += 1; }
+                    // LDC and LDC_W push 1 (or 2 for LDC2_W)
+                    0x12 /* LDC */ => { sim_depth += 1; i += 1; }
+                    0x13 /* LDC_W */ => { sim_depth += 1; i += 2; }
+                    0x14 /* LDC2_W */ => { sim_depth += 2; i += 2; }
+                    // GETSTATIC of reference/primitive assumed to push 1 (approx)
+                    0xb2 /* GETSTATIC */ => { sim_depth += 1; i += 2; }
+                    // INVOKEVIRTUAL/INTERFACE approx: pop receiver+args (unknown), but max will be measured before call
+                    0xb6 /* INVOKEVIRTUAL */ => { i += 2; }
+                    // INVOKESPECIAL: pop receiver+args (unknown). We don't adjust depth precisely.
+                    0xb7 /* INVOKESPECIAL */ => { i += 2; }
+                    // INVOKESTATIC could pop args; ignore
+                    0xb8 /* INVOKESTATIC */ => { i += 2; }
+                    // RETURN no stack effect
+                    0xb1 /* RETURN */ => {}
+                    _ => {}
+                }
+                if sim_depth > sim_max { sim_max = sim_depth; }
+                i += 1;
+            }
             let computed_max_stack = sim_max.max(0) as u16;
             attribute_bytes.extend_from_slice(&computed_max_stack.to_be_bytes());
             attribute_bytes.extend_from_slice(&pc.max_locals.to_be_bytes());

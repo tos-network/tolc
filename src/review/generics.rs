@@ -138,8 +138,33 @@ fn primitive_widening_allows(a: &&str, b: &&str) -> bool {
 fn is_nominal_subtype_name(src: &str, dst: &str, index: &GlobalMemberIndex) -> bool {
     if src == dst { return true; }
     if let Some(mt) = index.by_type.get(src) {
-        if let Some(sup) = &mt.super_name { if sup == dst { return true; } if is_nominal_subtype_name(sup, dst, index) { return true; } }
-        for itf in &mt.interfaces { if itf == dst || is_nominal_subtype_name(itf, dst, index) { return true; } }
+        if let Some(sup) = &mt.super_name { 
+            // Direct match
+            if sup == dst { return true; }
+            // Check if super_name is fully qualified and dst is simple name in same package
+            if sup.contains('.') && !dst.contains('.') {
+                if let Some(pkg) = &mt.package_name {
+                    let expected_fq = format!("{}.{}", pkg, dst);
+                    if sup == &expected_fq { return true; }
+                }
+            }
+            // Recursive check
+            if is_nominal_subtype_name(sup, dst, index) { return true; }
+        }
+        // Check implemented interfaces
+        for itf in &mt.interfaces { 
+            // Direct interface match
+            if itf == dst { return true; }
+            // Check if interface is fully qualified and dst is simple name in same package
+            if itf.contains('.') && !dst.contains('.') {
+                if let Some(pkg) = &mt.package_name {
+                    let expected_fq = format!("{}.{}", pkg, dst);
+                    if itf == &expected_fq { return true; }
+                }
+            }
+            // Recursive interface check
+            if is_nominal_subtype_name(itf, dst, index) { return true; }
+        }
     }
     false
 }
