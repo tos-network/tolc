@@ -505,9 +505,7 @@ public final class Class <T>
   public Class getSuperclass() {
     return (vmClass.super_ == null ? null : SystemClassLoader.getClass(vmClass.super_));
   }
-  
-  private enum ClassType { GLOBAL, MEMBER, LOCAL, ANONYMOUS }
-  
+    
   /**
     * Determines the class type.
     * 

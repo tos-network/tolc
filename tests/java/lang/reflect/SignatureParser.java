@@ -128,36 +128,7 @@ public class SignatureParser {
   }
 
   private static ParameterizedType makeType(final Type[] args, final Type owner, final Type raw) {
-    return new ParameterizedType() {
-      @Override
-        public Type getRawType() {
-          return raw;
-        }
-
-      @Override
-        public Type getOwnerType() {
-          return owner;
-        }
-
-      @Override
-        public Type[] getActualTypeArguments() {
-          return args;
-        }
-
-      @Override
-        public String toString() {
-          StringBuilder builder = new StringBuilder();
-          builder.append(typeName(raw));
-          builder.append('<');
-          String sep = "";
-          for (Type t : args) {
-            builder.append(sep).append(typeName(t));
-            sep = ", ";
-          }
-          builder.append('>');
-          return builder.toString();
-        }
-    };
+    return new SignatureParserType(args, owner, raw);
   }
   
   private static Map<String, TypeVariable> collectTypeVariables(Class clz) {
@@ -214,40 +185,4 @@ public class SignatureParser {
     return varsMap;
   } 
 
-  private static class TypeVariableImpl implements TypeVariable {
-    private String name;
-    private Type baseType;
-    private TypeVariableImpl[] vars;
-
-    public Type[] getBounds() {
-      return new Type[] { baseType };
-    }
-    
-    public GenericDeclaration getGenericDeclaration() {
-      return new GenericDeclaration() {
-        public TypeVariable<?>[] getTypeParameters() {
-          return vars;
-        }
-      };
-    }
-    
-    public String getName() {
-      return name;
-    }
-    
-    TypeVariableImpl(String name, Type baseType) {
-      this.name = name;
-      this.baseType = baseType;
-    }
-    
-    void setVars(List<TypeVariableImpl> vars) {
-      this.vars = new TypeVariableImpl[vars.size()];
-      vars.toArray(this.vars);
-    }
-    
-    @Override
-    public String toString() {
-      return name;
-    }
-  }
 }

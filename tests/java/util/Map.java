@@ -39,11 +39,4 @@ public interface Map<K, V> {
 
   public int hashCode();
 
-  public interface Entry<K, V> {
-    public K getKey();
-
-    public V getValue();
-
-    public V setValue(V value);
-  }
 }

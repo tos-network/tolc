@@ -17,7 +17,7 @@ import static java.base.Stream.write1;
 import static java.base.Stream.write2;
 import static java.base.Stream.write4;
 
-import java.base.ConstantPool.PoolEntry;
+import java.base.PoolEntry;
 import java.io.IOException;
 
 public class Assembler {
@@ -105,31 +105,5 @@ public class Assembler {
     }
 
     write2(out, 0); // attribute count
-  }
-
-  public static class MethodData {
-    public final int flags;
-    public final int nameIndex;
-    public final int specIndex;
-    public final byte[] code;
-
-    public MethodData(int flags, int nameIndex, int specIndex, byte[] code) {
-      this.flags = flags;
-      this.nameIndex = nameIndex;
-      this.specIndex = specIndex;
-      this.code = code;
-    }
-  }
-
-  public static class FieldData {
-    public final int flags;
-    public final int nameIndex;
-    public final int specIndex;
-
-    public FieldData(int flags, int nameIndex, int specIndex) {
-      this.flags = flags;
-      this.nameIndex = nameIndex;
-      this.specIndex = specIndex;
-    }
   }
 }

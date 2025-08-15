@@ -7,6 +7,7 @@ pub mod attribute;
 pub mod bytecode;
 pub mod class;
 pub mod class_writer;
+pub mod classpath;
 pub mod constpool;
 pub mod defs;
 pub mod descriptor;
@@ -18,6 +19,7 @@ pub mod method;
 pub mod method_writer;
 pub mod opcodes;
 pub mod opcodor;
+pub mod signature;
 pub mod typed_index;
 pub mod vec;
 pub mod writer;
@@ -68,6 +70,10 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
             TypeDecl::Class(class) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
+                // Set package name if present in AST
+                if let Some(ref package) = ast.package_decl {
+                    class_writer.set_package_name(Some(&package.name));
+                }
                 class_writer.generate_class(class)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
@@ -79,6 +85,10 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
             TypeDecl::Interface(interface) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
+                // Set package name if present in AST
+                if let Some(ref package) = ast.package_decl {
+                    class_writer.set_package_name(Some(&package.name));
+                }
                 class_writer.generate_interface(interface)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
@@ -90,6 +100,10 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
             TypeDecl::Enum(enum_decl) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
+                // Set package name if present in AST
+                if let Some(ref package) = ast.package_decl {
+                    class_writer.set_package_name(Some(&package.name));
+                }
                 class_writer.generate_enum(enum_decl)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)

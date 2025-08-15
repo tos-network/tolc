@@ -13,8 +13,8 @@ package java.io;
 public class ByteArrayOutputStream extends OutputStream {
   private static final int BufferSize = 32;
 
-  private Cell firstCell;
-  private Cell curCell;
+  private ByteArrayOutputStreamCell firstCell;
+  private ByteArrayOutputStreamCell curCell;
   private int length;
   private byte[] buffer;
   private int position;
@@ -71,13 +71,13 @@ public class ByteArrayOutputStream extends OutputStream {
       position += length;
     } else {
       flushBuffer();
-      chainCell( new Cell(copy(b, offset, length), 0, length) );
+      chainCell( new ByteArrayOutputStreamCell(copy(b, offset, length), 0, length) );
     }
 
     this.length += length;
   }
   
-  private void chainCell(Cell cell){
+  private void chainCell(ByteArrayOutputStreamCell cell){
     if (curCell == null){
       firstCell = cell;
       curCell = cell;
@@ -94,7 +94,7 @@ public class ByteArrayOutputStream extends OutputStream {
       buffer = null;
       position = 0;
 
-      chainCell( new Cell(b, 0, p) );
+      chainCell( new ByteArrayOutputStreamCell(b, 0, p) );
     }    
   }
 
@@ -103,7 +103,7 @@ public class ByteArrayOutputStream extends OutputStream {
     
     byte[] array = new byte[length];
     int pos = 0;
-    for (Cell c = firstCell; c != null; c = c.next) {
+    for (ByteArrayOutputStreamCell c = firstCell; c != null; c = c.next) {
       System.arraycopy(c.array, c.offset, array, pos, c.length);
       pos += c.length;
     }
@@ -119,7 +119,7 @@ public class ByteArrayOutputStream extends OutputStream {
 
     flushBuffer();
 
-    for (Cell c = firstCell; c != null; c = c.next) {
+    for (ByteArrayOutputStreamCell c = firstCell; c != null; c = c.next) {
       out.write(c.array, c.offset, c.length);
     }
   }
@@ -131,18 +131,5 @@ public class ByteArrayOutputStream extends OutputStream {
 
   public String toString(String encoding) throws UnsupportedEncodingException {
     return new String(toByteArray(), encoding);
-  }
-
-  private static class Cell {
-    public byte[] array;
-    public int offset;
-    public int length;
-    public Cell next = null;
-
-    public Cell(byte[] array, int offset, int length) {
-      this.array = array;
-      this.offset = offset;
-      this.length = length;
-    }
   }
 }

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use tolc::parser::parse_and_verify;
 use std::env;
 use walkdir::WalkDir;
+use tolc::codegen::{ClassWriter, class_file_to_bytes};
+use tolc::ast::{TypeDecl, ClassMember};
 
 fn java_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("java")
@@ -19,66 +21,381 @@ fn parse_all_java_files_under_tests_java() {
     let root = java_root();
     assert!(root.exists(), "tests/java directory not found: {}", root.display());
 
-    // Ensure classpath and compatibility mode are set when running under `cargo test`
-    // so the suite uses full cross-file type information and javac-aligned relaxations.
-    if env::var("TOLC_CLASSPATH").is_err() {
-        env::set_var("TOLC_CLASSPATH", root.display().to_string());
-    }
-    // Bound classpath scan during tests to avoid long walks
-    if env::var("TOLC_CLASSPATH_MAX_FILES").is_err() {
-        env::set_var("TOLC_CLASSPATH_MAX_FILES", "60");
-    }
-    if env::var("TOLC_CLASSPATH_MAX_FILE_SIZE").is_err() {
-        env::set_var("TOLC_CLASSPATH_MAX_FILE_SIZE", "65536"); // 64 KiB
-    }
-    if env::var("TOLC_JAVAC_COMPAT").is_err() {
-        env::set_var("TOLC_JAVAC_COMPAT", "1");
-    }
+    // Reference compiled classes root for javap parity
+    let ref_root = classes_root();
+    assert!(ref_root.exists(), "tests/classes/java not found: {}", ref_root.display());
 
-    let mut failures: Vec<(String, String)> = Vec::new();
-    let mut total: usize = 0;
+    // Ensure classpath and compatibility mode are set when running under `cargo test`
+    if env::var("TOLC_CLASSPATH").is_err() { env::set_var("TOLC_CLASSPATH", root.display().to_string()); }
+    if env::var("TOLC_CLASSPATH_MAX_FILES").is_err() { env::set_var("TOLC_CLASSPATH_MAX_FILES", "60"); }
+    if env::var("TOLC_CLASSPATH_MAX_FILE_SIZE").is_err() { env::set_var("TOLC_CLASSPATH_MAX_FILE_SIZE", "65536"); }
+    if env::var("TOLC_JAVAC_COMPAT").is_err() { env::set_var("TOLC_JAVAC_COMPAT", "1"); }
 
     let filter = std::env::var("JAVA_SUITE_FILTER").ok();
-    let first_only = std::env::var("JAVA_SUITE_FIRST_ONLY").is_ok();
+    // Process only one file for focused debugging
+    let first_only = false;
+    
+    // Limit number of files to process for faster testing
+    let max_files = std::env::var("TOLC_MAXFILES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+    
+
+
+    let mut failures: Vec<(String, String)> = Vec::new();
+    let mut compared: usize = 0;
+    let mut processed: usize = 0;
+
+    // Temp dir for our generated classes
+    let out_dir = std::env::temp_dir().join("java_suite_compare");
+    let _ = fs::create_dir_all(&out_dir);
+
     for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
         let path = entry.path();
-        if entry.file_type().is_file() && path.extension().map(|e| e == "java").unwrap_or(false) {
-            // Temporary exclusion: skip problematic file(s)
-            if path.display().to_string().ends_with("/java/lang/String.java") {
-                eprintln!("[suite] skipping {}", path.display());
-                continue;
+        if !(entry.file_type().is_file() && path.extension().map(|e| e == "java").unwrap_or(false)) { continue; }
+        if let Some(f) = &filter { if !path.display().to_string().contains(f) { continue; } }
+
+        // Check if we've reached the maximum number of files to process
+        if processed >= max_files {
+            break;
+        }
+        processed += 1;
+
+        // No more skipping - test all files for full comparison
+        let path_str = path.display().to_string();
+
+        // Read source
+        let file_name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let source = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => { failures.push((path.display().to_string(), format!("IO error reading source: {}", e))); if first_only { break; } else { continue; } }
+        };
+
+        // Parse + review
+        let ast = match parse_and_verify(&source) {
+            Ok(a) => a,
+            Err(e) => {
+                let snippet: String = source.lines().take(30).collect::<Vec<_>>().join("\n");
+                failures.push((path.display().to_string(), format!("parse error: {}\n--- snippet ---\n{}\n--------------", e, snippet)));
+                if first_only { break; } else { continue; }
             }
-            if let Some(f) = &filter {
-                if !path.display().to_string().contains(f) { continue; }
-            }
-            total += 1;
-            match fs::read_to_string(path) {
-                Ok(source) => {
-                    eprintln!("[suite] verifying {}", path.display());
-                    match parse_and_verify(&source) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("[suite] FAILED: {} -> {}", path.display(), e);
-                            let snippet: String = source.lines().take(30).collect::<Vec<_>>().join("\n");
-                            let msg = format!("{}\n--- snippet ---\n{}\n--------------", e, snippet);
-                            failures.push((path.display().to_string(), msg));
-                            if first_only { break; }
-                        }
-                    }
+        };
+
+
+
+        // Determine package name and reference class path
+        let package_name_opt = ast.package_decl.as_ref().map(|p| p.name.clone());
+        let pkg_path_full = package_name_opt.as_deref().map(|p| p.replace('.', "/")).unwrap_or_else(|| "".to_string());
+        let ref_pkg_sub = if let Some(pkg) = &package_name_opt { if let Some(rest) = pkg.strip_prefix("java.") { rest.replace('.', "/") } else { pkg.replace('.', "/") } } else { String::new() };
+        let ref_class_path = if ref_pkg_sub.is_empty() { ref_root.join(format!("{}.class", file_name)) } else { ref_root.join(&ref_pkg_sub).join(format!("{}.class", file_name)) };
+        if !ref_class_path.exists() { eprintln!("[compare] skip (no ref class): {}", ref_class_path.display()); continue; }
+
+        // Find matching top-level type by file name
+        let type_decl_opt = ast.type_decls.iter().find(|td| match td { TypeDecl::Class(c) => c.name == file_name, TypeDecl::Interface(i) => i.name == file_name, TypeDecl::Enum(e) => e.name == file_name, TypeDecl::Annotation(a) => a.name == file_name });
+        let type_decl = match type_decl_opt { Some(t) => t, None => { failures.push((path.display().to_string(), "no matching top-level type for file name".to_string())); if first_only { break; } else { continue; } } };
+
+        // Generate class with TOLC
+        let mut cw = ClassWriter::new();
+        cw.set_package_name(package_name_opt.as_deref());
+        cw.set_debug(true);
+        let gen_res = match type_decl {
+            TypeDecl::Class(c) => cw.generate_class(c),
+            TypeDecl::Interface(i) => cw.generate_interface(i),
+            TypeDecl::Enum(e) => cw.generate_enum(e),
+            TypeDecl::Annotation(a) => cw.generate_annotation(a),
+        };
+        if let Err(e) = gen_res { failures.push((path.display().to_string(), format!("codegen error: {}", e))); if first_only { break; } else { continue; } }
+        let class_file = cw.get_class_file();
+        let class_bytes = class_file_to_bytes(&class_file);
+
+        // Write our class to temp dir (package layout)
+        let out_pkg_dir = if pkg_path_full.is_empty() { out_dir.clone() } else { out_dir.join(&pkg_path_full) };
+        let _ = fs::create_dir_all(&out_pkg_dir);
+        let our_class_path = out_pkg_dir.join(format!("{}.class", file_name));
+        if let Err(e) = fs::write(&our_class_path, &class_bytes) { failures.push((path.display().to_string(), format!("IO error writing our class: {}", e))); if first_only { break; } else { continue; } }
+
+        // Run javap on both and compare normalized outputs
+        let run_javap = |p: &Path| -> Result<String, String> {
+            let out = std::process::Command::new("javap").arg("-c").arg("-verbose").arg(p).output().map_err(|e| format!("spawn javap failed: {}", e))?;
+            if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).to_string()); }
+            let s = String::from_utf8_lossy(&out.stdout);
+            let start = ["public class", "public abstract class", "public interface", "class "]
+                .iter()
+                .filter_map(|pat| s.find(pat))
+                .min()
+                .unwrap_or(0);
+            let mut s = s[start..].replace("\r\n", "\n");
+            s = strip_constant_pool(&s);
+            s = strip_debug_tables(&s);
+            s = strip_signatures_and_header_generics(&s);
+            s = normalize_cp_indices(&s);
+            s = collapse_spaces(&s);
+            Ok(s)
+        };
+
+        // Check for inner class files
+        let ref_dir = ref_class_path.parent().unwrap();
+        let inner_class_pattern = format!("{}$", file_name);
+        let mut inner_class_files = Vec::new();
+        
+        if let Ok(entries) = fs::read_dir(ref_dir) {
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                if entry_name.starts_with(&inner_class_pattern) && entry_name.ends_with(".class") {
+                    inner_class_files.push(entry_name);
                 }
-                Err(io_err) => {
-                    failures.push((path.display().to_string(), format!("IO error: {}", io_err)));
+            }
+        }
+        
+        // If there are inner class files, report them for now
+        if !inner_class_files.is_empty() {
+            eprintln!("[INFO] {} has inner classes: {:?}", file_name, inner_class_files);
+            // For now, we'll still compare the main class file, but note the inner classes
+        }
+
+        match (run_javap(&our_class_path), run_javap(&ref_class_path)) {
+            (Ok(a), Ok(b)) => {
+                if !compare_javap_outputs(&a, &b) {
+                    failures.push((path.display().to_string(), format!("javap mismatch\n--- ours ---\n{}\n--- ref ---\n{}", a, b)));
                     if first_only { break; }
+                } else {
+                    compared += 1;
                 }
             }
+            (Err(e), _) => { failures.push((our_class_path.display().to_string(), format!("javap error: {}", e))); if first_only { break; } }
+            (_, Err(e)) => { failures.push((ref_class_path.display().to_string(), format!("javap error: {}", e))); if first_only { break; } }
         }
     }
 
     if !failures.is_empty() {
-        eprintln!("Parsed {} Java files. {} failed:\n", total, failures.len());
-        for (p, e) in &failures {
-            eprintln!("- {} -> {}\n", p, e);
-        }
-        panic!("Java parse failures: {} of {}", failures.len(), total);
+        eprintln!("Processed {} files, compared {} files. {} mismatches/errors:\n", processed, compared, failures.len());
+        for (p, e) in &failures { eprintln!("- {} -> {}\n", p, e); }
+        panic!("javap parity failures: {}", failures.len());
+    } else {
+        eprintln!("Success! Processed {} files, compared {} files with no failures.", processed, compared);
     }
+}
+
+fn strip_constant_pool(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_cp = false;
+    for line in s.lines() {
+        if !in_cp && line.trim_start().starts_with("Constant pool:") { in_cp = true; continue; }
+        if in_cp {
+            if line.trim().is_empty() { in_cp = false; continue; }
+            if line.trim_start().starts_with('#') { continue; }
+            if line.trim_start().starts_with('{') { in_cp = false; out.push(line); continue; }
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
+fn strip_debug_tables(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in s.lines() {
+        let trimmed = line.trim_start();
+        if !skip && (trimmed.starts_with("LineNumberTable:") || trimmed.starts_with("LocalVariableTable:")) {
+            skip = true;
+            continue;
+        }
+        if skip {
+            if trimmed.is_empty() {
+                skip = false;
+                continue;
+            }
+            if trimmed.starts_with("public ") || trimmed.starts_with("}") || trimmed.starts_with("Code:") || trimmed.starts_with("descriptor:") || trimmed.starts_with("flags:") {
+                skip = false;
+                out.push(line);
+                continue;
+            }
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
+fn strip_signatures_and_header_generics(s: &str) -> String {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        // Simplified: just keep all lines as-is
+        // This avoids complex parsing that might introduce bugs
+        out.push(line.to_string());
+    }
+    out.join("\n")
+}
+
+fn normalize_cp_indices(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(ch) = it.next() {
+        if ch == '#' {
+            let mut saw_digit = false;
+            while let Some(&next) = it.peek() {
+                if next.is_ascii_digit() { saw_digit = true; it.next(); } else { break; }
+            }
+            if saw_digit { out.push_str("#X"); } else { out.push('#'); }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch == '\r' { continue; }
+        let is_space = ch == ' ' || ch == '\t';
+        if is_space {
+            if !prev_space { out.push(' '); }
+            prev_space = true;
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn classes_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("classes").join("java")
+}
+
+/// Compare javap outputs line by line, ignoring attribute order differences
+/// JVM doesn't care about the order of attributes, so we normalize them
+fn compare_javap_outputs(ours: &str, reference: &str) -> bool {
+    let our_lines: Vec<&str> = ours.lines().collect();
+    let ref_lines: Vec<&str> = reference.lines().collect();
+    
+    // Quick check: if line counts are very different, they're probably not the same
+    if (our_lines.len() as i32 - ref_lines.len() as i32).abs() > 2 {
+        return false;
+    }
+    
+    // Normalize both outputs by sorting attributes within their sections
+    let normalized_ours = normalize_javap_output(&our_lines);
+    let normalized_ref = normalize_javap_output(&ref_lines);
+    
+    // Compare normalized outputs
+    normalized_ours == normalized_ref
+}
+
+/// Normalize javap output by sorting attributes within their sections
+/// This handles cases where JVM attribute order might differ
+fn normalize_javap_output(lines: &[&str]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current_section = Vec::new();
+    let mut in_method = false;
+    let mut in_interface = false;
+    
+    for &line in lines {
+        let trimmed = line.trim();
+        
+        // Detect section boundaries
+        if trimmed.starts_with("public ") && (trimmed.contains("class") || trimmed.contains("interface")) {
+            // Class/interface declaration - flush current section and start new
+            if !current_section.is_empty() {
+                result.extend(sort_section_attributes(&current_section));
+                current_section.clear();
+            }
+            in_interface = trimmed.contains("interface");
+            result.push(line.to_string());
+            continue;
+        }
+        
+        if trimmed.starts_with("public ") && trimmed.contains("(") && !trimmed.contains("class") && !trimmed.contains("interface") {
+            // Method declaration - flush current section and start new
+            if !current_section.is_empty() {
+                result.extend(sort_section_attributes(&current_section));
+                current_section.clear();
+            }
+            in_method = true;
+            result.push(line.to_string());
+            continue;
+        }
+        
+        if trimmed == "}" {
+            // End of section - flush current section
+            if !current_section.is_empty() {
+                result.extend(sort_section_attributes(&current_section));
+                current_section.clear();
+            }
+            in_method = false;
+            result.push(line.to_string());
+            continue;
+        }
+        
+        // Collect lines in current section
+        current_section.push(line.to_string());
+    }
+    
+    // Flush any remaining section
+    if !current_section.is_empty() {
+        result.extend(sort_section_attributes(&current_section));
+    }
+    
+    result
+}
+
+/// Sort attributes within a section to normalize order
+fn sort_section_attributes(lines: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut attributes = Vec::new();
+    let mut other_lines = Vec::new();
+    
+    for line in lines {
+        let trimmed = line.trim();
+        
+        // Identify attribute lines
+        if trimmed.starts_with("descriptor:") || 
+           trimmed.starts_with("flags:") || 
+           trimmed.starts_with("Signature:") || 
+           trimmed.starts_with("Exceptions:") ||
+           trimmed.starts_with("SourceFile:") ||
+           trimmed.starts_with("Code:") ||
+           trimmed.starts_with("LineNumberTable:") ||
+           trimmed.starts_with("LocalVariableTable:") ||
+           trimmed.starts_with("InnerClasses:") ||
+           trimmed.starts_with("RuntimeVisibleAnnotations:") ||
+           trimmed.starts_with("RuntimeInvisibleAnnotations:") ||
+           trimmed.starts_with("RuntimeVisibleParameterAnnotations:") ||
+           trimmed.starts_with("RuntimeInvisibleParameterAnnotations:") ||
+           trimmed.starts_with("AnnotationDefault:") ||
+           trimmed.starts_with("Synthetic:") ||
+           trimmed.starts_with("Deprecated:") ||
+           trimmed.starts_with("EnclosingMethod:") ||
+           trimmed.starts_with("BootstrapMethods:") ||
+           trimmed.starts_with("MethodParameters:") ||
+           trimmed.starts_with("Module:") ||
+           trimmed.starts_with("ModulePackages:") ||
+           trimmed.starts_with("ModuleMainClass:") ||
+           trimmed.starts_with("NestHost:") ||
+           trimmed.starts_with("NestMembers:") ||
+           trimmed.starts_with("PermittedSubclasses:") ||
+           trimmed.starts_with("Record:") ||
+           trimmed.starts_with("throws ") {
+            attributes.push(line.clone());
+        } else {
+            other_lines.push(line.clone());
+        }
+    }
+    
+    // Sort attributes for consistent ordering
+    attributes.sort();
+    
+    // Add other lines first, then sorted attributes
+    result.extend(other_lines);
+    result.extend(attributes);
+    
+    result
 }

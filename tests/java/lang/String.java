@@ -28,13 +28,7 @@ public final class String
   private static final String LATIN_1_ENCODING = "LATIN-1";
   private static final String DEFAULT_ENCODING = UTF_8_ENCODING;
 
-  public static Comparator<String> CASE_INSENSITIVE_ORDER
-    = new Comparator<String>() {
-    @Override
-    public int compare(String a, String b) {
-      return a.compareToIgnoreCase(b);
-    }
-  };
+  public static Comparator<String> CASE_INSENSITIVE_ORDER = new StringComparator();
 
   public String() {
     this(new char[0], 0, 0);

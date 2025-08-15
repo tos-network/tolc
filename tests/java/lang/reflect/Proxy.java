@@ -28,9 +28,9 @@ import java.base.Assembler;
 import java.base.Classes;
 import java.base.ConstantPool;
 import java.base.SystemClassLoader;
-import java.base.Assembler.FieldData;
-import java.base.Assembler.MethodData;
-import java.base.ConstantPool.PoolEntry;
+import java.base.FieldData;
+import java.base.MethodData;
+import java.base.PoolEntry;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 

@@ -633,6 +633,8 @@ pub(crate) fn review_body_call_arity(
 fn is_unchecked_exception(name: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
     if super::consts::UNCHECKED_BASE_EXCEPTIONS.contains(&name) { return true; }
     if crate::review::compat_mode() && super::consts::UNCHECKED_COMMON_SUBCLASSES.contains(&name) { return true; }
+    // If compat mode on and the exception is explicitly whitelisted among common subclasses, treat as unchecked
+    // Note: list is centralized in crate::consts and may include UnsupportedEncodingException per project policy.
     if let Some(mt) = crate::review::statements::resolve_type_in_index(global, name) {
         let mut cur = mt.super_name.clone();
         let mut seen = std::collections::HashSet::new();

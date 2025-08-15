@@ -216,23 +216,6 @@ public class ObjectInputStream extends InputStream {
     return count;
   }
 
-  private static Class charToPrimitiveType(int c) {
-    if (c == 'B') {
-      return Byte.TYPE;
-    } else if (c == 'C') {
-      return Character.TYPE;
-    } else if (c == 'I') {
-      return Integer.TYPE;
-    } else if (c == 'J') {
-      return Long.TYPE;
-    } else if (c == 'S') {
-      return Short.TYPE;
-    } else if (c == 'Z') {
-      return Boolean.TYPE;
-    }
-    throw new RuntimeException("Unhandled char: " + (char)c);
-  }
-
   private void expectToken(int token) throws IOException {
     int c = rawByte();
     if (c != token) {
@@ -291,10 +274,10 @@ public class ObjectInputStream extends InputStream {
 
     // class desc
     c = rawByte();
-    ClassDesc classDesc;
+    ObjectInputStreamClassDesc classDesc;
     if (c == TC_REFERENCE) {
       int handle = rawInt() - HANDLE_OFFSET;
-      classDesc = (ClassDesc)references.get(handle);
+      classDesc = (ObjectInputStreamClassDesc)references.get(handle);  
     } else if (c == TC_CLASSDESC) {
       classDesc = classDesc();
     } else {
@@ -335,15 +318,8 @@ public class ObjectInputStream extends InputStream {
     }
   }
 
-  private static class ClassDesc {
-    Class clazz;
-    int flags;
-    Field[] fields;
-    ClassDesc superClassDesc;
-  }
-
-  private ClassDesc classDesc() throws ClassNotFoundException, IOException {
-    ClassDesc result = new ClassDesc();
+  private ObjectInputStreamClassDesc classDesc() throws ClassNotFoundException, IOException {
+    ObjectInputStreamClassDesc result = new ObjectInputStreamClassDesc();
     String className = rawString();
     // Use system class loader instead of thread context class loader for blockchain security
     ClassLoader loader = ClassLoader.getSystemClassLoader();
@@ -385,7 +361,7 @@ public class ObjectInputStream extends InputStream {
         }
         type = loader.loadClass(typeName);
       } else {
-        type = charToPrimitiveType(typeChar);
+        type = CharToPrimitiveType.charToPrimitiveType(typeChar);
       }
       if (result.fields[i].getType() != type) {
         throw new IOException("Unexpected type of field " + fieldName

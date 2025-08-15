@@ -13,7 +13,7 @@ package java.lang;
 public class StringBuilder implements CharSequence, Appendable {
   private static final int BufferSize = 32;
 
-  private Cell chain;
+  private StringBuilderCell chain;
   private int length;
   private char[] buffer;
   private int position;
@@ -30,7 +30,7 @@ public class StringBuilder implements CharSequence, Appendable {
 
   private void flush() {
     if (position > 0) {
-      chain = new Cell(new String(buffer, 0, position, false), chain);
+      chain = new StringBuilderCell(new String(buffer, 0, position, false), chain);
       buffer = null;
       position = 0;
     }
@@ -46,7 +46,7 @@ public class StringBuilder implements CharSequence, Appendable {
           position += s.length();
         } else {
           flush();
-          chain = new Cell(s, chain);
+          chain = new StringBuilderCell(s, chain);
         }
         length += s.length();
       }
@@ -120,7 +120,7 @@ public class StringBuilder implements CharSequence, Appendable {
     flush();
 
     int index = length;
-    for (Cell c = chain; c != null; c = c.next) {
+    for (StringBuilderCell c = chain; c != null; c = c.next) {
       int start = index - c.value.length();
       index = start;
       
@@ -143,17 +143,17 @@ public class StringBuilder implements CharSequence, Appendable {
       flush();
 
       int index = length;
-      for (Cell c = chain; c != null; c = c.next) {
+      for (StringBuilderCell c = chain; c != null; c = c.next) {
         int start = index - c.value.length();
         index = start;
       
         if (i >= start) {
           if (i == start) {
-            c.next = new Cell(s, c.next);
+            c.next = new StringBuilderCell(s, c.next);
           } else {
             String v = c.value;
             c.value = v.substring(i - start, v.length());
-            c.next = new Cell(s, new Cell(v.substring(0, i - start), c.next));
+            c.next = new StringBuilderCell(s, new StringBuilderCell(v.substring(0, i - start), c.next));
           }
           break;
         }
@@ -189,8 +189,8 @@ public class StringBuilder implements CharSequence, Appendable {
     flush();
 
     int index = length;
-    Cell p = null;
-    for (Cell c = chain; c != null; c = c.next) {
+    StringBuilderCell p = null;
+    for (StringBuilderCell c = chain; c != null; c = c.next) {
       int e = index;
       int s = index - c.value.length();
       index = s;
@@ -212,7 +212,7 @@ public class StringBuilder implements CharSequence, Appendable {
         } else {
           String v = c.value;
           c.value = v.substring(end - s, e - s);
-          c.next = new Cell(v.substring(0, start - s), c.next);
+          c.next = new StringBuilderCell(v.substring(0, start - s), c.next);
           break;
         }        
       }
@@ -298,7 +298,7 @@ public class StringBuilder implements CharSequence, Appendable {
 
     int index = length;
     length = v;
-    for (Cell c = chain; c != null; c = c.next) {
+    for (StringBuilderCell c = chain; c != null; c = c.next) {
       int start = index - c.value.length();
 
       if (v > start) {
@@ -321,7 +321,7 @@ public class StringBuilder implements CharSequence, Appendable {
     flush();
 
     int index = length;
-    for (Cell c = chain; c != null; c = c.next) {
+    for (StringBuilderCell c = chain; c != null; c = c.next) {
       int start = index - c.value.length();
       int end = index;
       index = start;
@@ -345,16 +345,6 @@ public class StringBuilder implements CharSequence, Appendable {
     char[] array = new char[length];
     getChars(0, length, array, 0);
     return new String(array, 0, length, false);
-  }
-
-  private static class Cell {
-    public String value;
-    public Cell next;
-
-    public Cell(String value, Cell next) {
-      this.value = value;
-      this.next = next;
-    }
   }
 
   public String substring(int start) {

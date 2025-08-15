@@ -11,37 +11,48 @@
 package java.util;
 
 import java.base.Data;
+import java.base.DataEntrySet;
+import java.base.DataKeySet;
+import java.base.DataValues;
+import java.base.DataEntryMap;
+
+
 import java.util.NoSuchElementException;
 
 public class HashMap<K, V> implements Map<K, V> {
   private static final int MinimumCapacity = 16;
 
   private int size;
-  private Cell[] array;
-  private final Helper helper;
+  private HashMapCell[] array;
+  private final HashMapHelper helper;
 
   // Head and tail pointers for insertion-order linked list
-  private Cell<K, V> head;
-  private Cell<K, V> tail;
+  private HashMapCell<K, V> head;
+  private HashMapCell<K, V> tail;
 
-  public HashMap(int capacity, Helper<K, V> helper) {
+  public HashMap(int capacity, HashMapHelper<K, V> helper) {
     if (capacity > 0) {
-      array = new Cell[Data.nextPowerOfTwo(capacity)];
+      array = new HashMapCell[Data.nextPowerOfTwo(capacity)];
     }
     this.helper = helper;
   }
 
   public HashMap(int capacity) {
-    this(capacity, new MyHelper());
+    this(capacity, new HashMapMyHelper());
   }
 
   public HashMap() {
     this(0);
   }
 
+  // Getter for head field (needed by HashMapMyIterator)
+  HashMapCell<K, V> getHead() {
+    return head;
+  }
+
   public HashMap(Map<K, V> map) {
     this(map.size());
-    for (Map.Entry<K, V> entry : map.entrySet()) {
+    for (Entry<K, V> entry : map.entrySet()) {
       put(entry.getKey(), entry.getValue());
     }
   }
@@ -71,18 +82,18 @@ public class HashMap<K, V> implements Map<K, V> {
   }
 
   private void resize(int capacity) {
-    Cell<K, V>[] newArray = null;
+    HashMapCell<K, V>[] newArray = null;
     if (capacity != 0) {
       capacity = Data.nextPowerOfTwo(capacity);
       if (array != null && array.length == capacity) {
         return;
       }
 
-      newArray = new Cell[capacity];
+      newArray = new HashMapCell[capacity];
       if (array != null) {
         for (int i = 0; i < array.length; ++i) {
-          Cell<K, V> next;
-          for (Cell<K, V> c = array[i]; c != null; c = next) {
+          HashMapCell<K, V> next;
+          for (HashMapCell<K, V> c = array[i]; c != null; c = next) {
             next = c.next();
             int index = c.hashCode() & (capacity - 1);
             c.setNext(newArray[index]);
@@ -94,10 +105,10 @@ public class HashMap<K, V> implements Map<K, V> {
     array = newArray;
   }
 
-  protected Cell<K, V> find(Object key) {
+  protected HashMapCell<K, V> find(Object key) {
     if (array != null) {
       int index = helper.hash((K) key) & (array.length - 1);
-      for (Cell<K, V> c = array[index]; c != null; c = c.next()) {
+      for (HashMapCell<K, V> c = array[index]; c != null; c = c.next()) {
         if (helper.equal((K) key, c.getKey())) {
           return c;
         }
@@ -107,7 +118,7 @@ public class HashMap<K, V> implements Map<K, V> {
   }
 
   // Insert into bucket and into insertion-order linked list
-  private void insert(Cell<K, V> cell) {
+  private void insert(HashMapCell<K, V> cell) {
     ++ size;
     grow();
 
@@ -126,10 +137,10 @@ public class HashMap<K, V> implements Map<K, V> {
     }
   }
 
-  public void remove(Cell<K, V> cell) {
+  public void remove(HashMapCell<K, V> cell) {
     int index = cell.hashCode() & (array.length - 1);
-    Cell<K, V> p = null;
-    for (Cell<K, V> c = array[index]; c != null; c = c.next()) {
+    HashMapCell<K, V> p = null;
+    for (HashMapCell<K, V> c = array[index]; c != null; c = c.next()) {
       if (c == cell) {
         if (p == null) {
           array[index] = c.next();
@@ -142,8 +153,8 @@ public class HashMap<K, V> implements Map<K, V> {
     }
 
     // --- Remove from linked list ---
-    Cell<K, V> before = cell.before();
-    Cell<K, V> after  = cell.after();
+    HashMapCell<K, V> before = cell.before();
+    HashMapCell<K, V> after  = cell.after();
     if (before == null) head = after;
     else before.setAfter(after);
     if (after  == null) tail = before;
@@ -153,8 +164,8 @@ public class HashMap<K, V> implements Map<K, V> {
     shrink();
   }
 
-  private Cell<K, V> putCell(K key, V value) {
-    Cell<K, V> c = find(key);
+  private HashMapCell<K, V> putCell(K key, V value) {
+    HashMapCell<K, V> c = find(key);
     if (c == null) {
       insert(helper.make(key, value, null));
     } else {
@@ -170,7 +181,7 @@ public class HashMap<K, V> implements Map<K, V> {
   public boolean containsValue(Object value) {
     if (array != null) {
       for (int i = 0; i < array.length; ++i) {
-        for (Cell<K, V> c = array[i]; c != null; c = c.next()) {
+        for (HashMapCell<K, V> c = array[i]; c != null; c = c.next()) {
           if (helper.equal((K) value, c.getValue())) {
             return true;
           }
@@ -181,16 +192,16 @@ public class HashMap<K, V> implements Map<K, V> {
   }
 
   public V get(Object key) {
-    Cell<K, V> c = find(key);
+    HashMapCell<K, V> c = find(key);
     return (c == null ? null : c.getValue());
   }
 
-  public Cell<K, V> removeCell(Object key) {
-    Cell<K, V> old = null;
+  public HashMapCell<K, V> removeCell(Object key) {
+    HashMapCell<K, V> old = null;
     if (array != null) {
       int index = helper.hash((K) key) & (array.length - 1);
-      Cell<K, V> p = null;
-      for (Cell<K, V> c = array[index]; c != null; c = c.next()) {
+      HashMapCell<K, V> p = null;
+      for (HashMapCell<K, V> c = array[index]; c != null; c = c.next()) {
         if (helper.equal((K) key, c.getKey())) {
           old = c;
           if (p == null) array[index] = c.next();
@@ -208,7 +219,7 @@ public class HashMap<K, V> implements Map<K, V> {
   }
 
   public V put(K key, V value) {
-    Cell<K, V> c = find(key);
+    HashMapCell<K, V> c = find(key);
     if (c == null) {
       insert(helper.make(key, value, null));
       return null;
@@ -220,13 +231,13 @@ public class HashMap<K, V> implements Map<K, V> {
   }
 
   public void putAll(Map<? extends K,? extends V> elts) {
-    for (Map.Entry<? extends K, ? extends V> entry : elts.entrySet()) {
+    for (Entry<? extends K, ? extends V> entry : elts.entrySet()) {
       put(entry.getKey(), entry.getValue());
     }
   }
 
   public V remove(Object key) {
-    Cell<K, V> c = removeCell(key);
+    HashMapCell<K, V> c = removeCell(key);
     return (c == null ? null : c.getValue());
   }
 
@@ -238,145 +249,20 @@ public class HashMap<K, V> implements Map<K, V> {
   }
 
   public Set<Entry<K, V>> entrySet() {
-    return new Data.EntrySet(new MyEntryMap());
+    return new DataEntrySet(new HashMapMyEntryMap(this));
   }
 
   public Set<K> keySet() {
-    return new Data.KeySet(new MyEntryMap());
+    return new DataKeySet(new HashMapMyEntryMap(this));
   }
 
   public Collection<V> values() {
-    return new Data.Values(new MyEntryMap());
+    return new DataValues(new HashMapMyEntryMap(this));
   }
 
   Iterator<Entry<K, V>> iterator() {
-    return new MyIterator();
+    return new HashMapMyIterator(this);
   }
 
-  private class MyEntryMap implements Data.EntryMap<K, V> {
-    public int size() {
-      return HashMap.this.size();
-    }
 
-    public Entry<K,V> find(Object key) {
-      return HashMap.this.find(key);
-    }
-
-    public Entry<K,V> remove(Object key) {
-      return removeCell(key);
-    }
-
-    public void clear() {
-      HashMap.this.clear();
-    }
-
-    public Iterator<Entry<K,V>> iterator() {
-      return HashMap.this.iterator();
-    }
-  }
-
-  interface Cell<K, V> extends Entry<K, V> {
-    // Next pointer for hash bucket chain
-    Cell<K, V> next();
-    void setNext(Cell<K, V> next);
-
-    K getKey();
-    V getValue();
-
-    // Before/after pointers for insertion-order linked list
-    Cell<K, V> before();
-    void setBefore(Cell<K, V> before);
-    Cell<K, V> after();
-    void setAfter(Cell<K, V> after);
-  }
-
-  interface Helper<K, V> {
-    public Cell<K, V> make(K key, V value, Cell<K, V> next);
-    
-    public int hash(K key);
-
-    public boolean equal(K a, K b);
-  }
-
-  private static class MyCell<K, V> implements Cell<K, V> {
-    public final K key;
-    public V value;
-    public Cell<K, V> next;
-    public int hashCode;
-    // Pointers for insertion-order linked list
-    public Cell<K, V> before, after;
-
-    public MyCell(K key, V value, Cell<K, V> next, int hashCode) {
-      this.key = key;
-      this.value = value;
-      this.next = next;
-      this.hashCode = hashCode;
-      // before/after default to null
-    }
-
-    public K getKey() {
-      return key;
-    }
-
-    public V getValue() {
-      return value;
-    }
-
-    public V setValue(V value) {
-      V old = this.value;
-      this.value = value;
-      return old;
-    }
-
-    public Cell<K, V> next() {
-      return next;
-    }
-
-    public void setNext(Cell<K, V> next) {
-      this.next = next;
-    }
-
-    public int hashCode() {
-      return hashCode;
-    }
-
-    // Insertion-order list methods
-    public Cell<K, V> before() { return before; }
-    public void setBefore(Cell<K, V> b) { before = b; }
-    public Cell<K, V> after() { return after; }
-    public void setAfter(Cell<K, V> a) { after = a; }
-  }
-
-  static class MyHelper<K, V> implements Helper<K, V> {
-    public Cell<K, V> make(K key, V value, Cell<K, V> next) {
-      return new MyCell(key, value, next, hash(key));
-    }
-
-    public int hash(K a) {
-      return (a == null ? 0 : a.hashCode());
-    }
-
-    public boolean equal(K a, K b) {
-      return (a == null ? b == null : a.equals(b));
-    }
-  }
-
-  private class MyIterator implements Iterator<Entry<K, V>> {
-    private Cell<K, V> next = head;  // Start from head of linked list
-
-    public boolean hasNext() {
-      return next != null;
-    }
-
-    public Entry<K, V> next() {
-      if (next == null) throw new NoSuchElementException();
-      Cell<K, V> e = next;
-      next = next.after();
-      return e;
-    }
-
-    public void remove() {
-      throw new UnsupportedOperationException("Use HashMap.remove(key) instead");
-    }
-  }
 }
