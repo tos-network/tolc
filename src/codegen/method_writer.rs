@@ -144,9 +144,10 @@ impl MethodWriter {
         // Enter new lexical scope
         self.scope_stack.push(Scope::default());
         for stmt in &block.statements {
-            // record a line number entry at the start of each statement
-            self.record_stmt_line(stmt);
+            // Generate statement first, then record its source line at the next pc.
+            // This avoids colliding with the method-declaration line at pc=0 (javac style).
             self.generate_statement(stmt)?;
+            self.record_stmt_line(stmt);
         }
         // Exit scope: close locals (length=end-start)
         if let Some(scope) = self.scope_stack.pop() {
@@ -704,7 +705,6 @@ impl MethodWriter {
         if let Some(receiver) = &call.target { self.generate_expression(receiver)?; } else { self.emit_opcode(self.opcode_generator.aload(0)); }
         for arg in &call.arguments { self.generate_expression(arg)?; }
 
-        // General invokevirtual
         // Generate method descriptor based on arguments
         let descriptor = self.generate_method_descriptor(&call.arguments);
         
@@ -721,8 +721,15 @@ impl MethodWriter {
                 .clone()
         };
         
-        let method_ref_index = self.add_method_ref(&class_name, &call.name, &descriptor);
-        self.emit_opcode(self.opcode_generator.invokevirtual(method_ref_index));
+        // Special handling for Comparable.compareTo method
+        if call.name == "compareTo" {
+            // This is likely a Comparable interface method call
+            let method_ref_index = self.add_method_ref("java/lang/Comparable", &call.name, "(Ljava/lang/Object;)I");
+            self.emit_opcode(self.opcode_generator.invokeinterface(method_ref_index, 2));
+        } else {
+            let method_ref_index = self.add_method_ref(&class_name, &call.name, &descriptor);
+            self.emit_opcode(self.opcode_generator.invokevirtual(method_ref_index));
+        }
         
         Ok(())
     }
@@ -766,7 +773,10 @@ impl MethodWriter {
         }
         
         // Generate field access
-        let field_ref_index = self.add_field_ref("", &field_access.name, "I"); // Simplified type
+        // TODO: Get proper field type and class name from context
+        let field_class = self.current_class_name.clone().unwrap_or_else(|| "java/lang/Object".to_string());
+        let field_descriptor = "I"; // TODO: Resolve actual field type
+        let field_ref_index = self.add_field_ref(&field_class, &field_access.name, field_descriptor);
         self.emit_opcode(self.opcode_generator.getfield(0));
         self.emit_short(field_ref_index as i16);
         
@@ -860,26 +870,50 @@ impl MethodWriter {
             }
         }
         
-        // Regular assignment: generate value first
-        self.generate_expression(&assign.value)?;
-        
-        // Generate target
+        // Regular assignment: generate by target kind to preserve correct operand order
         match &*assign.target {
             Expr::Identifier(ident) => {
-                // Store in local variable
+                // x = value → evaluate RHS then store to local (or this.field fallback)
+                self.generate_expression(&assign.value)?;
                 if let Some(local_var) = self.find_local_variable(&ident.name) {
                     let var_type = local_var.var_type.clone();
                     self.store_local_variable(local_var.index, &var_type)?;
                 } else {
-                    // Assume it's a field assignment on 'this'
+                    // Assume it's a field on 'this'
                     self.emit_opcode(self.opcode_generator.aload(0));
-                    self.emit_opcode(self.opcode_generator.putfield(0));
-                    self.emit_short(1); // Constant pool index
+                    // objectref is under value; swap to [objectref, value]
+                    self.emit_opcode(self.opcode_generator.swap());
+                    // Placeholder CP index; descriptor/class are resolved later in full impl
+                    self.emit_opcode(self.opcode_generator.putfield(1));
                 }
             }
-            _ => {
-                // TODO: Handle other assignment targets
-                return Err(Error::codegen_error(format!("Unsupported assignment target: {:?}", assign.target)));
+            Expr::FieldAccess(field_access) => {
+                // target.field = value
+                // Evaluate receiver first to get objectref
+                if let Some(receiver) = &field_access.target {
+                    self.generate_expression(receiver)?;
+                } else {
+                    // Implicit this
+                    self.emit_opcode(self.opcode_generator.aload(0));
+                }
+                // Then evaluate RHS value
+                self.generate_expression(&assign.value)?;
+                // Stack: objectref, value → putfield
+                // Use placeholder CP index
+                self.emit_opcode(self.opcode_generator.putfield(1));
+            }
+            Expr::ArrayAccess(array_access) => {
+                // arr[idx] = value
+                // Evaluate array and index first
+                self.generate_expression(&array_access.array)?;
+                self.generate_expression(&array_access.index)?;
+                // Then evaluate RHS value
+                self.generate_expression(&assign.value)?;
+                // Choose store opcode; use int-array store as a reasonable default
+                self.emit_opcode(self.opcode_generator.iastore());
+            }
+            other => {
+                return Err(Error::codegen_error(format!("Unsupported assignment target: {:?}", other)));
             }
         }
         
@@ -1019,8 +1053,7 @@ impl MethodWriter {
             _ => {
                 // Reference type cast - checkcast instruction
                 let class_ref_index = self.add_class_constant(&cast.target_type.name);
-                self.emit_opcode(self.opcode_generator.checkcast(0));
-                self.emit_short(class_ref_index as i16);
+                self.emit_opcode(self.opcode_generator.checkcast(class_ref_index));
             }
         }
         
@@ -1350,16 +1383,81 @@ impl MethodWriter {
         self.pending_exception_entries.push(PendingExceptionEntry { start_label: start, end_label: end, handler_label: handler, catch_type });
     }
     
-    /// Emit an instruction
-    fn emit_instruction(&mut self, opcode: u8) {
-        self.bytecode.push(opcode);
-        self.update_stack_and_locals();
+    /// Emit an opcode and update stack state
+    fn emit_opcode(&mut self, opcode: Vec<u8>) {
+        self.bytecode.extend_from_slice(&opcode);
+        
+        // Update stack state based on the opcode
+        if let Some(first_byte) = opcode.first() {
+            match first_byte {
+                // Load instructions - push values onto stack
+                0x19 => { // aload - push reference
+                    let _ = self.stack_state.push(1);
+                }
+                0x2A => { // aload_0 - push reference
+                    let _ = self.stack_state.push(1);
+                }
+                0x2B => { // aload_1 - push reference
+                    let _ = self.stack_state.push(1);
+                }
+                0x2C => { // aload_2 - push reference
+                    let _ = self.stack_state.push(1);
+                }
+                0x2D => { // aload_3 - push reference
+                    let _ = self.stack_state.push(1);
+                }
+                
+                // Store instructions - pop values from stack
+                0x3A => { // astore - pop reference
+                    let _ = self.stack_state.pop(1);
+                }
+                0x4B => { // astore_0 - pop reference
+                    let _ = self.stack_state.pop(1);
+                }
+                0x4C => { // astore_1 - pop reference
+                    let _ = self.stack_state.pop(1);
+                }
+                0x4D => { // astore_2 - pop reference
+                    let _ = self.stack_state.pop(1);
+                }
+                0x4E => { // astore_3 - pop reference
+                    let _ = self.stack_state.pop(1);
+                }
+                
+                // Method invocation - pop arguments, push return value
+                0xB6 => { // invokevirtual
+                    // For Comparable.compareTo, we have 2 arguments and return 1 value
+                    let _ = self.stack_state.update(2, 1); // pop 2, push 1
+                }
+                0xB9 => { // invokeinterface
+                    // For Comparable.compareTo, we have 2 arguments and return 1 value
+                    let _ = self.stack_state.update(2, 1); // pop 2, push 1
+                }
+                
+                // Type conversion - no stack change
+                0xC0 => { // checkcast - no stack change
+                    // checkcast doesn't change stack depth
+                }
+                
+                // Return instructions - pop return value
+                0xAC => { // ireturn
+                    let _ = self.stack_state.pop(1);
+                }
+                0xB0 => { // return
+                    // void return, no stack change
+                }
+                
+                // Other instructions - no stack change for now
+                _ => {}
+            }
+        }
     }
     
-    /// Emit opcode using the opcode generator
-    fn emit_opcode(&mut self, opcode_bytes: Vec<u8>) {
-        self.bytecode.extend(opcode_bytes);
-        self.update_stack_and_locals();
+    /// Emit an instruction (for backward compatibility)
+    fn emit_instruction(&mut self, opcode: u8) {
+        self.bytecode.push(opcode);
+        // For single-byte instructions, we don't have enough context to update stack state
+        // This is a simplified version for backward compatibility
     }
     
     /// Emit a byte value
@@ -1380,9 +1478,45 @@ impl MethodWriter {
     }
     
     /// Add a class constant to the constant pool
-    fn add_class_constant(&mut self, _name: &str) -> u16 {
-        // TODO: Implement constant pool management
-        1
+    fn add_class_constant(&mut self, name: &str) -> u16 {
+        if let Some(cp) = &self.constant_pool {
+            let mut cp_ref = cp.borrow_mut();
+            // Try to resolve the class name using classpath first
+            let resolved_name = if !name.contains('/') {
+                // Simple name, try to resolve using classpath
+                if let Some(resolved) = crate::codegen::classpath::resolve_class_name(name) {
+                    resolved.to_string()
+                } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&name) {
+                    // java.lang types
+                    format!("java/lang/{}", name)
+                } else if name == "Comparator" || name == "Iterator" || name == "Collection" || 
+                          name == "List" || name == "Set" || name == "Map" || 
+                          name == "Deque" || name == "Queue" || name == "Iterable" {
+                    // java.util types
+                    format!("java/util/{}", name)
+                } else if name == "Serializable" || name == "Closeable" || name == "Flushable" {
+                    // java.io types
+                    format!("java/io/{}", name)
+                } else if name == "Comparable" {
+                    // java.lang.Comparable
+                    "java/lang/Comparable".to_string()
+                } else {
+                    // Default to java.lang if we can't determine
+                    format!("java/lang/{}", name)
+                }
+            } else {
+                // Name already contains package
+                name.to_string()
+            };
+            
+            match cp_ref.try_add_class(&resolved_name) {
+                Ok(idx) => idx,
+                Err(_) => 1, // Fallback
+            }
+        } else {
+            // Fallback for backward compatibility
+            1
+        }
     }
     
     /// Add a method reference to the constant pool

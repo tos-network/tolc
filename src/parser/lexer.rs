@@ -270,7 +270,7 @@ impl Token {
             Token::Long | Token::Char | Token::Float |
             Token::Double | Token::If | Token::Else |
             Token::For | Token::While | Token::Do |
-            Token::Switch | Token::Case | Token::Default |
+            Token::Switch | Token::Case |
             Token::Break | Token::Continue | Token::Return |
             Token::Throw | Token::Throws | Token::Try |
             Token::Catch | Token::Finally | Token::True |

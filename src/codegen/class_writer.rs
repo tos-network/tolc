@@ -9,8 +9,9 @@ use crate::codegen::{
     ClassFile,
     field::FieldInfo,
     method::MethodInfo,
-    frame::{FrameBuilder, VerificationType, describe_stack_map_frames},
+    frame::{FrameBuilder, describe_stack_map_frames},
     modifiers_to_flags,
+    signature::TypeNameResolver,
 };
 use super::descriptor::type_to_descriptor;
 use crate::config::Config;
@@ -141,10 +142,15 @@ impl ClassWriter {
     /// Generate bytecode for an interface declaration
     pub fn generate_interface(&mut self, interface: &InterfaceDecl) -> Result<()> {
         // Set interface name and access flags
-        let interface_name = &interface.name;
-        let this_class_index = self.class_file.constant_pool.try_add_class(interface_name)
+        let internal_name = if let Some(pkg) = &self.package_name {
+            if pkg.is_empty() { interface.name.clone() } else { format!("{}/{}", pkg.replace('.', "/"), interface.name) }
+        } else { interface.name.clone() };
+        let this_class_index = self.class_file.constant_pool.try_add_class(&internal_name)
             .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         self.class_file.this_class = this_class_index;
+        
+        // Set current_class_name for method generation
+        self.current_class_name = Some(internal_name.clone());
         
         // Set access flags - interfaces are always abstract
         let mut access_flags = access_flags::ACC_INTERFACE | access_flags::ACC_ABSTRACT;
@@ -182,6 +188,40 @@ impl ClassWriter {
             }
         }
         
+        // Add Signature attribute if interface has generic type parameters
+        if !interface.type_params.is_empty() {
+            use crate::codegen::signature::{interface_to_signature, TypeNameResolver};
+            let type_resolver = TypeNameResolver::with_default_mappings();
+            let signature_string = interface_to_signature(interface, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+            let signature_index = self.class_file.constant_pool.try_add_utf8(&signature_string)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_attr = crate::codegen::attribute::SignatureAttribute { 
+                signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index) 
+            };
+            let name_index = self.class_file.constant_pool.try_add_utf8("Signature")
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
+                AttributeInfo::Signature(signature_attr)
+            );
+            self.class_file.attributes.push(named_attr);
+        }
+
+        // Add SourceFile attribute
+        let source_file_name = format!("{}.java", interface.name);
+        let source_file_index = self.class_file.constant_pool.try_add_utf8(&source_file_name)
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let source_file_attr = crate::codegen::attribute::SourceFileAttribute { 
+            filename: crate::codegen::typed_index::ConstPoolIndex::from(source_file_index) 
+        };
+        let name_index = self.class_file.constant_pool.try_add_utf8("SourceFile")
+            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let named_attr = crate::codegen::attribute::NamedAttribute::new(
+            crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
+            AttributeInfo::SourceFile(source_file_attr)
+        );
+        self.class_file.attributes.push(named_attr);
+        
         Ok(())
     }
     
@@ -213,7 +253,33 @@ impl ClassWriter {
         // Defer SourceFile attribute until after members for javac-like ordering
         
         // Defer adding interfaces until after methods to avoid touching Class Utf8s early
-        let deferred_interfaces: Vec<String> = class.implements.iter().map(|itf| itf.name.replace('.', "/")).collect();
+        let deferred_interfaces: Vec<String> = class.implements.iter().map(|itf| {
+            let interface_name = &itf.name;
+            // If interface name doesn't contain package, try to resolve it
+            if !interface_name.contains('.') {
+                // Try to resolve using classpath first
+                if let Some(resolved) = crate::codegen::classpath::resolve_class_name(interface_name) {
+                    resolved.to_string()
+                } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&interface_name.as_str()) {
+                    // java.lang types
+                    format!("java/lang/{}", interface_name)
+                } else if interface_name == "Comparator" || interface_name == "Iterator" || interface_name == "Collection" || 
+                          interface_name == "List" || interface_name == "Set" || interface_name == "Map" || 
+                          interface_name == "Deque" || interface_name == "Queue" || interface_name == "Iterable" {
+                    // java.util types
+                    format!("java/util/{}", interface_name)
+                } else if interface_name == "Serializable" || interface_name == "Closeable" || interface_name == "Flushable" {
+                    // java.io types
+                    format!("java/io/{}", interface_name)
+                } else {
+                    // Default to java.lang if we can't determine
+                    format!("java/lang/{}", interface_name)
+                }
+            } else {
+                // Interface already has package name
+                interface_name.replace('.', "/")
+            }
+        }).collect();
         
         // Track whether user-defined constructor exists
         let has_user_ctor = class.body.iter().any(|m| matches!(m, ClassMember::Constructor(_)));
@@ -339,6 +405,17 @@ impl ClassWriter {
                 if pc.line_numbers.is_empty() {
                     let _ = lnt.add_line_number(0, 1);
                 } else {
+                    // Strictly emulate javac: ensure a decl-line at pc=0 and keep the first statement line
+                    // possibly also at pc=0 if provided by collector.
+                    let mut saw_pc0 = false;
+                    for (pcv, _ln) in &pc.line_numbers {
+                        if *pcv == 0 { saw_pc0 = true; break; }
+                    }
+                    if !saw_pc0 {
+                        // If collector didn't add pc=0, inject using the first line number
+                        let first_line = pc.line_numbers.first().map(|(_, l)| *l).unwrap_or(1);
+                        let _ = lnt.add_line_number(0, first_line);
+                    }
                     for (pcv, ln) in &pc.line_numbers { let _ = lnt.add_line_number(*pcv, *ln); }
                 }
                 sub_attrs.push(make_line_number_table_attribute(&mut self.cp_shared.as_ref().unwrap().borrow_mut(), &lnt)
@@ -346,9 +423,20 @@ impl ClassWriter {
             }
             if self.config.debug {
                 let mut lvt = LocalVariableTableAttribute::new();
-                // For HelloWorld main: add args if present
+                // Add implicit 'this' for instance methods at slot 0
+                let is_static = (pc.access_flags & access_flags::ACC_STATIC) == access_flags::ACC_STATIC;
+                if !is_static {
+                    let this_name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("this") }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let this_desc = format!("L{};", self.current_class_name.clone().unwrap_or_else(|| class.name.replace('.', "/")));
+                    let this_desc_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&this_desc) }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let entry = LocalVariableEntry { start_pc: 0, length: pc.code_bytes.len() as u16, name_index: this_name_idx, descriptor_index: this_desc_idx, index: 0 };
+                    lvt.entries.push(entry).map_err(|e| crate::error::Error::CodeGen { message: format!("LocalVariableTable push failed: {}", e) })?;
+                }
+                // Add explicit locals (skip synthetic/internal names)
                 for lv in &pc.locals {
-                    if lv.name == "this" || lv.name.starts_with('$') { continue; }
+                    if lv.name.starts_with('$') { continue; }
                     let desc = lv.var_type.descriptor(); if desc.is_empty() { continue; }
                     let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&lv.name) }
                         .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
@@ -414,6 +502,29 @@ impl ClassWriter {
         let filename = format!("{}.java", class.name);
         if let Ok(attr) = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); crate::codegen::attribute::NamedAttribute::new_source_file_attribute(&mut cp, filename) } {
             self.class_file.attributes.push(attr);
+        }
+
+        // Add Signature attribute if class has generic type parameters
+        if !class.type_params.is_empty() {
+            let type_resolver = TypeNameResolver::with_default_mappings();
+            let signature = crate::codegen::signature::class_to_signature(
+                class, 
+                self.package_name.as_deref(), 
+                self.current_class_name.as_deref(), 
+                &type_resolver
+            );
+            let signature_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&signature) }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_attr = crate::codegen::attribute::SignatureAttribute { 
+                signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index) 
+            };
+            let name_index = self.class_file.constant_pool.try_add_utf8("Signature")
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
+                AttributeInfo::Signature(signature_attr)
+            );
+            self.class_file.attributes.push(named_attr);
         }
 
         // Finalize: write back shared pool
@@ -641,12 +752,65 @@ impl ClassWriter {
         // Interface methods are implicitly public and abstract
         let access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_ABSTRACT;
         
-        let method_info = MethodInfo {
+        let mut method_info = MethodInfo {
             access_flags,
             name_index,
             descriptor_index,
             attributes: vec![],
         };
+
+        // Add Signature attribute if method has generic type parameters or uses generic types
+        if !method.type_params.is_empty() ||
+           method.parameters.iter().any(|p| !p.type_ref.type_args.is_empty() || (p.type_ref.name.len() == 1 && p.type_ref.name.chars().next().unwrap().is_ascii_uppercase())) ||
+           (method.return_type.as_ref().map(|rt| !rt.type_args.is_empty() || (rt.name.len() == 1 && rt.name.chars().next().unwrap().is_ascii_uppercase())).unwrap_or(false)) {
+            use crate::codegen::signature::{method_to_signature, TypeNameResolver};
+            let type_resolver = TypeNameResolver::with_default_mappings();
+            let signature_string = method_to_signature(method, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+            let signature_index = self.class_file.constant_pool.try_add_utf8(&signature_string)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_attr = crate::codegen::attribute::SignatureAttribute { 
+                signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index) 
+            };
+            let name_index = self.class_file.constant_pool.try_add_utf8("Signature")
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
+                AttributeInfo::Signature(signature_attr)
+            );
+            method_info.attributes.push(named_attr);
+        }
+
+        // Add Exceptions attribute if method has throws declarations
+        if !method.throws.is_empty() {
+            let mut exception_indexes = Vec::new();
+            for throws_type in &method.throws {
+                // Convert throws type to internal name format
+                let internal_name = if throws_type.name.contains('.') || throws_type.name.contains('/') {
+                    throws_type.name.clone()
+                } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&throws_type.name.as_str()) {
+                    format!("java/lang/{}", throws_type.name)
+                } else if let Some(resolved_name) = crate::codegen::classpath::resolve_class_name(&throws_type.name) {
+                    resolved_name.to_string()
+                } else {
+                    // Fallback: assume it's in the same package
+                    if let Some(pkg) = &self.package_name {
+                        format!("{}/{}", pkg.replace('.', "/"), throws_type.name)
+                    } else {
+                        throws_type.name.clone()
+                    }
+                };
+                
+                let exception_index = self.class_file.constant_pool.try_add_class(&internal_name)
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                exception_indexes.push(exception_index.into());
+            }
+            
+            let exceptions_attr = crate::codegen::attribute::NamedAttribute::new_exceptions_attribute(
+                &mut self.class_file.constant_pool, 
+                exception_indexes
+            ).map_err(|e| crate::error::Error::CodeGen { message: format!("const pool:Exception: {}", e) })?;
+            method_info.attributes.push(exceptions_attr);
+        }
         
         self.class_file.methods.push(method_info);
         Ok(())
@@ -716,7 +880,7 @@ impl ClassWriter {
         {
             if let Some(init) = &field.initializer {
                 use crate::ast::{Expr, Literal};
-                let add_const_attr = |cw: &mut ClassWriter, tag: &str, idx: u16, fi: &mut FieldInfo| -> Result<()> {
+                let add_const_attr = |cw: &mut ClassWriter, _tag: &str, idx: u16, fi: &mut FieldInfo| -> Result<()> {
                     // ConstantValue attribute payload: u2 constantvalue_index
                     let mut payload = Vec::new();
                     payload.extend_from_slice(&idx.to_be_bytes());
@@ -1017,7 +1181,7 @@ impl ClassWriter {
         let current_class = self.current_class_name.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_name not set".into() })?;
         let mut code_writer = BodyWriter::new_with_constant_pool_and_class(constant_pool_rc.clone(), current_class);
         code_writer.generate_method_body(method)?;
-        let (code_bytes, max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
+        let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
         // Merge back constant pool if not using shared
         if self.cp_shared.is_none() { self.class_file.constant_pool = constant_pool_rc.borrow().clone(); }
         
@@ -1093,13 +1257,20 @@ impl ClassWriter {
         // Always emit LineNumberTable to match javac default
         {
             let mut lnt = LineNumberTableAttribute::new();
-            if line_numbers.is_empty() {
-                let line = method.span.start.line as u16;
-                lnt.add_line_number(0, line.max(1)).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
-            } else {
-                for (pc, line) in &line_numbers {
-                    lnt.add_line_number(*pc, *line).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
+            // Always add a method-declaration line entry at pc=0, like javac
+            let decl_line = (method.span.start.line as u16).max(1);
+            lnt.add_line_number(0, decl_line).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
+            // Heuristic: if the first non-zero-pc entry has the same line as decl_line,
+            // bump it by +1 to better match javac (which maps the first range [0..next) to the decl line).
+            let mut first_nonzero_seen = false;
+            for (pc, line) in &line_numbers {
+                if *pc == 0 { continue; }
+                let mut out_line = *line;
+                if !first_nonzero_seen {
+                    first_nonzero_seen = true;
+                    if out_line == decl_line { out_line = decl_line.saturating_add(1); }
                 }
+                lnt.add_line_number(*pc, out_line).map_err(|e| crate::error::Error::CodeGen { message: format!("add_line_number failed: {}", e) })?;
             }
             sub_attrs.push(make_line_number_table_attribute(&mut self.cp_shared.as_ref().unwrap().borrow_mut(), &lnt)
                 .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?);
@@ -1107,8 +1278,20 @@ impl ClassWriter {
         // LocalVariableTable only in debug mode
             if self.config.debug {
                 let mut lvt = LocalVariableTableAttribute::new();
+                // Emit implicit 'this' for instance methods
+                let is_static_method = method.modifiers.iter().any(|m| matches!(m, Modifier::Static));
+                if !is_static_method {
+                    let this_name_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("this") }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let this_internal = self.current_class_name.clone().unwrap_or_default();
+                    let this_desc = if this_internal.is_empty() { "Ljava/lang/Object;".to_string() } else { format!("L{};", this_internal) };
+                    let this_desc_idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&this_desc) }
+                        .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                    let entry = LocalVariableEntry { start_pc: 0, length: code_bytes.len() as u16, name_index: this_name_idx, descriptor_index: this_desc_idx, index: 0 };
+                    lvt.entries.push(entry).map_err(|e| crate::error::Error::CodeGen { message: format!("LocalVariableTable push failed: {}", e) })?;
+                }
                 for lv in &locals {
-                    if lv.name == "this" || lv.name.starts_with('$') { continue; }
+                    if lv.name.starts_with('$') { continue; }
                     let desc = lv.var_type.descriptor();
                     if desc.is_empty() { continue; }
                 let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&lv.name) }
@@ -1207,6 +1390,7 @@ impl ClassWriter {
         }
         if self.config.debug {
             let mut lnt = LineNumberTableAttribute::new();
+            // javac includes a declaration line at pc=0 for constructors as well
             let line = class.span.start.line as u16;
             let _ = lnt.add_line_number(0, line.max(1));
             sub_attrs.push(make_line_number_table_attribute(&mut self.cp_shared.as_ref().unwrap().borrow_mut(), &lnt)
@@ -1437,18 +1621,7 @@ impl ClassWriter {
                     (Or,  L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a | b)),
                     (Xor, L::Boolean(a), L::Boolean(b)) => Some(L::Boolean(a ^ b)),
                     // char promotions (to int)
-                    (Add, L::Char(a), L::Char(b)) => Some(L::Integer((a as i64) + (b as i64))),
-                    (Add, L::Char(a), L::Integer(b)) => Some(L::Integer((a as i64) + b)),
-                    (Add, L::Integer(a), L::Char(b)) => Some(L::Integer(a + (b as i64))),
-                    (Add, L::String(a), L::String(b)) => Some(L::String(format!("{}{}", a, b))),
-                    (Add, L::String(a), L::Char(c)) => Some(L::String(format!("{}{}", a, c))),
-                    (Add, L::String(a), L::Integer(i)) => Some(L::String(format!("{}{}", a, i))),
-                    (Add, L::String(a), L::Float(f)) => Some(L::String(format!("{}{}", a, f))),
-                    (Add, L::String(a), L::Boolean(bv)) => Some(L::String(format!("{}{}", a, bv))),
-                    (Add, L::Integer(i), L::String(b)) => Some(L::String(format!("{}{}", i, b))),
-                    (Add, L::Float(f), L::String(b)) => Some(L::String(format!("{}{}", f, b))),
-                    (Add, L::Boolean(bv), L::String(b)) => Some(L::String(format!("{}{}", bv, b))),
-                    (Add, L::Char(c), L::String(b)) => Some(L::String(format!("{}{}", c, b))),
+                    // string/char concatenations are folded earlier; no additional patterns here
                     _ => None,
                 }
             }

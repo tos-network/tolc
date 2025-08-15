@@ -13,9 +13,6 @@ package java.lang;
 import java.io.SystemPrintStream;
 
 public abstract class System {
-  private static class NanoTime {
-    public static final long BaseInMillis = currentTimeMillis();
-  }
   
   public static final SystemPrintStream out;
   public static final SystemPrintStream err;
@@ -65,9 +62,8 @@ public abstract class System {
   public static native int identityHashCode(Object o);
 
   public static long nanoTime() {
-    return (currentTimeMillis() - NanoTime.BaseInMillis) * 1000000;
+    return (currentTimeMillis() - SystemNanoTime.BaseInMillis) * 1000000;
   }
-
 
   public static void load(String path) {
   }

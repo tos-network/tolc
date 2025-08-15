@@ -11,8 +11,8 @@
 package java.util;
 
 public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T> {
-  private Cell<T> front;
-  private Cell<T> rear;
+  private LinkedListCell<T> front;
+  private LinkedListCell<T> rear;
   private int size;
 
   public LinkedList(Collection<? extends T> c) {
@@ -21,9 +21,24 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   public LinkedList() { }
 
-  private Cell<T> find(int index) {
+  // Getter for front field (needed by LinkedListMyIterator)
+  LinkedListCell<T> getFront() {
+    return front;
+  }
+
+  // Method to remove a specific cell (needed by LinkedListMyIterator)
+  void removeCell(LinkedListCell<T> cell) {
+    remove(cell);
+  }
+
+  // Method to increment size (needed by LinkedListMyIterator)
+  void incrementSize() {
+    size++;
+  }
+
+  private LinkedListCell<T> find(int index) {
     int i = 0;
-    for (Cell<T> c = front; c != null; c = c.next) {
+    for (LinkedListCell<T> c = front; c != null; c = c.next) {
       if (i == index) {
         return c;
       }
@@ -36,7 +51,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
     return (a == null && b == null) || (a != null && a.equals(b));
   }
 
-  private void addFirst(Cell<T> c) {
+  private void addFirst(LinkedListCell<T> c) {
     ++ size;
 
     if (front == null) {
@@ -48,7 +63,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
     }
   }
   
-  private void addLast(Cell<T> c) {
+  private void addLast(LinkedListCell<T> c) {
     ++ size;
 
     if (front == null) {
@@ -60,8 +75,8 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
     }
   }
   
-  private Cell<T> find(Object element) {
-    for (Cell<T> c = front; c != null; c = c.next) {
+  private LinkedListCell<T> find(Object element) {
+    for (LinkedListCell<T> c = front; c != null; c = c.next) {
       if (equal(c.value, element)) {
         return c;
       }
@@ -69,7 +84,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
     return null;
   }
   
-  private void remove(Cell<T> c) {
+  private void remove(LinkedListCell<T> c) {
     -- size;
 
     if (c.prev == null) {
@@ -98,7 +113,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
   @Override
   public int indexOf(Object element) {
     int i = 0;
-    for (Cell<T> c = front; c != null; c = c.next) {
+    for (LinkedListCell<T> c = front; c != null; c = c.next) {
       if (equal(c.value, element)) {
         return i;
       }
@@ -110,7 +125,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
   @Override
   public int lastIndexOf(Object element) {
     int i = size;
-    for (Cell<T> c = rear; c != null; c = c.prev) {
+    for (LinkedListCell<T> c = rear; c != null; c = c.prev) {
       -- i;
       if (equal(c.value, element)) {
         return i;
@@ -141,8 +156,8 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
     if (index == 0) {
       addFirst(element);
     } else {
-      Cell<T> cell = find(index);
-      Cell<T> newCell = new Cell(element, cell.prev, cell);
+      LinkedListCell<T> cell = find(index);
+      LinkedListCell<T> newCell = new LinkedListCell(element, cell.prev, cell);
       cell.prev.next = newCell;
     }
   }
@@ -161,7 +176,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   @Override
   public void addFirst(T element) {
-    addFirst(new Cell(element, null, null));
+    addFirst(new LinkedListCell(element, null, null));
   }
 
   @Override
@@ -173,7 +188,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   @Override
   public void addLast(T element) {
-    addLast(new Cell(element, null, null));
+    addLast(new LinkedListCell(element, null, null));
   }
 
   public T get(int index) {
@@ -182,7 +197,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   @Override
   public T set(int index, T value) {
-    Cell<T> c = find(index);
+    LinkedListCell<T> c = find(index);
     T old = c.value;
     c.value = value;
     return old;
@@ -231,7 +246,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   @Override
   public T remove(int index) {
-    Cell<T> c = find(index);
+    LinkedListCell<T> c = find(index);
     remove(c);
     return c.value;
   }
@@ -302,7 +317,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   @Override
   public boolean remove(Object element) {
-    Cell<T> c = find(element);
+    LinkedListCell<T> c = find(element);
     if (c == null) {
       return false;
     } else {
@@ -329,7 +344,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
 
   @Override
   public ListIterator<T> listIterator(int index) {
-    MyIterator it = new MyIterator();
+    LinkedListMyIterator<T> it = new LinkedListMyIterator<>(this);
     for (int i = 0; i < index; ++i) {
       it.next();
     }
@@ -340,22 +355,7 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
   public Iterator<T> descendingIterator() {
     final ListIterator<T> li = listIterator(size());
     
-    return new Iterator<T>() {
-      @Override
-      public T next() {
-        return li.previous();
-      }
-
-      @Override
-      public boolean hasNext() {
-        return li.hasPrevious();
-      }
-
-      @Override
-      public void remove() {
-        li.remove();
-      }
-    };
+    return new LinkedListDescendingIterator<>(li);
   }
 
   @Override
@@ -397,67 +397,5 @@ public class LinkedList<T> extends AbstractSequentialList<T> implements Deque<T>
     }
   }
   
-  private static class Cell<T> {
-    public T value;
-    public Cell<T> prev;
-    public Cell<T> next;
 
-    public Cell(T value, Cell<T> prev, Cell<T> next) {
-      this.value = value;
-      this.prev = prev;
-      this.next = next;
-    }
-  }
-
-  private class MyIterator implements ListIterator<T> {
-    private Cell<T> toRemove;
-    private Cell<T> current;
-
-    public T previous() {
-      if (hasPrevious()) {
-        T v = current.value;
-        toRemove = current;
-        current = current.prev;
-        return v;
-      } else {
-        throw new NoSuchElementException();
-      }
-    }
-
-    public T next() {
-      if (hasNext()) {
-        if (current == null) {
-          current = front;
-        } else {
-          current = current.next;
-        }
-        toRemove = current;
-        return current.value;
-      } else {
-        throw new NoSuchElementException();
-      }
-    }
-
-    public boolean hasNext() {
-      if (current == null) {
-        return front != null;
-      } else {
-        return current.next != null;
-      }
-    }
-
-    public boolean hasPrevious() {
-      return current != null;
-    }
-
-    public void remove() {
-      if (toRemove != null) {
-        current = toRemove.prev;
-        LinkedList.this.remove(toRemove);
-        toRemove = null;
-      } else {
-        throw new IllegalStateException();
-      }
-    }
-  }
 }

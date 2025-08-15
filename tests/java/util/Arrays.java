@@ -111,12 +111,7 @@ public class Arrays {
   }
 
   public static void sort(Object[] array) {
-    sort(array, new Comparator() {
-        @Override
-        public int compare(Object a, Object b) {
-          return ((Comparable) a).compareTo(b);
-        }
-      });
+    sort(array, new ArraysComparator());
   }
 
   private final static int SORT_SIZE_THRESHOLD = 16;
@@ -222,17 +217,6 @@ public class Arrays {
     }
   }
 
-  public static int hashCode(byte a[]) {
-    if (a == null)
-        return 0;
-
-    int result = 1;
-    for (byte element : a)
-        result = 31 * result + element;
-
-    return result;
- }
-
   public static int hashCode(Object[] array) {
     if(array == null) {
       return 9023;
@@ -241,6 +225,19 @@ public class Arrays {
     int hc = 823347;
     for(Object o : array) {
       hc += o != null ? o.hashCode() : 54267;
+      hc *= 3;
+    }
+    return hc;
+  }
+
+  public static int hashCode(byte[] array) {
+    if(array == null) {
+      return 9023;
+    }
+
+    int hc = 823347;
+    for(byte b : array) {
+      hc += b;
       hc *= 3;
     }
     return hc;
@@ -375,91 +372,7 @@ public class Arrays {
   }
 
   public static <T> List<T> asList(final T ... array) {
-    return new AbstractList<T>() {
-      @Override
-      public int size() {
-        return array.length;
-      }
-
-      @Override
-      public void add(int index, T element) {
-        throw new UnsupportedOperationException();
-      }
-
-      @Override
-      public int indexOf(Object element) {
-        for (int i = 0; i < array.length; ++i) {
-          if (equal(element, array[i])) {
-            return i;
-          }
-        }
-        return -1;
-      }
-
-      @Override
-      public int lastIndexOf(Object element) {
-        for (int i = array.length - 1; i >= 0; --i) {
-          if (equal(element, array[i])) {
-            return i;
-          }
-        }
-        return -1;
-      }
-
-      @Override
-      public T get(int index) {
-        return array[index];
-      }
-
-      @Override
-      public T set(int index, T value) {
-        throw new UnsupportedOperationException();
-      }
-
-      @Override
-      public T remove(int index) {
-        throw new UnsupportedOperationException();
-      }
-
-      @Override
-      public ListIterator<T> listIterator(int index) {
-        // Simple implementation without Collections.ArrayListIterator
-        return new ListIterator<T>() {
-          private int currentIndex = index;
-          
-          @Override
-          public boolean hasNext() {
-            return currentIndex < array.length;
-          }
-          
-          @Override
-          public T next() {
-            if (!hasNext()) {
-              throw new java.util.NoSuchElementException();
-            }
-            return array[currentIndex++];
-          }
-          
-          @Override
-          public void remove() {
-            throw new UnsupportedOperationException();
-          }
-          
-          @Override
-          public boolean hasPrevious() {
-            return currentIndex > 0;
-          }
-          
-          @Override
-          public T previous() {
-            if (!hasPrevious()) {
-              throw new java.util.NoSuchElementException();
-            }
-            return array[--currentIndex];
-          }
-        };
-      }
-    };
+    return new ArraysAbstractList<T>(array);
   }
 
   private static void checkRange(int len, int start, int stop) {

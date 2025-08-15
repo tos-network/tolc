@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::error::Result;
 use super::class::ClassFile;
+use crate::codegen::descriptor::type_to_descriptor;
 use super::method::MethodInfo;
 use super::flag::access_flags;
 
@@ -59,7 +60,7 @@ fn generate_annotation_member(member: &AnnotationMember, class_file: &mut ClassF
 
 
 /// Convert type reference to JVM type descriptor
-fn type_to_descriptor(type_ref: &TypeRef) -> String {
+fn _legacy_type_to_descriptor(type_ref: &TypeRef) -> String {
     // Handle array dimensions
     let mut descriptor = String::new();
     for _ in 0..type_ref.array_dims {

@@ -27,8 +27,8 @@ public final class MethodType implements java.io.Serializable {
 
   final ClassLoader loader;
   final byte[] spec;
-  private volatile List<Parameter> parameters;
-  private volatile Result result;
+  private volatile List<MethodTypeParameter> parameters;
+  private volatile MethodTypeResult result;
   private volatile int footprint;
 
   MethodType(ClassLoader loader, byte[] spec) {
@@ -75,9 +75,9 @@ public final class MethodType implements java.io.Serializable {
       String spec = spec(ptypes[i]);
       sb.append(spec);
 
-      Type type = type(spec);
+      MethodTypeType type = type(spec);
 
-      parameters.add(new Parameter(i,
+      parameters.add(new MethodTypeParameter(i,
                                    position,
                                    spec,
                                    ptypes[i],
@@ -92,7 +92,7 @@ public final class MethodType implements java.io.Serializable {
     String spec = spec(rtype);
     sb.append(spec);
 
-    result = new Result(spec, rtype, type(spec).return_);
+    result = new MethodTypeResult(spec, rtype, type(spec).return_);
 
     this.spec = sb.toString().getBytes();
   }
@@ -140,9 +140,9 @@ public final class MethodType implements java.io.Serializable {
     return array;
   }
 
-  public Iterable<Parameter> parameters() {
+  public Iterable<MethodTypeParameter> parameters() {
     if (parameters == null) {
-      List<Parameter> list = new ArrayList();
+      List<MethodTypeParameter> list = new ArrayList();
       int i;
       int index = 0;
       int position = 0;
@@ -183,9 +183,9 @@ public final class MethodType implements java.io.Serializable {
         }
 
         String paramSpec = Classes.makeString(spec, start, (i - start) + 1);
-        Type type = type(paramSpec);
+        MethodTypeType type = type(paramSpec);
 
-        list.add(new Parameter
+        list.add(new MethodTypeParameter
                  (index,
                   position,
                   paramSpec,
@@ -201,9 +201,9 @@ public final class MethodType implements java.io.Serializable {
       ++ i;
 
       String paramSpec = Classes.makeString(spec, i, spec.length - i - 1);
-      Type type = type(paramSpec);
+              MethodTypeType type = type(paramSpec);
 
-      result = new Result(paramSpec,
+      result = new MethodTypeResult(paramSpec,
                           Classes.forCanonicalName(loader, paramSpec),
                           type.return_);
 
@@ -213,128 +213,40 @@ public final class MethodType implements java.io.Serializable {
     return parameters;
   }
 
-  public Result result() {
+  public MethodTypeResult result() {
     parameters(); // ensure spec has been parsed
 
     return result;
   }
 
-  private static Type type(String spec) {
+  private static MethodTypeType type(String spec) {
     switch (spec.charAt(0)) {
     case 'L':
     case '[':
-      return Type.ObjectType;
+      return MethodTypeType.ObjectType;
 
     case 'Z':
     case 'B':
     case 'S':
     case 'C':
     case 'I':
-      return Type.IntegerType;
+      return MethodTypeType.IntegerType;
 
     case 'F':
-      return Type.FloatType;
+      return MethodTypeType.FloatType;
 
     case 'J':
-      return Type.LongType;
+      return MethodTypeType.LongType;
 
     case 'D':
-      return Type.DoubleType;
+      return MethodTypeType.DoubleType;
 
     case 'V':
-      return Type.VoidType;
+      return MethodTypeType.VoidType;
 
     default: throw new AssertionError();
     }
   }
 
-  private static enum Type {
-    ObjectType(aload, areturn, 1),
-    IntegerType(iload, ireturn, 1),
-    FloatType(fload, freturn, 1),
-    LongType(lload, lreturn, 2),
-    DoubleType(dload, dreturn, 2),
-    VoidType(-1, Assembler.return_, -1);
 
-    public final int load;
-    public final int return_;
-    public final int size;
-
-    private Type(int load, int return_, int size) {
-      this.load = load;
-      this.return_ = return_;
-      this.size = size;
-    }
-  }
-
-  public interface TypeSpec {
-    public Class type();
-
-    public String spec();
-  }
-
-  public static class Parameter implements TypeSpec {
-    private final int index;
-    private final int position;
-    private final String spec;
-    private final Class type;
-    private final int load;
-
-    private Parameter(int index,
-                      int position,
-                      String spec,
-                      Class type,
-                      int load)
-    {
-      this.index = index;
-      this.position = position;
-      this.spec = spec;
-      this.type = type;
-      this.load = load;
-    }
-
-    public int index() {
-      return index;
-    }
-
-    public int position() {
-      return position;
-    }
-
-    public String spec() {
-      return spec;
-    }
-
-    public Class type() {
-      return type;
-    }
-
-    public int load() {
-      return load;
-    }
-  }
-
-  public static class Result implements TypeSpec {
-    private final String spec;
-    private final Class type;
-    private final int return_;
-
-    public Result(String spec, Class type, int return_) {
-      this.spec = spec;
-      this.type = type;
-      this.return_ = return_;
-    }
-
-    public int return_() {
-      return return_; // :)
-    }
-
-    public String spec() {
-      return spec;
-    }
-
-    public Class type() {
-      return type;
-    }
-  }
 }

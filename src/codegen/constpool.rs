@@ -494,8 +494,8 @@ impl ConstantPool {
             if let Some(nt) = nt_old { if nt != 0 && seen_nt.insert(nt) { b_nt.push(nt); } }
         }
         // Build C list: remaining constants in first-touch order excluding A and B
-        let mut in_a: HashSet<u16> = a_top.iter().cloned().collect();
-        let mut in_b: HashSet<u16> = b_nt.iter().cloned().collect();
+        let in_a: HashSet<u16> = a_top.iter().cloned().collect();
+        let in_b: HashSet<u16> = b_nt.iter().cloned().collect();
         // Identify debug Utf8 names to move last
         let is_debug_utf8 = |s: &str| s == "Code" || s == "LineNumberTable" || s == "LocalVariableTable" || s == "SourceFile";
         let mut c_rest: Vec<u16> = Vec::new();

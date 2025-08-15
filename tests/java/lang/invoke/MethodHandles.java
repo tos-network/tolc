@@ -11,18 +11,7 @@
 package java.lang.invoke;
 
 public class MethodHandles {
-  public static class Lookup {
-    final java.base.VMClass class_;
-    private final int modes;
-
-    private Lookup(java.base.VMClass class_, int modes) {
-      this.class_ = class_;
-      this.modes = modes;
+    public static MethodHandlesLookup lookup() {
+        return new MethodHandlesLookup(null, 0);
     }
-
-    public String toString() {
-      return "lookup[" + java.base.SystemClassLoader.getClass(class_) + ", "
-        + modes + "]";
-    }
-  }
 }

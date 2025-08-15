@@ -633,6 +633,8 @@ pub(crate) fn review_body_call_arity(
 fn is_unchecked_exception(name: &str, global: &crate::review::types::GlobalMemberIndex) -> bool {
     if super::consts::UNCHECKED_BASE_EXCEPTIONS.contains(&name) { return true; }
     if crate::review::compat_mode() && super::consts::UNCHECKED_COMMON_SUBCLASSES.contains(&name) { return true; }
+    // If compat mode on and the exception is explicitly whitelisted among common subclasses, treat as unchecked
+    // Note: list is centralized in crate::consts and may include UnsupportedEncodingException per project policy.
     if let Some(mt) = crate::review::statements::resolve_type_in_index(global, name) {
         let mut cur = mt.super_name.clone();
         let mut seen = std::collections::HashSet::new();
@@ -2568,7 +2570,7 @@ fn walk_expr(
                                 return Err(ReviewError::InapplicableMethod { name: mc.name.clone(), expected, found });
                             } else if applicable.len() > 1 {
                                 // Prefer candidates with exact per-position equality to found types
-                                let mut exact_type_eq: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s)
+    let exact_type_eq: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s)
                                     .filter(|sig| sig.len()==found_list.len() && sig.iter().zip(found_list.iter()).all(|(e,f)| e==f)).collect();
                                 if exact_type_eq.len() == 1 {
                                     applicable.retain(|(s, _, _)| *s == exact_type_eq[0]);
@@ -2580,7 +2582,7 @@ fn walk_expr(
                                 let exact: Vec<(&Vec<String>, u32, u32)> = applicable.iter().cloned().filter(|(_, _, k)| *k == 0).collect();
                                 if exact.len() > 1 {
                                     // 2) Prefer fixed-arity matches (signature length equals found args length)
-                                    let mut fixed_exact: Vec<&Vec<String>> = exact.iter().map(|(s, _, _)| *s).filter(|s| s.len() == found_list.len()).collect();
+    let fixed_exact: Vec<&Vec<String>> = exact.iter().map(|(s, _, _)| *s).filter(|s| s.len() == found_list.len()).collect();
                                     if fixed_exact.len() == 1 {
                                         // resolved uniquely; keep single
                                         applicable.retain(|(s, _, _)| *s == fixed_exact[0]);
@@ -2600,7 +2602,7 @@ fn walk_expr(
                                     applicable.retain(|(_, c, _)| *c == min_cost);
                                     if applicable.len() > 1 {
                                         // 5) Prefer fixed-arity over varargs when both applicable
-                                        let mut fixed_only: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s).filter(|s| s.len() == found_list.len()).collect();
+    let fixed_only: Vec<&Vec<String>> = applicable.iter().map(|(s, _, _)| *s).filter(|s| s.len() == found_list.len()).collect();
                                         if fixed_only.len() == 1 {
                                             applicable.retain(|(s, _, _)| *s == fixed_only[0]);
                                         } else {
@@ -3102,7 +3104,7 @@ fn enforce_local_assignment_types_in_block(
     global: &crate::review::types::GlobalMemberIndex,
 ) -> ReviewResult<()> {
     use crate::ast::*;
-    use crate::review::generics::{resolve_type_ref, is_assignable, TypeEnv};
+    use crate::review::generics::{resolve_type_ref, TypeEnv};
     use crate::review::generics::ReviewedType as RT;
     // Track local variable declared types (full TypeRef)
     fn walk_block(

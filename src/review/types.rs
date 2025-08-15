@@ -226,10 +226,16 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             // de-dup arities
             for v in mt.methods_arities.values_mut() { v.sort_unstable(); v.dedup(); }
             for v in mt.ctors_arities.values_mut() { v.sort_unstable(); v.dedup(); }
-            // record immediate superclass simple name if present
-            if let Some(ext) = &c.extends { mt.super_name = Some(ext.name.clone()); } else { mt.super_name = None; }
-            // record implemented interfaces
-            mt.interfaces = c.implements.iter().map(|t| t.name.clone()).collect();
+            // record immediate superclass name if present, resolving to fully qualified name
+            if let Some(ext) = &c.extends { 
+                // Try to resolve the superclass name to a fully qualified name
+                let resolved_name = resolve_type_name_to_fq(&ext.name, &idx);
+                mt.super_name = Some(resolved_name);
+            } else { 
+                mt.super_name = None; 
+            }
+            // record implemented interfaces, resolving to fully qualified names
+            mt.interfaces = c.implements.iter().map(|t| resolve_type_name_to_fq(&t.name, &idx)).collect();
             // record package name
             mt.package_name = idx.package.clone();
             mt.is_interface = false;
@@ -637,6 +643,54 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
         }
     }
     idx
+}
+
+/// Resolve a type name to its fully qualified name using the same logic as resolve_type_in_index
+/// but returns the resolved name instead of the MemberTables
+fn resolve_type_name_to_fq(name: &str, idx: &GlobalMemberIndex) -> String {
+    // Fully-qualified name provided
+    if name.contains('.') {
+        return name.to_string();
+    }
+
+    // 1) Single-type (explicit) imports have highest precedence among imports
+    for imp in &idx.imports {
+        if let Some(last) = imp.rsplit('.').next() {
+            if last == name {
+                return imp.clone();
+            }
+        }
+    }
+
+    // 2) Types in the current package
+    if let Some(pkg) = &idx.package {
+        let fq = format!("{}.{}", pkg, name);
+        if idx.by_type.contains_key(&fq) {
+            return fq;
+        }
+    }
+
+    // 3) On-demand (wildcard) imports
+    for wi in &idx.wildcard_imports {
+        let fq = format!("{}.{}", wi, name);
+        if idx.by_type.contains_key(&fq) {
+            return fq;
+        }
+    }
+
+    // 4) Implicit java.lang.*
+    let java_lang_fq = format!("java.lang.{}", name);
+    if idx.by_type.contains_key(&java_lang_fq) {
+        return java_lang_fq;
+    }
+
+    // 4.5) Special case for well-known java.lang types that might not be in the index
+    if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&name) {
+        return java_lang_fq;
+    }
+
+    // 5) Fallback: return the original name if no resolution found
+    name.to_string()
 }
 
 pub(crate) fn resolve_type_in_index<'a>(global: &'a GlobalMemberIndex, name: &str) -> Option<&'a MemberTables> {

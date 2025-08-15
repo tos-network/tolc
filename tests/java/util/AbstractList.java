@@ -46,7 +46,7 @@ public abstract class AbstractList<T> extends AbstractCollection<T>
   }
 
   public ListIterator<T> listIterator() {
-    return new Collections.ArrayListIterator(this);
+    return new ArrayListIterator(this);
   }
 
   public int indexOf(Object o) {

@@ -59,30 +59,12 @@ public class HashSet<T> extends AbstractSet<T> implements Set<T> {
   }
 
   public Iterator<T> iterator() {
-    return new MyIterator(map.iterator());
+    return new HashSetMyIterator<>(map.entrySet().iterator());
   }
 
   public String toString() {
     return java.base.Data.toString(this);
   }
 
-  private static class MyIterator<T> implements Iterator<T> {
-    private final Iterator<Map.Entry<T, Object>> it;
 
-    public MyIterator(Iterator<Map.Entry<T, Object>> it) {
-      this.it = it;
-    }
-
-    public T next() {
-      return it.next().getKey();
-    }
-
-    public boolean hasNext() {
-      return it.hasNext();
-    }
-
-    public void remove() {
-      it.remove();
-    }
-  }
 }

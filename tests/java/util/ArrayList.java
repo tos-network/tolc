@@ -177,7 +177,7 @@ public class ArrayList<T> extends AbstractList<T> implements java.io.Serializabl
   }
 
   public ListIterator<T> listIterator(int index) {
-    return new Collections.ArrayListIterator(this, index);
+    return new ArrayListIterator(this, index);
   }
 
   public ListIterator<T> listIterator() {

@@ -58,7 +58,7 @@ public class EnumSet<T extends Enum<T>> extends AbstractSet<T> {
 
   @Override
   public Iterator<T> iterator() {
-    return new EnumSetIterator();
+    return new EnumSetIterator<>(this, elementType, bitset);
   }
   
   public static <T extends Enum<T>>EnumSet<T> allOf(Class<T> elementType) {
@@ -113,43 +113,5 @@ public class EnumSet<T extends Enum<T>> extends AbstractSet<T> {
     return (T) object;
   }
 
-  private class EnumSetIterator implements Iterator<T> {
-    private int currentIndex = 0;
-    private boolean removeAllowed = false;
-    
-    public T next() {
-      if (!hasNext()) {
-        throw new NoSuchElementException("EnumSet has no more elements");
-      }
 
-      int indexOfNextValue = nextIndex();
-      T element = elementType.getEnumConstants()[indexOfNextValue];
-      currentIndex = indexOfNextValue + 1;
-      removeAllowed = true;
-      
-      return element;
-    }
-
-    public boolean hasNext() {
-      int indexOfNextValue = nextIndex();
-      if (indexOfNextValue >= 0) {
-        return true;
-      } else {
-        return false;
-      }
-    }
-
-    public void remove() {
-      if (!removeAllowed) {
-        throw new IllegalStateException("Cannot remove from this iterator in this state");
-      }
-      
-      bitset.clear(currentIndex - 1);
-      removeAllowed = false;
-    }
-    
-    private int nextIndex() {
-      return bitset.nextSetBit(currentIndex);
-    }
-  }
 }

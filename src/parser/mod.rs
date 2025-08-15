@@ -15,6 +15,43 @@ pub use span::{Span, Location, HasSpan};
 use crate::ast::Ast;
 use crate::error::Result;
 
+// Planned split modules (incremental migration)
+// mod core;
+// mod gates;
+// mod package;
+// mod imports;
+// mod modifiers;
+// mod annotations;
+// mod members;
+// mod types;
+// mod generics;
+// mod params;
+// mod lookahead;
+// pub mod statements {
+//     pub mod r#mod; // dispatcher
+//     pub mod block;
+//     pub mod flow;
+//     pub mod try_catch;
+//     pub mod switch;
+//     pub mod sync;
+// }
+// pub mod expressions {
+//     pub mod r#mod; // parse_expression
+//     pub mod assignment;
+//     pub mod conditional;
+//     pub mod logical;
+//     pub mod bitwise;
+//     pub mod equality;
+//     pub mod relational;
+//     pub mod shift;
+//     pub mod additive;
+//     pub mod multiplicative;
+//     pub mod unary;
+//     pub mod postfix;
+//     pub mod primary;
+//     pub mod new_expr;
+// }
+
 /// Parse a .tol source file into an AST
 pub fn parse_tol(source: &str) -> Result<Ast> { parser::parse(source) }
 

@@ -79,8 +79,7 @@ public class HelloWorld {
 #[test]
 fn test_helloworld_execution() {
     // HelloWorld Java source code
-    let source = r#"
-package mono;
+    let source = r#"package mono;
 
 public class HelloWorld {
     public static void main(String[] args) {
@@ -88,40 +87,47 @@ public class HelloWorld {
     }
 }
 "#;
+
+// javac -g tests/mono/HelloWorld.java
     let javap_source = r#"
 public class mono.HelloWorld
   minor version: 0
   major version: 52
   flags: ACC_PUBLIC, ACC_SUPER
 Constant pool:
-   #1 = Methodref          #6.#15         // java/lang/Object."<init>":()V
-   #2 = Fieldref           #16.#17        // java/lang/System.out:Ljava/io/PrintStream;
-   #3 = String             #18            // Hello, World!
-   #4 = Methodref          #19.#20        // java/io/PrintStream.println:(Ljava/lang/String;)V
-   #5 = Class              #21            // mono/HelloWorld
-   #6 = Class              #22            // java/lang/Object
+   #1 = Methodref          #6.#20         // java/lang/Object."<init>":()V
+   #2 = Fieldref           #21.#22        // java/lang/System.out:Ljava/io/PrintStream;
+   #3 = String             #23            // Hello, World!
+   #4 = Methodref          #24.#25        // java/io/PrintStream.println:(Ljava/lang/String;)V
+   #5 = Class              #26            // mono/HelloWorld
+   #6 = Class              #27            // java/lang/Object
    #7 = Utf8               <init>
    #8 = Utf8               ()V
    #9 = Utf8               Code
   #10 = Utf8               LineNumberTable
-  #11 = Utf8               main
-  #12 = Utf8               ([Ljava/lang/String;)V
-  #13 = Utf8               SourceFile
-  #14 = Utf8               HelloWorld.java
-  #15 = NameAndType        #7:#8          // "<init>":()V
-  #16 = Class              #23            // java/lang/System
-  #17 = NameAndType        #24:#25        // out:Ljava/io/PrintStream;
-  #18 = Utf8               Hello, World!
-  #19 = Class              #26            // java/io/PrintStream
-  #20 = NameAndType        #27:#28        // println:(Ljava/lang/String;)V
-  #21 = Utf8               mono/HelloWorld
-  #22 = Utf8               java/lang/Object
-  #23 = Utf8               java/lang/System
-  #24 = Utf8               out
-  #25 = Utf8               Ljava/io/PrintStream;
-  #26 = Utf8               java/io/PrintStream
-  #27 = Utf8               println
-  #28 = Utf8               (Ljava/lang/String;)V
+  #11 = Utf8               LocalVariableTable
+  #12 = Utf8               this
+  #13 = Utf8               Lmono/HelloWorld;
+  #14 = Utf8               main
+  #15 = Utf8               ([Ljava/lang/String;)V
+  #16 = Utf8               args
+  #17 = Utf8               [Ljava/lang/String;
+  #18 = Utf8               SourceFile
+  #19 = Utf8               HelloWorld.java
+  #20 = NameAndType        #7:#8          // "<init>":()V
+  #21 = Class              #28            // java/lang/System
+  #22 = NameAndType        #29:#30        // out:Ljava/io/PrintStream;
+  #23 = Utf8               Hello, World!
+  #24 = Class              #31            // java/io/PrintStream
+  #25 = NameAndType        #32:#33        // println:(Ljava/lang/String;)V
+  #26 = Utf8               mono/HelloWorld
+  #27 = Utf8               java/lang/Object
+  #28 = Utf8               java/lang/System
+  #29 = Utf8               out
+  #30 = Utf8               Ljava/io/PrintStream;
+  #31 = Utf8               java/io/PrintStream
+  #32 = Utf8               println
+  #33 = Utf8               (Ljava/lang/String;)V
 {
   public mono.HelloWorld();
     descriptor: ()V
@@ -133,6 +139,9 @@ Constant pool:
          4: return
       LineNumberTable:
         line 3: 0
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0       5     0  this   Lmono/HelloWorld;
 
   public static void main(java.lang.String[]);
     descriptor: ([Ljava/lang/String;)V
@@ -146,6 +155,9 @@ Constant pool:
       LineNumberTable:
         line 5: 0
         line 6: 8
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0       9     0  args   [Ljava/lang/String;
 }
 SourceFile: "HelloWorld.java"
 "#;
@@ -212,6 +224,43 @@ SourceFile: "HelloWorld.java"
                 expected = normalize_cp_indices(&expected);
                 expected = collapse_spaces(&expected);
                 assert_eq!(actual.trim(), expected.trim(), "javap normalized output mismatch (CP/debug ignored)");
+                // Also run strict JVM verifier and execute the class to ensure runtime correctness
+                let mono_dir = test_dir.join("mono");
+                fs::create_dir_all(&mono_dir).expect("Failed to create mono/ package directory");
+                let class_in_pkg = mono_dir.join("HelloWorld.class");
+                fs::copy(&class_file_path, &class_in_pkg).expect("Failed to place class into package dir");
+
+                // Verify class format strictly
+                let verify_out = std::process::Command::new("java")
+                    .arg("-Xverify:all")
+                    .arg("-cp")
+                    .arg(&test_dir)
+                    .arg("mono.HelloWorld")
+                    .output();
+                match verify_out {
+                    Ok(vout) => {
+                        if !vout.status.success() {
+                            let err = String::from_utf8_lossy(&vout.stderr);
+                            panic!("java -Xverify:all failed: {}", err);
+                        }
+                    }
+                    Err(e) => panic!("failed to run java -Xverify:all: {}", e),
+                }
+
+                // Execute and check output
+                let run_out = std::process::Command::new("java")
+                    .arg("-cp")
+                    .arg(&test_dir)
+                    .arg("mono.HelloWorld")
+                    .output();
+                match run_out {
+                    Ok(rout) => {
+                        assert!(rout.status.success(), "java run failed: {}", String::from_utf8_lossy(&rout.stderr));
+                        let stdout = String::from_utf8_lossy(&rout.stdout);
+                        assert!(stdout.contains("Hello, World!"), "unexpected program output: {}", stdout);
+                    }
+                    Err(e) => panic!("failed to run java: {}", e),
+                }
             } else {
                 let error_str = String::from_utf8_lossy(&output.stderr);
                 println!("javap failed with error:\n{}", error_str);
@@ -293,10 +342,13 @@ fn normalize_cp_indices(s: &str) -> String {
 }
 
 fn collapse_spaces(s: &str) -> String {
+    // Normalize: collapse spaces and tabs, drop CRs, and trim trailing spaces per line
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for ch in s.chars() {
-        if ch == ' ' {
+        if ch == '\r' { continue; }
+        let is_space = ch == ' ' || ch == '\t';
+        if is_space {
             if !prev_space { out.push(' '); }
             prev_space = true;
         } else {
@@ -304,7 +356,12 @@ fn collapse_spaces(s: &str) -> String {
             prev_space = false;
         }
     }
+    // Trim trailing spaces on each line
     out
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Test enhanced HelloWorld variant with multiple methods and fields
