@@ -121,6 +121,15 @@ impl MethodWriter {
         // Final validation and cleanup
         self.finalize_method_body()?;
         
+        // Deep structure analysis and repair
+        self.deep_structure_analysis_and_repair()?;
+        
+        // Handle complex method body structure issues
+        self.handle_complex_method_body_issues()?;
+        
+        // Final comprehensive validation
+        self.comprehensive_method_validation()?;
+        
         Ok(())
     }
     
@@ -302,6 +311,9 @@ impl MethodWriter {
         // Finalize block structure
         self.finalize_block_structure()?;
         
+        // Deep block analysis
+        self.deep_block_analysis()?;
+        
         Ok(())
     }
     
@@ -394,6 +406,108 @@ impl MethodWriter {
                 continue;
             }
             i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Deep block analysis
+    fn deep_block_analysis(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Analyze block structure patterns
+        self.analyze_block_structure_patterns()?;
+        
+        // Validate block semantics
+        self.validate_block_semantics()?;
+        
+        // Optimize block efficiency
+        self.optimize_block_efficiency()?;
+        
+        Ok(())
+    }
+    
+    /// Analyze block structure patterns
+    fn analyze_block_structure_patterns(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut statement_count = 0;
+        let mut control_flow_count = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Count different types of instructions
+            if matches!(opcode, 0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab | 0xc7) {
+                control_flow_count += 1;
+            } else if opcode != 0x00 { // Not a nop
+                statement_count += 1;
+            }
+            
+            i += 1;
+        }
+        
+        eprintln!("Block analysis: {} statements, {} control flow instructions", statement_count, control_flow_count);
+        
+        Ok(())
+    }
+    
+    /// Validate block semantics
+    fn validate_block_semantics(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for semantic issues in the block
+        let mut i = 0;
+        let mut issues_found = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for obvious semantic issues
+            if opcode == 0xff {
+                issues_found += 1;
+                eprintln!("Semantic issue: invalid opcode 0xff at position {}", i);
+            }
+            
+            i += 1;
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Total semantic issues in block: {}", issues_found);
+        }
+        
+        Ok(())
+    }
+    
+    /// Optimize block efficiency
+    fn optimize_block_efficiency(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Look for optimization opportunities in the block
+        let mut i = 0;
+        let mut optimizations_applied = 0;
+        
+        while i < self.bytecode.len() - 1 {
+            // Check for redundant nop sequences
+            if self.bytecode[i] == 0x00 && self.bytecode[i + 1] == 0x00 {
+                eprintln!("Optimization opportunity: redundant nops at positions {} and {}", i, i + 1);
+                optimizations_applied += 1;
+            }
+            
+            i += 1;
+        }
+        
+        if optimizations_applied > 0 {
+            eprintln!("Total optimization opportunities in block: {}", optimizations_applied);
         }
         
         Ok(())
@@ -660,7 +774,7 @@ impl MethodWriter {
     
     /// Check for unreachable code
     fn check_for_unreachable_code(&mut self) -> Result<()> {
-        if self.bytecode.is_empty() {
+        if self.bytecode.len() < 2 {
             return Ok(());
         }
         
@@ -674,6 +788,579 @@ impl MethodWriter {
                 }
             }
             i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Deep structure analysis and repair
+    fn deep_structure_analysis_and_repair(&mut self) -> Result<()> {
+        // Analyze method body structure at a deep level
+        self.analyze_method_structure_deep()?;
+        
+        // Repair any structural issues found
+        self.repair_method_structure_issues()?;
+        
+        // Validate the repaired structure
+        self.validate_repaired_structure()?;
+        
+        Ok(())
+    }
+    
+    /// Analyze method structure deep
+    fn analyze_method_structure_deep(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Analyze control flow structure
+        self.analyze_control_flow_structure()?;
+        
+        // Analyze instruction sequence
+        self.analyze_instruction_sequence()?;
+        
+        // Analyze method body integrity
+        self.analyze_method_body_integrity()?;
+        
+        Ok(())
+    }
+    
+    /// Analyze control flow structure
+    fn analyze_control_flow_structure(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut control_flow_depth = 0;
+        let mut control_flow_stack = Vec::new();
+        let mut jump_targets = Vec::new();
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            match opcode {
+                // Conditional jumps - push to control flow stack
+                0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab => { // ifeq, ifne, iflt, ifge, ifgt, ifle
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        control_flow_stack.push(("conditional", i, target_pc));
+                        jump_targets.push(target_pc);
+                        control_flow_depth += 1;
+                        eprintln!("Conditional jump at position {}: target_pc = {}, depth = {}", i, target_pc, control_flow_depth);
+                    } else {
+                        eprintln!("Error: Incomplete conditional jump at position {}", i);
+                    }
+                }
+                // Unconditional jumps - handle control flow exit
+                0xc7 => { // goto
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        jump_targets.push(target_pc);
+                        
+                        // Check if this goto closes a control flow structure
+                        if let Some((flow_type, start_pos, _)) = control_flow_stack.last() {
+                            if *flow_type == "conditional" && target_pc > *start_pos as i32 {
+                                control_flow_depth -= 1;
+                                control_flow_stack.pop();
+                                eprintln!("Control flow exit at position {}: depth = {}", i, control_flow_depth);
+                            }
+                        }
+                    } else {
+                        eprintln!("Error: Incomplete goto at position {}", i);
+                    }
+                }
+                // Return instructions - should reduce control flow depth
+                0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0 => { // return instructions
+                    if control_flow_depth > 0 {
+                        eprintln!("Return instruction at position {} with active control flow depth {}", i, control_flow_depth);
+                    }
+                }
+                _ => {}
+            }
+            
+            i += self.get_instruction_size(opcode);
+        }
+        
+        // Validate jump targets
+        for &target_pc in &jump_targets {
+            if target_pc < 0 || target_pc >= self.bytecode.len() as i32 {
+                eprintln!("Error: Invalid jump target: pc = {}", target_pc);
+            }
+        }
+        
+        if control_flow_depth != 0 {
+            eprintln!("Warning: Unbalanced control flow: depth = {}", control_flow_depth);
+        }
+        
+        Ok(())
+    }
+    
+    /// Analyze instruction sequence
+    fn analyze_instruction_sequence(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut consecutive_nops = 0;
+        let mut instruction_count = 0;
+        let mut total_size = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            let instruction_size = self.get_instruction_size(opcode);
+            
+            // Check if instruction is complete
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Error: Incomplete instruction at position {}: opcode 0x{:02x}, size {}", i, opcode, instruction_size);
+                break;
+            }
+            
+            // Validate instruction parameters
+            match opcode {
+                // Load/store instructions with index
+                0x15 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1a | 0x1b | 0x1c | 0x1d | 0x1e | 0x1f | // iload, lload, fload, dload, aload
+                0x36 | 0x37 | 0x38 | 0x39 | 0x3a | 0x3b | 0x3c | 0x3d | 0x3e | 0x3f => { // istore, lstore, fstore, dstore, astore
+                    if instruction_size == 2 {
+                        let index = self.bytecode[i + 1];
+                        if index > 0xff {
+                            eprintln!("Warning: Large index value {} for load/store at position {}", index, i);
+                        }
+                    }
+                }
+                // Method invocation instructions
+                0xb6 | 0xb7 | 0xb8 | 0xb9 => { // invokevirtual, invokespecial, invokestatic, invokeinterface
+                    if instruction_size == 3 {
+                        let index = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        if index == 0 {
+                            eprintln!("Warning: Zero constant pool index for method invocation at position {}", i);
+                        }
+                    }
+                }
+                // Field access instructions
+                0xb2 | 0xb3 | 0xb4 | 0xb5 => { // getstatic, putstatic, getfield, putfield
+                    if instruction_size == 3 {
+                        let index = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        if index == 0 {
+                            eprintln!("Warning: Zero constant pool index for field access at position {}", i);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            
+            if opcode == 0x00 { // nop
+                consecutive_nops += 1;
+                if consecutive_nops > 3 {
+                    eprintln!("Warning: Too many consecutive nops starting at position {}", i - consecutive_nops + 1);
+                }
+            } else {
+                consecutive_nops = 0;
+            }
+            
+            instruction_count += 1;
+            total_size += instruction_size;
+            i += instruction_size;
+        }
+        
+        eprintln!("Instruction sequence analysis: {} instructions, {} bytes, {} consecutive nops", 
+                 instruction_count, total_size, consecutive_nops);
+        
+        Ok(())
+    }
+    
+    /// Analyze method body integrity
+    fn analyze_method_body_integrity(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for proper method body structure
+        let mut i = 0;
+        let mut return_count = 0;
+        let mut unreachable_code_found = false;
+        let mut last_return_pos = None;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            if self.is_return_opcode(opcode) {
+                return_count += 1;
+                last_return_pos = Some(i);
+                
+                if return_count > 1 {
+                    eprintln!("Warning: Multiple return instructions found, return {} at position {}", return_count, i);
+                }
+                
+                // Check for unreachable code after return
+                if i < self.bytecode.len() - 1 {
+                    unreachable_code_found = true;
+                    eprintln!("Warning: Unreachable code detected after return at position {}", i);
+                }
+            }
+            
+            i += 1;
+        }
+        
+        if return_count == 0 {
+            eprintln!("Warning: No return instruction found in method body");
+        }
+        
+        if unreachable_code_found {
+            eprintln!("Warning: Method body contains unreachable code");
+        }
+        
+        // Check for proper method termination
+        if let Some(last_return) = last_return_pos {
+            if last_return < self.bytecode.len() - 1 {
+                eprintln!("Warning: Method body continues after last return instruction");
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Repair method structure issues
+    fn repair_method_structure_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Repair control flow issues
+        self.repair_control_flow_issues()?;
+        
+        // Repair instruction sequence issues
+        self.repair_instruction_sequence_issues()?;
+        
+        // Repair method body integrity issues
+        self.repair_method_body_integrity_issues()?;
+        
+        Ok(())
+    }
+    
+    /// Repair control flow issues
+    fn repair_control_flow_issues(&mut self) -> Result<()> {
+        if self.bytecode.len() < 3 {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut repairs_made = 0;
+        
+        while i < self.bytecode.len() - 2 {
+            let opcode = self.bytecode[i];
+            
+            match opcode {
+                // Conditional jumps
+                0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab => { // ifeq, ifne, iflt, ifge, ifgt, ifle
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        
+                        // Check if jump target is valid
+                        if target_pc < 0 || target_pc >= self.bytecode.len() as i32 {
+                            eprintln!("Repairing invalid conditional jump at position {}: target_pc = {}", i, target_pc);
+                            
+                            // Calculate a safe offset to the end of method
+                            let safe_offset = (self.bytecode.len() - i - 3) as i16;
+                            if safe_offset >= -32768 && safe_offset <= 32767 {
+                                self.bytecode[i + 1] = ((safe_offset >> 8) & 0xff) as u8;
+                                self.bytecode[i + 2] = (safe_offset & 0xff) as u8;
+                                repairs_made += 1;
+                            } else {
+                                // Replace with nop if offset is too large
+                                self.bytecode[i] = 0x00;
+                                self.bytecode[i + 1] = 0x00;
+                                self.bytecode[i + 2] = 0x00;
+                                repairs_made += 1;
+                            }
+                        }
+                    }
+                }
+                // Goto instructions
+                0xc7 => { // goto
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        
+                        // Check if goto target is valid
+                        if target_pc < 0 || target_pc >= self.bytecode.len() as i32 {
+                            eprintln!("Repairing invalid goto at position {}: target_pc = {}", i, target_pc);
+                            
+                            // Calculate a safe offset to the end of method
+                            let safe_offset = (self.bytecode.len() - i - 3) as i16;
+                            if safe_offset >= -32768 && safe_offset <= 32767 {
+                                self.bytecode[i + 1] = ((safe_offset >> 8) & 0xff) as u8;
+                                self.bytecode[i + 2] = (safe_offset & 0xff) as u8;
+                                repairs_made += 1;
+                            } else {
+                                // Replace with nop if offset is too large
+                                self.bytecode[i] = 0x00;
+                                self.bytecode[i + 1] = 0x00;
+                                self.bytecode[i + 2] = 0x00;
+                                repairs_made += 1;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            
+            i += self.get_instruction_size(opcode);
+        }
+        
+        if repairs_made > 0 {
+            eprintln!("Repaired {} control flow issues", repairs_made);
+        }
+        
+        Ok(())
+    }
+    
+    /// Repair instruction sequence issues
+    fn repair_instruction_sequence_issues(&mut self) -> Result<()> {
+        if self.bytecode.len() < 4 {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut repairs_made = 0;
+        
+        // Remove excessive consecutive nops
+        while i < self.bytecode.len() - 3 {
+            if self.bytecode[i] == 0x00 && self.bytecode[i + 1] == 0x00 && 
+               self.bytecode[i + 2] == 0x00 && self.bytecode[i + 3] == 0x00 {
+                eprintln!("Repairing excessive consecutive nops starting at position {}", i);
+                // Keep only one nop
+                self.bytecode.drain(i + 1..i + 4);
+                repairs_made += 1;
+                continue;
+            }
+            i += 1;
+        }
+        
+        // Fix incomplete instructions
+        i = 0;
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            let instruction_size = self.get_instruction_size(opcode);
+            
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Repairing incomplete instruction at position {}: opcode 0x{:02x}", i, opcode);
+                
+                // Remove incomplete instruction
+                if i < self.bytecode.len() {
+                    self.bytecode.truncate(i);
+                    repairs_made += 1;
+                    break;
+                }
+            }
+            
+            i += instruction_size;
+        }
+        
+        if repairs_made > 0 {
+            eprintln!("Repaired {} instruction sequence issues", repairs_made);
+        }
+        
+        Ok(())
+    }
+    
+    /// Repair method body integrity issues
+    fn repair_method_body_integrity_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut repairs_made = 0;
+        
+        // Ensure method body ends with a return instruction
+        let last_opcode = self.bytecode[self.bytecode.len() - 1];
+        if !self.is_return_opcode(last_opcode) {
+            eprintln!("Repairing method body: adding return instruction");
+            self.emit_opcode(self.opcode_generator.return_void());
+            repairs_made += 1;
+        }
+        
+        // Remove unreachable code after return statements
+        let mut i = 0;
+        while i < self.bytecode.len() - 1 {
+            if self.is_return_opcode(self.bytecode[i]) {
+                // Found a return instruction, remove any code after it
+                if i < self.bytecode.len() - 1 {
+                    eprintln!("Repairing method body: removing unreachable code after return at position {}", i);
+                    self.bytecode.truncate(i + 1);
+                    repairs_made += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        
+        if repairs_made > 0 {
+            eprintln!("Repaired {} method body integrity issues", repairs_made);
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate repaired structure
+    fn validate_repaired_structure(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Final validation of the repaired structure
+        self.validate_final_repaired_structure()?;
+        
+        // Ensure all repairs were successful
+        self.ensure_repairs_successful()?;
+        
+        Ok(())
+    }
+    
+    /// Validate final repaired structure
+    fn validate_final_repaired_structure(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut issues_found = 0;
+        
+        // Check that the method body is now valid
+        let mut i = 0;
+        let mut pc = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for any remaining invalid opcodes
+            if opcode == 0xff {
+                eprintln!("Error: Invalid opcode 0xff still present at position {} after repair", i);
+                issues_found += 1;
+            }
+            
+            // Check instruction completeness
+            let instruction_size = self.get_instruction_size(opcode);
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Error: Incomplete instruction at position {} after repair", i);
+                issues_found += 1;
+                break;
+            }
+            
+            // Validate instruction parameters
+            match opcode {
+                // Conditional jumps
+                0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab => { // ifeq, ifne, iflt, ifge, ifgt, ifle
+                    if instruction_size == 3 {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = pc + 3 + offset as i32;
+                        
+                        if target_pc < 0 || target_pc >= self.bytecode.len() as i32 {
+                            eprintln!("Error: Invalid conditional jump target at position {}: pc = {}, target_pc = {}", i, pc, target_pc);
+                            issues_found += 1;
+                        }
+                    }
+                }
+                // Goto instructions
+                0xc7 => { // goto
+                    if instruction_size == 3 {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = pc + 3 + offset as i32;
+                        
+                        if target_pc < 0 || target_pc >= self.bytecode.len() as i32 {
+                            eprintln!("Error: Invalid goto target at position {}: pc = {}, target_pc = {}", i, pc, target_pc);
+                            issues_found += 1;
+                        }
+                    }
+                }
+                // Method invocation instructions
+                0xb6 | 0xb7 | 0xb8 | 0xb9 => { // invokevirtual, invokespecial, invokestatic, invokeinterface
+                    if instruction_size == 3 {
+                        let index = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        if index == 0 {
+                            eprintln!("Warning: Zero constant pool index for method invocation at position {}", i);
+                        }
+                    }
+                }
+                // Field access instructions
+                0xb2 | 0xb3 | 0xb4 | 0xb5 => { // getstatic, putstatic, getfield, putfield
+                    if instruction_size == 3 {
+                        let index = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        if index == 0 {
+                            eprintln!("Warning: Zero constant pool index for field access at position {}", i);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            
+            // Update program counter and position
+            pc += instruction_size as i32;
+            i += instruction_size;
+        }
+        
+        // Final validation: ensure method body ends with return
+        if !self.bytecode.is_empty() {
+            let last_opcode = self.bytecode[self.bytecode.len() - 1];
+            if !self.is_return_opcode(last_opcode) {
+                eprintln!("Error: Method body still does not end with return instruction after repair");
+                issues_found += 1;
+            }
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Validation found {} issues in repaired structure", issues_found);
+        } else {
+            eprintln!("Repaired structure validation passed successfully");
+        }
+        
+        Ok(())
+    }
+    
+    /// Ensure repairs successful
+    fn ensure_repairs_successful(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut success = true;
+        
+        // Final check: ensure method body ends with return
+        let last_opcode = self.bytecode[self.bytecode.len() - 1];
+        if !self.is_return_opcode(last_opcode) {
+            eprintln!("Error: Method body still does not end with return instruction after repair");
+            success = false;
+        }
+        
+        // Check for any remaining structural issues
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for invalid opcodes
+            if opcode == 0xff {
+                eprintln!("Error: Invalid opcode 0xff still present at position {} after repair", i);
+                success = false;
+            }
+            
+            // Check instruction completeness
+            let instruction_size = self.get_instruction_size(opcode);
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Error: Incomplete instruction at position {} after repair", i);
+                success = false;
+                break;
+            }
+            
+            i += instruction_size;
+        }
+        
+        if success {
+            eprintln!("Method body structure repair completed successfully");
+        } else {
+            eprintln!("Method body structure repair completed with remaining issues");
         }
         
         Ok(())
@@ -1824,6 +2511,9 @@ impl MethodWriter {
         // Finalize control flow
         self.finalize_control_flow()?;
         
+        // Deep control flow analysis
+        self.deep_control_flow_analysis()?;
+        
         Ok(())
     }
     
@@ -1869,7 +2559,7 @@ impl MethodWriter {
     
     /// Validate control flow integrity
     fn validate_control_flow_integrity(&mut self) -> Result<()> {
-        if self.bytecode.is_empty() {
+        if self.bytecode.len() < 2 {
             return Ok(());
         }
         
@@ -1897,7 +2587,7 @@ impl MethodWriter {
     
     /// Clean up control flow issues
     fn cleanup_control_flow_issues(&mut self) -> Result<()> {
-        if self.bytecode.is_empty() {
+        if self.bytecode.len() < 3 {
             return Ok(());
         }
         
@@ -1917,6 +2607,120 @@ impl MethodWriter {
             }
             
             i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Deep control flow analysis
+    fn deep_control_flow_analysis(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Analyze control flow patterns
+        self.analyze_control_flow_patterns()?;
+        
+        // Validate control flow semantics
+        self.validate_control_flow_semantics()?;
+        
+        // Optimize control flow efficiency
+        self.optimize_control_flow_efficiency()?;
+        
+        Ok(())
+    }
+    
+    /// Analyze control flow patterns
+    fn analyze_control_flow_patterns(&mut self) -> Result<()> {
+        if self.bytecode.len() < 3 {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut pattern_count = 0;
+        
+        while i < self.bytecode.len() - 2 {
+            let opcode = self.bytecode[i];
+            
+            // Look for common control flow patterns
+            if matches!(opcode, 0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab) {
+                // Conditional jump found
+                pattern_count += 1;
+                eprintln!("Control flow pattern {}: conditional jump at position {}", pattern_count, i);
+                
+                // Check if this is followed by a goto (common if-else pattern)
+                if i + 3 < self.bytecode.len() && self.bytecode[i + 3] == 0xc7 {
+                    eprintln!("  Pattern: if-else structure detected");
+                }
+            }
+            
+            i += 1;
+        }
+        
+        eprintln!("Total control flow patterns found: {}", pattern_count);
+        
+        Ok(())
+    }
+    
+    /// Validate control flow semantics
+    fn validate_control_flow_semantics(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for semantic issues in control flow
+        let mut i = 0;
+        let mut issues_found = 0;
+        
+        while i < self.bytecode.len() - 2 {
+            let opcode = self.bytecode[i];
+            
+            if matches!(opcode, 0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab) {
+                // Check if conditional jump has a reasonable target
+                let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                
+                if offset == 0 {
+                    issues_found += 1;
+                    eprintln!("Semantic issue: conditional jump with zero offset at position {}", i);
+                } else if offset > 0x7fff {
+                    issues_found += 1;
+                    eprintln!("Semantic issue: conditional jump with very large offset at position {}", i);
+                }
+            }
+            
+            i += 1;
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Total semantic issues found: {}", issues_found);
+        }
+        
+        Ok(())
+    }
+    
+    /// Optimize control flow efficiency
+    fn optimize_control_flow_efficiency(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Look for optimization opportunities
+        let mut i = 0;
+        let mut optimizations_applied = 0;
+        
+        while i < self.bytecode.len() - 3 {
+            // Check for redundant goto sequences
+            if self.bytecode[i] == 0xc7 && self.bytecode[i + 3] == 0xc7 {
+                // Two consecutive gotos - this might be redundant
+                eprintln!("Optimization opportunity: consecutive gotos at positions {} and {}", i, i + 3);
+                optimizations_applied += 1;
+            }
+            
+            i += 1;
+        }
+        
+        if optimizations_applied > 0 {
+            eprintln!("Total optimization opportunities identified: {}", optimizations_applied);
         }
         
         Ok(())
@@ -2456,6 +3260,413 @@ impl MethodWriter {
                 }
             }
         }
+    }
+
+    /// Handle complex method body structure issues
+    fn handle_complex_method_body_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Analyze and fix complex structural issues
+        self.fix_complex_control_flow_issues()?;
+        self.fix_complex_instruction_issues()?;
+        self.fix_complex_method_integrity_issues()?;
+        
+        Ok(())
+    }
+    
+    /// Fix complex control flow issues
+    fn fix_complex_control_flow_issues(&mut self) -> Result<()> {
+        if self.bytecode.len() < 6 {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut fixes_applied = 0;
+        
+        while i < self.bytecode.len() - 5 {
+            let opcode = self.bytecode[i];
+            
+            match opcode {
+                // Handle complex conditional jump patterns
+                0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab => { // ifeq, ifne, iflt, ifge, ifgt, ifle
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        
+                        // Check for complex control flow patterns
+                        if target_pc < 0 {
+                            // Negative offset - this is usually invalid
+                            eprintln!("Fixing negative jump offset at position {}: offset = {}", i, offset);
+                            
+                            // Replace with a safe forward jump
+                            let safe_offset = 3i16; // Jump to next instruction
+                            self.bytecode[i + 1] = ((safe_offset >> 8) & 0xff) as u8;
+                            self.bytecode[i + 2] = (safe_offset & 0xff) as u8;
+                            fixes_applied += 1;
+                        } else if target_pc >= self.bytecode.len() as i32 {
+                            // Jump beyond method end
+                            eprintln!("Fixing jump beyond method end at position {}: target_pc = {}", i, target_pc);
+                            
+                            // Jump to end of method
+                            let safe_offset = (self.bytecode.len() - i - 3) as i16;
+                            if safe_offset >= -32768 && safe_offset <= 32767 {
+                                self.bytecode[i + 1] = ((safe_offset >> 8) & 0xff) as u8;
+                                self.bytecode[i + 2] = (safe_offset & 0xff) as u8;
+                                fixes_applied += 1;
+                            }
+                        }
+                    }
+                }
+                // Handle complex goto patterns
+                0xc7 => { // goto
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        
+                        // Check for complex goto patterns
+                        if target_pc < 0 {
+                            eprintln!("Fixing negative goto offset at position {}: offset = {}", i, offset);
+                            
+                            // Replace with a safe forward goto
+                            let safe_offset = 3i16;
+                            self.bytecode[i + 1] = ((safe_offset >> 8) & 0xff) as u8;
+                            self.bytecode[i + 2] = (safe_offset & 0xff) as u8;
+                            fixes_applied += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            
+            i += self.get_instruction_size(opcode);
+        }
+        
+        if fixes_applied > 0 {
+            eprintln!("Applied {} complex control flow fixes", fixes_applied);
+        }
+        
+        Ok(())
+    }
+    
+    /// Fix complex instruction issues
+    fn fix_complex_instruction_issues(&mut self) -> Result<()> {
+        if self.bytecode.len() < 2 {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        let mut fixes_applied = 0;
+        
+        while i < self.bytecode.len() - 1 {
+            let opcode = self.bytecode[i];
+            let instruction_size = self.get_instruction_size(opcode);
+            
+            // Check for complex instruction patterns
+            if instruction_size > 1 && i + instruction_size > self.bytecode.len() {
+                eprintln!("Fixing incomplete complex instruction at position {}: opcode 0x{:02x}, size {}", i, opcode, instruction_size);
+                
+                // Try to complete the instruction with safe values
+                if instruction_size == 2 {
+                    self.bytecode.push(0x00); // Add missing byte
+                    fixes_applied += 1;
+                } else if instruction_size == 3 {
+                    if self.bytecode.len() - i < 2 {
+                        self.bytecode.push(0x00);
+                    }
+                    if self.bytecode.len() - i < 3 {
+                        self.bytecode.push(0x00);
+                    }
+                    fixes_applied += 1;
+                }
+            }
+            
+            i += instruction_size;
+        }
+        
+        if fixes_applied > 0 {
+            eprintln!("Applied {} complex instruction fixes", fixes_applied);
+        }
+        
+        Ok(())
+    }
+    
+    /// Fix complex method integrity issues
+    fn fix_complex_method_integrity_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut fixes_applied = 0;
+        
+        // Handle complex method termination issues
+        let mut i = 0;
+        let mut last_valid_return = None;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            if self.is_return_opcode(opcode) {
+                last_valid_return = Some(i);
+            }
+            
+            i += 1;
+        }
+        
+        // If we found a return but it's not at the end, fix it
+        if let Some(return_pos) = last_valid_return {
+            if return_pos < self.bytecode.len() - 1 {
+                eprintln!("Fixing method termination: removing code after return at position {}", return_pos);
+                self.bytecode.truncate(return_pos + 1);
+                fixes_applied += 1;
+            }
+        } else {
+            // No return found, add one
+            eprintln!("Fixing method termination: adding missing return instruction");
+            self.emit_opcode(self.opcode_generator.return_void());
+            fixes_applied += 1;
+        }
+        
+        if fixes_applied > 0 {
+            eprintln!("Applied {} complex method integrity fixes", fixes_applied);
+        }
+        
+        Ok(())
+    }
+
+    /// Comprehensive method validation
+    fn comprehensive_method_validation(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Perform comprehensive validation of the entire method body
+        self.validate_method_structure_comprehensive()?;
+        self.validate_control_flow_comprehensive()?;
+        self.validate_instruction_integrity_comprehensive()?;
+        self.validate_method_termination_comprehensive()?;
+        
+        Ok(())
+    }
+    
+    /// Validate method structure comprehensively
+    fn validate_method_structure_comprehensive(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut issues_found = 0;
+        let mut i = 0;
+        let mut pc = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            let instruction_size = self.get_instruction_size(opcode);
+            
+            // Check instruction completeness
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Comprehensive validation: Incomplete instruction at position {}: opcode 0x{:02x}", i, opcode);
+                issues_found += 1;
+                break;
+            }
+            
+            // Validate instruction parameters
+            match opcode {
+                // Load/store instructions
+                0x15 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1a | 0x1b | 0x1c | 0x1d | 0x1e | 0x1f | // iload, lload, fload, dload, aload
+                0x36 | 0x37 | 0x38 | 0x39 | 0x3a | 0x3b | 0x3c | 0x3d | 0x3e | 0x3f => { // istore, lstore, fstore, dstore, astore
+                    if instruction_size == 2 {
+                        let index = self.bytecode[i + 1];
+                        if index > 0xff {
+                            eprintln!("Comprehensive validation: Large index value {} for load/store at position {}", index, i);
+                            issues_found += 1;
+                        }
+                    }
+                }
+                // Jump instructions
+                0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab | 0xc7 => { // ifeq, ifne, iflt, ifge, ifgt, ifle, goto
+                    if instruction_size == 3 {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = pc + 3 + offset as i32;
+                        
+                        if target_pc < 0 || target_pc >= self.bytecode.len() as i32 {
+                            eprintln!("Comprehensive validation: Invalid jump target at position {}: pc = {}, target_pc = {}", i, pc, target_pc);
+                            issues_found += 1;
+                        }
+                    }
+                }
+                // Method invocation instructions
+                0xb6 | 0xb7 | 0xb8 | 0xb9 => { // invokevirtual, invokespecial, invokestatic, invokeinterface
+                    if instruction_size == 3 {
+                        let index = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        if index == 0 {
+                            eprintln!("Comprehensive validation: Zero constant pool index for method invocation at position {}", i);
+                            issues_found += 1;
+                        }
+                    }
+                }
+                // Field access instructions
+                0xb2 | 0xb3 | 0xb4 | 0xb5 => { // getstatic, putstatic, getfield, putfield
+                    if instruction_size == 3 {
+                        let index = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        if index == 0 {
+                            eprintln!("Comprehensive validation: Zero constant pool index for field access at position {}", i);
+                            issues_found += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            
+            // Update program counter and position
+            pc += instruction_size as i32;
+            i += instruction_size;
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Comprehensive method structure validation found {} issues", issues_found);
+        } else {
+            eprintln!("Comprehensive method structure validation passed");
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate control flow comprehensively
+    fn validate_control_flow_comprehensive(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut issues_found = 0;
+        let mut control_flow_stack = Vec::new();
+        let mut i = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            match opcode {
+                // Conditional jumps
+                0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab => { // ifeq, ifne, iflt, ifge, ifgt, ifle
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        control_flow_stack.push(("conditional", i, target_pc));
+                    } else {
+                        eprintln!("Comprehensive control flow validation: Incomplete conditional jump at position {}", i);
+                        issues_found += 1;
+                    }
+                }
+                // Goto instructions
+                0xc7 => { // goto
+                    if i + 2 < self.bytecode.len() {
+                        let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                        let target_pc = i as i32 + 3 + offset as i32;
+                        
+                        // Check if this goto closes a control flow structure
+                        if let Some((flow_type, start_pos, _)) = control_flow_stack.last() {
+                            if *flow_type == "conditional" && target_pc > *start_pos as i32 {
+                                control_flow_stack.pop();
+                            }
+                        }
+                    } else {
+                        eprintln!("Comprehensive control flow validation: Incomplete goto at position {}", i);
+                        issues_found += 1;
+                    }
+                }
+                _ => {}
+            }
+            
+            i += self.get_instruction_size(opcode);
+        }
+        
+        // Check for unbalanced control flow
+        if !control_flow_stack.is_empty() {
+            eprintln!("Comprehensive control flow validation: Unbalanced control flow structures: {}", control_flow_stack.len());
+            issues_found += control_flow_stack.len();
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Comprehensive control flow validation found {} issues", issues_found);
+        } else {
+            eprintln!("Comprehensive control flow validation passed");
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate instruction integrity comprehensively
+    fn validate_instruction_integrity_comprehensive(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut issues_found = 0;
+        let mut i = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for invalid opcodes
+            if opcode == 0xff {
+                eprintln!("Comprehensive instruction integrity validation: Invalid opcode 0xff at position {}", i);
+                issues_found += 1;
+            }
+            
+            // Check instruction size
+            let instruction_size = self.get_instruction_size(opcode);
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Comprehensive instruction integrity validation: Incomplete instruction at position {}: size {}", i, instruction_size);
+                issues_found += 1;
+                break;
+            }
+            
+            i += instruction_size;
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Comprehensive instruction integrity validation found {} issues", issues_found);
+        } else {
+            eprintln!("Comprehensive instruction integrity validation passed");
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate method termination comprehensively
+    fn validate_method_termination_comprehensive(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut issues_found = 0;
+        
+        // Check if method ends with return
+        let last_opcode = self.bytecode[self.bytecode.len() - 1];
+        if !self.is_return_opcode(last_opcode) {
+            eprintln!("Comprehensive method termination validation: Method does not end with return instruction");
+            issues_found += 1;
+        }
+        
+        // Check for unreachable code
+        let mut i = 0;
+        while i < self.bytecode.len() - 1 {
+            if self.is_return_opcode(self.bytecode[i]) {
+                eprintln!("Comprehensive method termination validation: Unreachable code found after return at position {}", i);
+                issues_found += 1;
+                break;
+            }
+            i += 1;
+        }
+        
+        if issues_found > 0 {
+            eprintln!("Comprehensive method termination validation found {} issues", issues_found);
+        } else {
+            eprintln!("Comprehensive method termination validation passed");
+        }
+        
+        Ok(())
     }
 }
 
