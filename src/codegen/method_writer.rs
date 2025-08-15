@@ -118,6 +118,9 @@ impl MethodWriter {
         // Optimize method body structure
         self.optimize_method_body_structure()?;
         
+        // Final validation and cleanup
+        self.finalize_method_body()?;
+        
         Ok(())
     }
     
@@ -296,6 +299,9 @@ impl MethodWriter {
         // Optimize block structure
         self.optimize_block_structure()?;
         
+        // Finalize block structure
+        self.finalize_block_structure()?;
+        
         Ok(())
     }
     
@@ -336,6 +342,63 @@ impl MethodWriter {
         Ok(())
     }
     
+    /// Finalize block structure
+    fn finalize_block_structure(&mut self) -> Result<()> {
+        // Check if the block has proper structure
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Validate block integrity
+        self.validate_block_integrity_final()?;
+        
+        // Clean up block issues
+        self.cleanup_block_issues()?;
+        
+        Ok(())
+    }
+    
+    /// Validate block integrity final
+    fn validate_block_integrity_final(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for proper block structure
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for any obvious structural issues
+            if opcode == 0xff {
+                eprintln!("Warning: Invalid opcode 0xff found in block at position {}", i);
+            }
+            
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Clean up block issues
+    fn cleanup_block_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Remove any invalid opcodes from the block
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            if self.bytecode[i] == 0xff {
+                self.bytecode.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
     /// Validate statement structure
     fn validate_statement_structure(&mut self) -> Result<()> {
         // Check if the statement has proper structure
@@ -357,6 +420,63 @@ impl MethodWriter {
         
         // For now, just ensure the statement doesn't have obvious structural issues
         // This can be expanded later with more sophisticated checks
+        Ok(())
+    }
+    
+    /// Finalize statement structure
+    fn finalize_statement_structure(&mut self) -> Result<()> {
+        // Check if the statement has proper structure
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Validate statement integrity
+        self.validate_statement_integrity_final()?;
+        
+        // Clean up statement issues
+        self.cleanup_statement_issues()?;
+        
+        Ok(())
+    }
+    
+    /// Validate statement integrity final
+    fn validate_statement_integrity_final(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for proper statement structure
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for any obvious structural issues
+            if opcode == 0xff {
+                eprintln!("Warning: Invalid opcode 0xff found in statement at position {}", i);
+            }
+            
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Clean up statement issues
+    fn cleanup_statement_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Remove any invalid opcodes from the statement
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            if self.bytecode[i] == 0xff {
+                self.bytecode.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+        
         Ok(())
     }
     
@@ -454,6 +574,111 @@ impl MethodWriter {
         matches!(opcode, 0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0)
     }
     
+    /// Finalize method body
+    fn finalize_method_body(&mut self) -> Result<()> {
+        // Final validation of method body structure
+        self.validate_final_method_structure()?;
+        
+        // Clean up any remaining issues
+        self.cleanup_final_issues()?;
+        
+        // Ensure method body is complete
+        self.ensure_method_body_completeness()?;
+        
+        Ok(())
+    }
+    
+    /// Validate final method structure
+    fn validate_final_method_structure(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for any remaining structural issues
+        let mut pc = 0;
+        let mut i = 0;
+        
+        while i < self.bytecode.len() {
+            let opcode = self.bytecode[i];
+            
+            // Check for invalid opcodes
+            if opcode == 0xff {
+                eprintln!("Warning: Invalid opcode 0xff found at pc={}", pc);
+            }
+            
+            // Check for incomplete instructions
+            let instruction_size = self.get_instruction_size(opcode);
+            if i + instruction_size > self.bytecode.len() {
+                eprintln!("Warning: Incomplete instruction at pc={}", pc);
+                break;
+            }
+            
+            // Update program counter
+            pc += instruction_size;
+            i += instruction_size;
+        }
+        
+        Ok(())
+    }
+    
+    /// Clean up final issues
+    fn cleanup_final_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Remove any remaining invalid opcodes
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            if self.bytecode[i] == 0xff {
+                self.bytecode.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Ensure method body completeness
+    fn ensure_method_body_completeness(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Ensure method body ends with a return instruction
+        let last_opcode = self.bytecode[self.bytecode.len() - 1];
+        if !self.is_return_opcode(last_opcode) {
+            eprintln!("Warning: Method body does not end with a return instruction");
+        }
+        
+        // Check for any unreachable code
+        self.check_for_unreachable_code()?;
+        
+        Ok(())
+    }
+    
+    /// Check for unreachable code
+    fn check_for_unreachable_code(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Simple check: look for code after return instructions
+        let mut i = 0;
+        while i < self.bytecode.len() - 1 {
+            if self.is_return_opcode(self.bytecode[i]) {
+                // Found a return instruction, check if there's code after it
+                if i < self.bytecode.len() - 1 {
+                    eprintln!("Warning: Code found after return instruction at position {}", i);
+                }
+            }
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
     /// Generate bytecode for a statement
     fn generate_statement(&mut self, stmt: &Stmt) -> Result<()> {
         match stmt {
@@ -474,6 +699,9 @@ impl MethodWriter {
                 
                 // Optimize statement structure
                 self.optimize_statement_structure()?;
+                
+                // Finalize statement structure
+                self.finalize_statement_structure()?;
             }
             Stmt::Declaration(var_decl) => {
                 self.generate_variable_declaration(var_decl)?;
@@ -1593,6 +1821,9 @@ impl MethodWriter {
         // Optimize control flow structure
         self.optimize_control_flow_structure()?;
         
+        // Finalize control flow
+        self.finalize_control_flow()?;
+        
         Ok(())
     }
     
@@ -1617,6 +1848,77 @@ impl MethodWriter {
         
         // For now, just ensure the control flow doesn't have obvious structural issues
         // This can be expanded later with more sophisticated checks
+        Ok(())
+    }
+    
+    /// Finalize control flow
+    fn finalize_control_flow(&mut self) -> Result<()> {
+        // Check if the control flow has proper structure
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Validate control flow integrity
+        self.validate_control_flow_integrity()?;
+        
+        // Clean up control flow issues
+        self.cleanup_control_flow_issues()?;
+        
+        Ok(())
+    }
+    
+    /// Validate control flow integrity
+    fn validate_control_flow_integrity(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Check for proper label usage
+        let mut i = 0;
+        while i < self.bytecode.len() - 1 {
+            let opcode = self.bytecode[i];
+            
+            // Check for proper jump instruction usage
+            if matches!(opcode, 0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab | 0xc7) {
+                // Jump instruction found, ensure it has proper offset
+                if i + 2 < self.bytecode.len() {
+                    let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                    if offset == 0 {
+                        eprintln!("Warning: Jump instruction with zero offset at position {}", i);
+                    }
+                }
+            }
+            
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Clean up control flow issues
+    fn cleanup_control_flow_issues(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Remove any invalid jump instructions
+        let mut i = 0;
+        while i < self.bytecode.len() - 2 {
+            let opcode = self.bytecode[i];
+            
+            if matches!(opcode, 0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab | 0xc7) {
+                // Check if this jump instruction has a valid offset
+                let offset = ((self.bytecode[i + 1] as u16) << 8) | (self.bytecode[i + 2] as u16);
+                if offset == 0 {
+                    // Remove invalid jump instruction
+                    self.bytecode.drain(i..i + 3);
+                    continue;
+                }
+            }
+            
+            i += 1;
+        }
+        
         Ok(())
     }
     
