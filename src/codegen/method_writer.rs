@@ -212,7 +212,7 @@ impl MethodWriter {
                     self.find_loop_break_label(None)
                 };
                 if let Some(label_id) = target {
-                    self.emit_opcode(self.opcode_generator.goto(0)); // TODO: Calculate actual offset
+                    self.emit_opcode(self.opcode_generator.goto(0));
                     self.emit_label_reference(label_id);
                 } else {
                     // Fallback: placeholder
@@ -227,7 +227,7 @@ impl MethodWriter {
                     self.find_loop_continue_label(None)
                 };
                 if let Some(label_id) = target {
-                    self.emit_opcode(self.opcode_generator.goto(0)); // TODO: Calculate actual offset
+                    self.emit_opcode(self.opcode_generator.goto(0));
                     self.emit_label_reference(label_id);
                 } else {
                     // Fallback: placeholder
@@ -672,8 +672,12 @@ impl MethodWriter {
         } else {
             // Assume it's a field access on 'this'
             self.emit_opcode(self.opcode_generator.aload(0));
-            // TODO: Add field reference to constant pool
-            self.emit_opcode(self.opcode_generator.getfield(1)); // Constant pool index
+            // Add field reference to constant pool
+            let class_name = self.current_class_name.as_ref().unwrap_or(&"java/lang/Object".to_string()).clone();
+            // Try to resolve field type from context, fallback to Object
+            let field_descriptor = self.resolve_field_descriptor(&class_name, ident);
+            let field_ref_index = self.add_field_ref(&class_name, ident, &field_descriptor);
+            self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
         }
         
         Ok(())
@@ -742,7 +746,8 @@ impl MethodWriter {
             descriptor.push_str(&self.type_to_descriptor(arg));
         }
         
-        descriptor.push_str(")V"); // Assume void return for now
+        // Try to infer return type from context, fallback to Object
+        descriptor.push_str(")Ljava/lang/Object;"); // Assume Object return for now
         descriptor
     }
 
@@ -757,8 +762,62 @@ impl MethodWriter {
                 Literal::Char(_) => "C".to_string(),
                 Literal::Null => "Ljava/lang/Object;".to_string(),
             },
-            Expr::Identifier(_) => "I".to_string(), // Assume int for now
-            _ => "I".to_string(), // Default to int
+            Expr::Identifier(ident) => {
+                // Try to resolve from local variables first
+                if let Some(local_var) = self.find_local_variable(&ident.name) {
+                    match &local_var.var_type {
+                        LocalType::Int => "I".to_string(),
+                        LocalType::Long => "J".to_string(),
+                        LocalType::Float => "F".to_string(),
+                        LocalType::Double => "D".to_string(),
+                        LocalType::Reference(_) => "Ljava/lang/Object;".to_string(),
+                        LocalType::Array(_) => "[Ljava/lang/Object;".to_string(),
+                    }
+                } else {
+                    // Assume it's a field access, use field descriptor
+                    let class_name = self.current_class_name.as_ref().unwrap_or(&"java/lang/Object".to_string()).clone();
+                    self.resolve_field_descriptor(&class_name, &ident.name)
+                }
+            }
+            Expr::Binary(bin) => {
+                // For binary expressions, infer type from operands
+                match bin.operator {
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                        // Arithmetic operations typically return int or the wider type
+                        "I".to_string()
+                    }
+                    BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                        // Comparison operations return boolean
+                        "Z".to_string()
+                    }
+                    BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
+                        // Logical operations return boolean
+                        "Z".to_string()
+                    }
+                    _ => "I".to_string(), // Default to int
+                }
+            }
+            Expr::Unary(unary) => {
+                match unary.operator {
+                    UnaryOp::Not => "Z".to_string(), // Logical not returns boolean
+                    UnaryOp::Minus | UnaryOp::Plus => "I".to_string(), // Unary plus/minus returns int
+                    _ => "I".to_string(), // Default to int
+                }
+            }
+            Expr::MethodCall(mc) => {
+                // Method calls return Object by default, unless we know the method signature
+                "Ljava/lang/Object;".to_string()
+            }
+            Expr::FieldAccess(_) => "Ljava/lang/Object;".to_string(), // Field access returns Object
+            Expr::New(new_expr) => {
+                // New expressions return the constructed type
+                if new_expr.target_type.array_dims > 0 {
+                    "[Ljava/lang/Object;".to_string()
+                } else {
+                    format!("L{};", new_expr.target_type.name.replace('.', "/"))
+                }
+            }
+            _ => "Ljava/lang/Object;".to_string(), // Default to Object for safety
         }
     }
 
@@ -775,10 +834,9 @@ impl MethodWriter {
         // Generate field access
         // TODO: Get proper field type and class name from context
         let field_class = self.current_class_name.clone().unwrap_or_else(|| "java/lang/Object".to_string());
-        let field_descriptor = "I"; // TODO: Resolve actual field type
-        let field_ref_index = self.add_field_ref(&field_class, &field_access.name, field_descriptor);
-        self.emit_opcode(self.opcode_generator.getfield(0));
-        self.emit_short(field_ref_index as i16);
+        let field_descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
+        let field_ref_index = self.add_field_ref(&field_class, &field_access.name, &field_descriptor);
+        self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
         
         Ok(())
     }
@@ -1077,7 +1135,7 @@ impl MethodWriter {
         self.generate_expression(&ternary.then_expr)?;
         
         // Jump to end
-        self.emit_instruction(opcodes::GOTO);
+        self.emit_opcode(self.opcode_generator.goto(0));
         self.emit_label_reference(end_label);
         
         // Mark else label
@@ -1109,7 +1167,7 @@ impl MethodWriter {
         self.generate_statement(&if_stmt.then_branch)?;
         
         // Jump to end
-        self.emit_instruction(opcodes::GOTO);
+        self.emit_opcode(self.opcode_generator.goto(0));
         self.emit_label_reference(end_label);
         
         // Mark else label
@@ -1148,7 +1206,7 @@ impl MethodWriter {
         self.generate_statement(&while_stmt.body)?;
         
         // Jump back to start
-        self.emit_instruction(opcodes::GOTO);
+        self.emit_opcode(self.opcode_generator.goto(0));
         self.emit_label_reference(start_label);
         
         // Mark end label
@@ -1186,7 +1244,7 @@ impl MethodWriter {
             self.emit_opcode(self.opcode_generator.pop());
         }
         // Loop back
-        self.emit_instruction(opcodes::GOTO);
+        self.emit_opcode(self.opcode_generator.goto(0));
         self.emit_label_reference(start_label);
         // End
         self.mark_label(end_label);
@@ -1551,7 +1609,10 @@ impl MethodWriter {
     pub fn get_bytecode(self) -> Vec<u8> { self.bytecode }
 
     /// Finalize and return code, max stack, max locals, and resolved exception table
-    pub(crate) fn finalize(self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>, Vec<LocalSlot>, Vec<(u16,u16)>) {
+    pub(crate) fn finalize(mut self) -> (Vec<u8>, u16, u16, Vec<ExceptionTableEntry>, Vec<LocalSlot>, Vec<(u16,u16)>) {
+        // Resolve all label references
+        self.resolve_label_references();
+        
         let mut exceptions: Vec<ExceptionTableEntry> = Vec::new();
         for pe in &self.pending_exception_entries {
             let start_pc = self.labels.iter().find(|l| l.id == pe.start_label).map(|l| l.position).unwrap_or(0);
@@ -1570,6 +1631,41 @@ impl MethodWriter {
     /// Get the maximum number of local variables
     pub fn get_max_locals(&self) -> u16 {
         self.stack_state.max_locals()
+    }
+    
+    /// Resolve field descriptor for a field in a class
+    fn resolve_field_descriptor(&self, class_name: &str, field_name: &str) -> String {
+        // TODO: Implement proper field type resolution from class context
+        // For now, use common field types based on naming conventions
+        match field_name {
+            "value" | "count" | "size" | "length" | "index" | "id" => "I".to_string(),
+            "name" | "message" | "text" | "description" => "Ljava/lang/String;".to_string(),
+            "enabled" | "active" | "visible" | "valid" => "Z".to_string(),
+            "data" | "content" | "buffer" | "array" => "[B".to_string(),
+            _ => "Ljava/lang/Object;".to_string(), // Default fallback
+        }
+    }
+    
+    /// Resolve all label references by calculating proper offsets
+    fn resolve_label_references(&mut self) {
+        for label in &self.labels {
+            for reference in &label.references {
+                // Calculate offset: target_pc - (instruction_pc + 3)
+                // +3 accounts for: 1 byte opcode + 2 bytes offset
+                let target_pc = label.position;
+                let instruction_pc = reference.position;
+                let offset = target_pc as i16 - (instruction_pc as i16 + 3);
+                
+                // Update the offset bytes in the bytecode
+                let offset_bytes = offset.to_be_bytes();
+                if instruction_pc + 1 < self.bytecode.len() as u16 {
+                    self.bytecode[(instruction_pc + 1) as usize] = offset_bytes[0];
+                }
+                if instruction_pc + 2 < self.bytecode.len() as u16 {
+                    self.bytecode[(instruction_pc + 2) as usize] = offset_bytes[1];
+                }
+            }
+        }
     }
 }
 

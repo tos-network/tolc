@@ -82,6 +82,9 @@ impl ClassWriter {
         self.class_file.this_class = this_class_index;
         self.current_class_name = Some(enum_name.to_string());
         
+        // Set up shared constant pool for method generation
+        self.cp_shared = Some(std::rc::Rc::new(std::cell::RefCell::new(self.class_file.constant_pool.clone())));
+        
         // Set access flags - enums are always final
         let mut access_flags = access_flags::ACC_FINAL | access_flags::ACC_SUPER;
         if enum_decl.modifiers.contains(&Modifier::Public) {
@@ -866,10 +869,22 @@ impl ClassWriter {
     
     /// Generate bytecode for a field
     fn generate_field(&mut self, field: &FieldDecl) -> Result<()> {
-        let name_index = self.class_file.constant_pool.try_add_utf8(&field.name)
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
-        let descriptor_index = self.class_file.constant_pool.try_add_utf8(&type_to_descriptor(&field.type_ref))
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        // Use cp_shared if available, otherwise fall back to class_file.constant_pool
+        let name_index = if let Some(cp) = &self.cp_shared {
+            cp.borrow_mut().try_add_utf8(&field.name)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
+        } else {
+            self.class_file.constant_pool.try_add_utf8(&field.name)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
+        };
+        
+        let descriptor_index = if let Some(cp) = &self.cp_shared {
+            cp.borrow_mut().try_add_utf8(&type_to_descriptor(&field.type_ref))
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
+        } else {
+            self.class_file.constant_pool.try_add_utf8(&type_to_descriptor(&field.type_ref))
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?
+        };
         
         let access_flags = modifiers_to_flags(&field.modifiers);
         
@@ -1431,9 +1446,11 @@ impl ClassWriter {
         // Create code attribute
         let mut attribute_bytes = Vec::new();
         
-        // Max stack and max locals
-        attribute_bytes.extend_from_slice(&1u16.to_be_bytes()); // max_stack = 1
-        attribute_bytes.extend_from_slice(&1u16.to_be_bytes()); // max_locals = 1
+        // Calculate max stack and max locals based on actual code
+        let max_stack = self.calculate_max_stack(&code_bytes);
+        let max_locals = self.calculate_max_locals(constructor);
+        attribute_bytes.extend_from_slice(&max_stack.to_be_bytes());
+        attribute_bytes.extend_from_slice(&max_locals.to_be_bytes());
         
         // Code length and code
         attribute_bytes.extend_from_slice(&(code_bytes.len() as u32).to_be_bytes());
@@ -1486,6 +1503,50 @@ impl ClassWriter {
     /// Get the generated class file
     pub fn get_class_file(self) -> ClassFile {
         self.class_file
+    }
+    
+    /// Calculate max stack size for bytecode
+    fn calculate_max_stack(&self, code_bytes: &[u8]) -> u16 {
+        let mut stack_depth = 0i32;
+        let mut max_stack = 0i32;
+        let mut i = 0usize;
+        
+        while i < code_bytes.len() {
+            let opcode = code_bytes[i];
+            match opcode {
+                opcodes::ALOAD_0 | opcodes::ALOAD_1 | opcodes::ALOAD_2 | opcodes::ALOAD_3 => {
+                    stack_depth += 1;
+                }
+                opcodes::INVOKESPECIAL => {
+                    stack_depth -= 1; // Pop receiver
+                    // Method call doesn't push result for <init>
+                }
+                opcodes::RETURN => {
+                    // No stack effect
+                }
+                _ => {
+                    // Default: assume no stack effect
+                }
+            }
+            
+            if stack_depth > max_stack {
+                max_stack = stack_depth;
+            }
+            
+            i += 1;
+        }
+        
+        max_stack.max(0) as u16
+    }
+    
+    /// Calculate max locals for constructor
+    fn calculate_max_locals(&self, constructor: &ConstructorDecl) -> u16 {
+        let mut max_locals = 1; // 'this' reference
+        
+        // Add parameters
+        max_locals += constructor.parameters.len() as u16;
+        
+        max_locals
     }
 
     // Minimal compile-time constant evaluator for ConstantValue eligibility
