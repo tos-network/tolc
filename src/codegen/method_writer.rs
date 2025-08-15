@@ -115,6 +115,9 @@ impl MethodWriter {
         // Validate method body structure
         self.validate_method_body_structure()?;
         
+        // Optimize method body structure
+        self.optimize_method_body_structure()?;
+        
         Ok(())
     }
     
@@ -290,6 +293,9 @@ impl MethodWriter {
         // Validate block structure
         self.validate_block_structure()?;
         
+        // Optimize block structure
+        self.optimize_block_structure()?;
+        
         Ok(())
     }
     
@@ -318,6 +324,18 @@ impl MethodWriter {
         Ok(())
     }
     
+    /// Optimize block structure
+    fn optimize_block_structure(&mut self) -> Result<()> {
+        // Check if the block has proper structure
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // For now, just ensure the block doesn't have obvious structural issues
+        // This can be expanded later with more sophisticated checks
+        Ok(())
+    }
+    
     /// Validate statement structure
     fn validate_statement_structure(&mut self) -> Result<()> {
         // Check if the statement has proper structure
@@ -328,6 +346,112 @@ impl MethodWriter {
         // For now, just ensure the statement doesn't have obvious structural issues
         // This can be expanded later with more sophisticated checks
         Ok(())
+    }
+    
+    /// Optimize statement structure
+    fn optimize_statement_structure(&mut self) -> Result<()> {
+        // Check if the statement has proper structure
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // For now, just ensure the statement doesn't have obvious structural issues
+        // This can be expanded later with more sophisticated checks
+        Ok(())
+    }
+    
+    /// Optimize method body structure
+    fn optimize_method_body_structure(&mut self) -> Result<()> {
+        // Remove unnecessary nop instructions
+        self.remove_unnecessary_nops()?;
+        
+        // Clean up control flow
+        self.cleanup_control_flow()?;
+        
+        // Validate final structure
+        self.validate_final_structure()?;
+        
+        Ok(())
+    }
+    
+    /// Remove unnecessary nop instructions
+    fn remove_unnecessary_nops(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        let mut i = 0;
+        while i < self.bytecode.len() {
+            if self.bytecode[i] == 0x00 { // nop
+                // Check if this nop is unnecessary
+                if i > 0 && i < self.bytecode.len() - 1 {
+                    let prev_opcode = self.bytecode[i - 1];
+                    let next_opcode = self.bytecode[i + 1];
+                    
+                    // Remove nop if it's between two valid instructions
+                    if !self.is_control_flow_opcode(prev_opcode) && !self.is_control_flow_opcode(next_opcode) {
+                        self.bytecode.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if opcode is a control flow instruction
+    fn is_control_flow_opcode(&self, opcode: u8) -> bool {
+        matches!(opcode, 
+            0xa7 | 0xa8 | 0xa9 | 0xaa | 0xab | // ifeq, ifne, iflt, ifge, ifgt, ifle
+            0xc7 | 0xc8 | // goto, goto_w
+            0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0 // return instructions
+        )
+    }
+    
+    /// Clean up control flow
+    fn cleanup_control_flow(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Remove redundant control flow instructions
+        let mut i = 0;
+        while i < self.bytecode.len() - 1 {
+            let current = self.bytecode[i];
+            let next = self.bytecode[i + 1];
+            
+            // Remove redundant goto followed by another goto
+            if current == 0xc7 && next == 0xc7 {
+                self.bytecode.remove(i);
+                continue;
+            }
+            
+            i += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate final structure
+    fn validate_final_structure(&mut self) -> Result<()> {
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // Ensure method body ends with a return instruction
+        let last_opcode = self.bytecode[self.bytecode.len() - 1];
+        if !self.is_return_opcode(last_opcode) {
+            eprintln!("Warning: Method body does not end with a return instruction");
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if opcode is a return instruction
+    fn is_return_opcode(&self, opcode: u8) -> bool {
+        matches!(opcode, 0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0)
     }
     
     /// Generate bytecode for a statement
@@ -347,6 +471,9 @@ impl MethodWriter {
                 
                 // Validate statement structure
                 self.validate_statement_structure()?;
+                
+                // Optimize statement structure
+                self.optimize_statement_structure()?;
             }
             Stmt::Declaration(var_decl) => {
                 self.generate_variable_declaration(var_decl)?;
@@ -1463,11 +1590,26 @@ impl MethodWriter {
         // Validate control flow structure
         self.validate_control_flow_structure()?;
         
+        // Optimize control flow structure
+        self.optimize_control_flow_structure()?;
+        
         Ok(())
     }
     
     /// Validate control flow structure
     fn validate_control_flow_structure(&mut self) -> Result<()> {
+        // Check if the control flow has proper structure
+        if self.bytecode.is_empty() {
+            return Ok(());
+        }
+        
+        // For now, just ensure the control flow doesn't have obvious structural issues
+        // This can be expanded later with more sophisticated checks
+        Ok(())
+    }
+    
+    /// Optimize control flow structure
+    fn optimize_control_flow_structure(&mut self) -> Result<()> {
         // Check if the control flow has proper structure
         if self.bytecode.is_empty() {
             return Ok(());
