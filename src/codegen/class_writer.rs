@@ -25,6 +25,7 @@ pub struct ClassWriter {
     class_file: ClassFile,
     config: Config,
     current_class_name: Option<String>,
+    current_class_decl: Option<ClassDecl>,
     package_name: Option<String>,
     cp_shared: Option<std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>>,
     pending_default_ctor_method_idx: Option<usize>,
@@ -39,6 +40,7 @@ impl ClassWriter {
             class_file: ClassFile::new(),
             config: Config::default(),
             current_class_name: None,
+            current_class_decl: None,
             package_name: None,
             cp_shared: None,
             pending_default_ctor_method_idx: None,
@@ -51,6 +53,7 @@ impl ClassWriter {
             class_file: ClassFile::new(),
             config,
             current_class_name: None,
+            current_class_decl: None,
             package_name: None,
             cp_shared: None,
             pending_default_ctor_method_idx: None,
@@ -237,6 +240,7 @@ impl ClassWriter {
             if pkg.is_empty() { class.name.clone() } else { format!("{}/{}", pkg.replace('.', "/"), class.name) }
         } else { class.name.clone() };
         self.current_class_name = Some(internal_name.clone());
+        self.current_class_decl = Some(class.clone());
         let deferred_this_class_name = internal_name.clone();
         let deferred_super_class_name: String = class
             .extends
@@ -313,8 +317,7 @@ impl ClassWriter {
             out: &mut Vec<PendingCode>,
         ) -> Result<()> {
             let constant_pool_rc = cw.cp_shared.as_ref().unwrap().clone();
-            let current_class = cw.current_class_name.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_name not set".into() })?;
-            let mut code_writer = BodyWriter::new_with_constant_pool_and_class(constant_pool_rc, current_class);
+            let mut code_writer = BodyWriter::new_with_constant_pool_and_class_decl(constant_pool_rc, cw.current_class_decl.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_decl not set".into() })?);
             code_writer.generate_method_body(method)?;
             let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
             let access_flags = modifiers_to_flags(&method.modifiers);
@@ -1398,8 +1401,7 @@ impl ClassWriter {
     fn generate_code_attribute(&mut self, method: &MethodDecl) -> Result<AttributeInfo> {
         // Generate bytecode for method body, using shared pool if available
         let constant_pool_rc = if let Some(rc) = &self.cp_shared { rc.clone() } else { std::rc::Rc::new(std::cell::RefCell::new(self.class_file.constant_pool.clone())) };
-        let current_class = self.current_class_name.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_name not set".into() })?;
-        let mut code_writer = BodyWriter::new_with_constant_pool_and_class(constant_pool_rc.clone(), current_class);
+        let mut code_writer = BodyWriter::new_with_constant_pool_and_class_decl(constant_pool_rc.clone(), self.current_class_decl.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_decl not set".into() })?);
         code_writer.generate_method_body(method)?;
         let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
         // Merge back constant pool if not using shared

@@ -9,6 +9,189 @@ use crate::ast::*;
 use crate::codegen::attribute::ExceptionTableEntry;
 use crate::error::{Result, Error};
 
+// Include the generated runtime metadata
+mod boot {
+    include!("../rt.rs");
+}
+
+// Local overlay for project-specific classes not in rt.jar
+#[derive(Copy, Clone)]
+struct LocalField { 
+    name: &'static str, 
+    desc: &'static str 
+}
+
+fn local_overlay_fields(owner: &str) -> Option<&'static [LocalField]> {
+    match owner {
+        _ => None,
+    }
+}
+
+// Method resolution using rt.rs
+
+/// Minimal arity counter (quick filter). Switch to slot-count if needed.
+fn count_params(desc: &str) -> usize {
+    let bytes = desc.as_bytes();
+    let mut i = 0usize;
+    assert!(bytes[i] == b'('); i += 1;
+    let mut n = 0usize;
+    while bytes[i] != b')' {
+        match bytes[i] {
+            b'B'|b'C'|b'F'|b'I'|b'S'|b'Z'|b'J'|b'D' => { n += 1; i += 1; }
+            b'[' => {
+                i += 1; while bytes[i] == b'[' { i += 1; }
+                if bytes[i] == b'L' { while bytes[i] != b';' { i += 1; } i += 1; } else { i += 1; }
+                n += 1;
+            }
+            b'L' => { while bytes[i] != b';' { i += 1; } i += 1; n += 1; }
+            _ => break,
+        }
+    }
+    n
+}
+
+/// Resolve method by walking owner → super chain using rt.rs and current class context
+fn resolve_method_with_context(
+    owner_internal: &str,
+    name: &str,
+    expected_arity: usize,
+    current_class: Option<&crate::ast::ClassDecl>, // Current class being compiled
+) -> Option<ResolvedMethod> {
+    // First check if this is the current class being compiled
+    if let Some(class) = current_class {
+        let current_class_internal = class.name.replace(".", "/");
+        if owner_internal == current_class_internal {
+            // Look for the method in the current class
+            for member in &class.body {
+                if let crate::ast::ClassMember::Method(method) = member {
+                if method.name == name {
+                    // Quick arity check - count parameters
+                    let param_count = method.parameters.len();
+                    if param_count == expected_arity {
+                        // Generate descriptor from parameters and return type
+                        let descriptor = generate_method_descriptor_from_decl(method);
+                        let flags = method_flags_from_decl(method);
+                        
+                        return Some(ResolvedMethod {
+                            owner_internal: current_class_internal,
+                            name: method.name.clone(),
+                            descriptor,
+                            is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                            is_interface: false, // Classes are not interfaces
+                            is_ctor: method.name == "<init>",
+                            is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                            is_super_call: false,
+                            flags,
+                        });
+                    }
+                }
+                }
+            }
+        }
+    }
+    
+    // If not found in current class, fall back to rt.rs
+    use boot::{CLASSES, CLASSES_BY_NAME};
+    
+    let mut cur = Some(owner_internal);
+    while let Some(o) = cur {
+        if let Some(&idx) = CLASSES_BY_NAME.get(o) {
+            let c = &CLASSES[idx];
+            if let Some(m) = c.methods.iter().find(|m| m.name == name && count_params(m.desc) == expected_arity) {
+                return Some(ResolvedMethod {
+                    owner_internal: c.internal.to_string(),
+                    name: m.name.to_string(),
+                    descriptor: m.desc.to_string(),
+                    is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                    is_interface: c.is_interface,
+                    is_ctor: m.name == "<init>",
+                    is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                    is_super_call: false,
+                    flags: m.flags,
+                });
+            }
+            cur = c.super_internal;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// Generate method descriptor from method declaration
+fn generate_method_descriptor_from_decl(method: &crate::ast::MethodDecl) -> String {
+    let mut desc = "(".to_string();
+    
+    // Add parameter types
+    for param in &method.parameters {
+        desc.push_str(&type_ref_to_descriptor(&param.type_ref));
+    }
+    
+    desc.push(')');
+    
+    // Add return type
+    if let Some(return_type) = &method.return_type {
+        desc.push_str(&type_ref_to_descriptor(return_type));
+    } else {
+        desc.push('V'); // void
+    }
+    
+    desc
+}
+
+/// Convert TypeRef to JVM descriptor
+fn type_ref_to_descriptor(type_ref: &crate::ast::TypeRef) -> String {
+    match type_ref.name.as_str() {
+        "void" => "V".to_string(),
+        "boolean" => "Z".to_string(),
+        "byte" => "B".to_string(),
+        "char" => "C".to_string(),
+        "short" => "S".to_string(),
+        "int" => "I".to_string(),
+        "long" => "J".to_string(),
+        "float" => "F".to_string(),
+        "double" => "D".to_string(),
+        _ => {
+            // Reference type
+            let mut desc = "L".to_string();
+            desc.push_str(&type_ref.name.replace(".", "/"));
+            desc.push(';');
+            desc
+        }
+    }
+}
+
+/// Convert method modifiers to JVM flags
+fn method_flags_from_decl(method: &crate::ast::MethodDecl) -> u16 {
+    let mut flags = 0u16;
+    
+    for modifier in &method.modifiers {
+        match modifier {
+            crate::ast::Modifier::Public => flags |= 0x0001,    // ACC_PUBLIC
+            crate::ast::Modifier::Private => flags |= 0x0002,   // ACC_PRIVATE
+            crate::ast::Modifier::Protected => flags |= 0x0004, // ACC_PROTECTED
+            crate::ast::Modifier::Static => flags |= 0x0008,    // ACC_STATIC
+            crate::ast::Modifier::Final => flags |= 0x0010,     // ACC_FINAL
+            crate::ast::Modifier::Synchronized => flags |= 0x0020, // ACC_SYNCHRONIZED
+            crate::ast::Modifier::Native => flags |= 0x0100,    // ACC_NATIVE
+            crate::ast::Modifier::Abstract => flags |= 0x0400,  // ACC_ABSTRACT
+            crate::ast::Modifier::Strictfp => flags |= 0x0800,  // ACC_STRICT
+            _ => {} // Other modifiers don't map to method flags
+        }
+    }
+    
+    flags
+}
+
+/// Backward compatibility wrapper
+fn resolve_method(
+    owner_internal: &str,
+    name: &str,
+    expected_arity: usize,
+) -> Option<ResolvedMethod> {
+    resolve_method_with_context(owner_internal, name, expected_arity, None)
+}
+
 /// Argument layout information for method generation
 #[derive(Debug, Clone)]
 struct ArgLayout {
@@ -103,6 +286,8 @@ struct ResolvedMethod {
     is_private: bool,
     /// Whether this is a super call
     is_super_call: bool,
+    /// Method flags (ACC_STATIC, ACC_INTERFACE, etc.)
+    flags: u16,
 }
 
 impl ResolvedMethod {
@@ -117,6 +302,7 @@ impl ResolvedMethod {
             is_ctor: name == "<init>",
             is_private: flags & 0x0002 != 0, // ACC_PRIVATE
             is_super_call: false, // This needs to be set by caller
+            flags,
         }
     }
 }
@@ -139,6 +325,8 @@ pub struct MethodWriter {
     constant_pool: Option<std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>>,
     /// Current class name
     current_class_name: Option<String>,
+    /// Current class declaration for local method resolution
+    current_class: Option<crate::ast::ClassDecl>,
     /// Next label ID for generating unique string labels
     next_label_id: u16,
 }
@@ -163,6 +351,7 @@ impl MethodWriter {
             line_numbers: Vec::new(),
             constant_pool: None,
             current_class_name: None,
+            current_class: None,
         }
     }
     
@@ -178,6 +367,7 @@ impl MethodWriter {
             line_numbers: Vec::new(),
             constant_pool: Some(constant_pool.clone()),
             current_class_name: None,
+            current_class: None,
         }
     }
     
@@ -193,6 +383,27 @@ impl MethodWriter {
             line_numbers: Vec::new(),
             constant_pool: Some(constant_pool.clone()),
             current_class_name: Some(class_name),
+            current_class: None,
+        }
+    }
+    
+    /// Create a new method writer with access to constant pool and current class declaration
+    pub fn new_with_constant_pool_and_class_decl(
+        constant_pool: std::rc::Rc<std::cell::RefCell<super::constpool::ConstantPool>>, 
+        class_decl: crate::ast::ClassDecl
+    ) -> Self {
+        let class_name = class_decl.name.clone();
+        Self {
+            bytecode_builder: BytecodeBuilder::new(),
+            opcode_generator: OpcodeGenerator::new(),
+            next_label_id: 0,
+            loop_stack: Vec::new(),
+            scope_stack: Vec::new(),
+            pending_exception_entries: Vec::new(),
+            line_numbers: Vec::new(),
+            constant_pool: Some(constant_pool.clone()),
+            current_class_name: Some(class_name),
+            current_class: Some(class_decl),
         }
     }
     
@@ -1843,13 +2054,13 @@ impl MethodWriter {
                 let after = self.create_label();
                 {
                     let l = self.label_str(try_start);
-                    self.mark_label(try_start);
+                self.mark_label(try_start);
                     self.bytecode_builder.mark_label(&l);
                 }
                 self.generate_block(&try_stmt.try_block)?;
                 {
                     let l = self.label_str(try_end);
-                    self.mark_label(try_end);
+                self.mark_label(try_end);
                     self.bytecode_builder.mark_label(&l);
                 }
                 // Normal close
@@ -1864,7 +2075,7 @@ impl MethodWriter {
                 // Handler
                 {
                     let l = self.label_str(handler);
-                    self.mark_label(handler);
+                self.mark_label(handler);
                     self.bytecode_builder.mark_label(&l);
                 }
                 // JVM automatically pushes the exception object onto the stack when entering exception handler
@@ -1889,7 +2100,7 @@ impl MethodWriter {
                     let inner_after = self.create_label();
                     {
                         let l = self.label_str(inner_start);
-                        self.mark_label(inner_start);
+                    self.mark_label(inner_start);
                         self.bytecode_builder.mark_label(&l);
                     }
                     // Resource is not null - load it again for the method call
@@ -1900,7 +2111,7 @@ impl MethodWriter {
                     self.bytecode_builder.push_short(1); self.bytecode_builder.push_byte(1); self.bytecode_builder.push_byte(0);
                     {
                         let l = self.label_str(inner_end);
-                        self.mark_label(inner_end);
+                    self.mark_label(inner_end);
                         self.bytecode_builder.mark_label(&l);
                     }
                     {
@@ -1909,7 +2120,7 @@ impl MethodWriter {
                     }
                     {
                         let l = self.label_str(inner_handler);
-                        self.mark_label(inner_handler);
+                    self.mark_label(inner_handler);
                         self.bytecode_builder.mark_label(&l);
                     }
                     // JVM automatically pushes the exception object onto the stack when entering exception handler
@@ -1928,7 +2139,7 @@ impl MethodWriter {
                     
                     {
                         let l = self.label_str(inner_after);
-                        self.mark_label(inner_after);
+                    self.mark_label(inner_after);
                         self.bytecode_builder.mark_label(&l);
                     }
                     self.add_exception_handler_labels(inner_start, inner_end, inner_handler, 0);
@@ -1943,7 +2154,7 @@ impl MethodWriter {
                 // after
                 {
                     let l = self.label_str(after);
-                    self.mark_label(after);
+                self.mark_label(after);
                     self.bytecode_builder.mark_label(&l);
                 }
                 if let Some(finally_block) = &try_stmt.finally_block { self.generate_block(finally_block)?; }
@@ -1996,7 +2207,7 @@ impl MethodWriter {
                 // end:
                 {
                     let l = self.label_str(end_label);
-                    self.mark_label(end_label);
+                self.mark_label(end_label);
                     self.bytecode_builder.mark_label(&l);
                 }
             }
@@ -2371,16 +2582,16 @@ impl MethodWriter {
             if let Some(constant_value) = self.get_assembler_constant(ident) {
                 // Generate the constant value directly
                 self.generate_literal(&constant_value)?;
-            } else {
-                // Assume it's a field access on 'this'
+        } else {
+            // Assume it's a field access on 'this'
                 Self::map_stack(self.bytecode_builder.aload(0))?;
-                // Add field reference to constant pool
-                let class_name = self.current_class_name.as_ref()
-                    .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
-                    .clone();
-                // Try to resolve field type from context, fallback to Object
-                let field_descriptor = self.resolve_field_descriptor(&class_name, ident);
-                let field_ref_index = self.add_field_ref(&class_name, ident, &field_descriptor);
+            // Add field reference to constant pool
+            let class_name = self.current_class_name.as_ref()
+                .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
+                .clone();
+            // Try to resolve field type from context, fallback to Object
+            let field_descriptor = self.resolve_field_descriptor(&class_name, ident);
+            let field_ref_index = self.add_field_ref(&class_name, ident, &field_descriptor);
                 Self::map_stack(self.bytecode_builder.getfield(field_ref_index))?;
             }
         }
@@ -2428,9 +2639,9 @@ impl MethodWriter {
         }
     }
 
-    /// Generate bytecode for a method call
+    /// Generate bytecode for a method call using rt.rs method resolution
     fn generate_method_call(&mut self, call: &MethodCallExpr) -> Result<()> {
-        // Handle System.out.println specially
+        // Handle System.out.println specially (keep this for now as it's a common pattern)
         if call.name == "println" {
             let is_system_out = match &call.target {
                 Some(t) => match &**t {
@@ -2440,84 +2651,36 @@ impl MethodWriter {
                 None => false,
             };
             if is_system_out {
-                // Align CP ordering with javac: Fieldref(System.out), then String literal, then Methodref(println)
-                let field_ref = if let Some(cp) = &self.constant_pool { let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_field_ref("java/lang/System", "out", "Ljava/io/PrintStream;").unwrap() }; idx } else { 1 };
+                // Use rt.rs to resolve System.out field and PrintStream.println method
+                let field_ref = if let Some(cp) = &self.constant_pool { 
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_field_ref("java/lang/System", "out", "Ljava/io/PrintStream;").unwrap() }; 
+                    idx 
+                } else { 1 };
                 Self::map_stack(self.bytecode_builder.getstatic(field_ref))?;
                 for arg in &call.arguments { self.generate_expression(arg)?; }
-                let mref = if let Some(cp) = &self.constant_pool { let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_method_ref("java/io/PrintStream", "println", "(Ljava/lang/String;)V").unwrap() }; idx } else { 1 };
-                // Update stack for invokevirtual: receiver + 1 arg, no return
-                Self::map_stack(self.bytecode_builder.adjust_invoke_stack(false, 1, 0))?;
-                Self::map_stack(self.bytecode_builder.invokevirtual(mref))?;
+                
+                // Try to resolve println method using rt.rs
+                if let Some(resolved) = resolve_method_with_context("java/io/PrintStream", "println", call.arguments.len(), self.current_class.as_ref()) {
+                    self.emit_invoke(&resolved)?;
+                } else {
+                    // Fallback to hardcoded version
+                    let mref = if let Some(cp) = &self.constant_pool { 
+                        let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_method_ref("java/io/PrintStream", "println", "(Ljava/lang/String;)V").unwrap() }; 
+                        idx 
+                    } else { 1 };
+                    Self::map_stack(self.bytecode_builder.adjust_invoke_stack(false, 1, 0))?;
+                    Self::map_stack(self.bytecode_builder.invokevirtual(mref))?;
+                }
                 return Ok(());
             }
         }
 
-        // General receiver + args. For known static calls (Stream.write*, ConstantPool.addUtf8), do not push a receiver.
-        let is_known_static = call.name == "write2" || call.name == "write4" || call.name == "addUtf8";
-        if !is_known_static {
-            if let Some(receiver) = &call.target { self.generate_expression(receiver)?; } else { Self::map_stack(self.bytecode_builder.aload(0))?; }
-        }
-        for arg in &call.arguments { self.generate_expression(arg)?; }
-
-        // Determine the class for the method call
-        let class_name = if call.target.is_some() {
-            // If there's a target, we need to determine the class from the target
-            // For now, use a more intelligent approach based on method name and context
-            if call.name == "findVMClass" || call.name == "findLoadedVMClass" {
-                // These are likely methods on the current class
-                self.current_class_name.as_ref()
-                    .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
-                    .clone()
-            } else if call.name == "getParent" {
-                // getParent is likely on ClassLoader
-                "java/lang/ClassLoader".to_string()
-            } else if call.name == "loadClass" {
-                // loadClass is likely on ClassLoader
-                "java/lang/ClassLoader".to_string()
-            } else if call.name == "getResource" || call.name == "getResources" {
-                // Resource methods are likely on ClassLoader
-                "java/lang/ClassLoader".to_string()
-            } else if call.name == "write2" || call.name == "write4" {
-                // Stream methods are static methods on java.base.Stream
-                "java/base/Stream".to_string()
-            } else if call.name == "addUtf8" {
-                // ConstantPool methods are static methods on java.base.ConstantPool
-                "java/base/ConstantPool".to_string()
-            } else if call.name == "size" || call.name == "iterator" || call.name == "hasNext" || call.name == "next" {
-                // List methods are interface methods - try to resolve the actual type
-                if let Some(target) = &call.target {
-                    self.resolve_expression_type(target)
-                } else {
-                    "java/util/List".to_string()
-                }
-            } else if call.name == "add" {
-                // Collection add methods - try to resolve the actual type
-                if let Some(target) = &call.target {
-                    self.resolve_expression_type(target)
-                } else {
-                    "java/util/Collection".to_string()
-                }
-            } else {
-                // Try to resolve from classpath or use current class
-                if let Some(cp) = &self.constant_pool {
-                    // Try to resolve the actual type from the receiver expression
-                    if let Some(target) = &call.target {
-                        self.resolve_expression_type(target)
-                    } else {
-                        self.current_class_name.as_ref()
-                            .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
-                            .clone()
-                    }
-                } else {
-                    if let Some(target) = &call.target {
-                        self.resolve_expression_type(target)
-                    } else {
-                        self.current_class_name.as_ref()
-                            .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
-                            .clone()
-                    }
-                }
-            }
+        // Determine the owner class for method resolution
+        let owner_class = if let Some(target) = &call.target {
+            // Resolve the type of the target expression
+            let target_type = self.resolve_expression_type(target);
+            // Convert to internal name format (e.g., java.util.List -> java/util/List)
+            target_type.replace(".", "/")
         } else {
             // No target means calling on 'this' - use current class name
             self.current_class_name.as_ref()
@@ -2525,110 +2688,32 @@ impl MethodWriter {
                 .clone()
         };
         
-        // Generate method descriptor with appropriate return type
-        let descriptor = if call.name == "compareTo" {
-            // Comparable.compareTo returns int
-            self.generate_method_descriptor_with_return(&call.arguments, "I")
-        } else if call.name == "findClass" || call.name == "loadClass" {
-            // Class loading methods return Class
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/lang/Class;")
-        } else if call.name == "getResource" || call.name == "findResource" {
-            // Resource methods return String (URL path)
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/lang/String;")
-        } else if call.name == "getResources" || call.name == "findResources" {
-            // Resources methods return Enumeration
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/util/Enumeration;")
-        } else if call.name == "findVMClass" || call.name == "findLoadedVMClass" {
-            // VM class methods return VMClass
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/base/VMClass;")
-        } else if call.name == "getParent" {
-            // getParent returns ClassLoader
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/lang/ClassLoader;")
-        } else if call.name == "hasMoreElements" {
-            // Enumeration methods return boolean
-            self.generate_method_descriptor_with_return(&call.arguments, "Z")
-        } else if call.name == "nextElement" {
-            // Enumeration methods return String (more specific than Object)
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/lang/String;")
-        } else if call.name == "add" {
-            // Collection add methods return boolean
-            self.generate_method_descriptor_with_return(&call.arguments, "Z")
-        } else if call.name == "write2" || call.name == "write4" {
-            // Stream.write2/4 return void
-            self.generate_method_descriptor_with_return(&call.arguments, "V")
-        } else if call.name == "addUtf8" {
-            // ConstantPool.addUtf8 returns int per reference
-            self.generate_method_descriptor_with_return(&call.arguments, "I")
-        } else if call.name == "size" {
-            self.generate_method_descriptor_with_return(&call.arguments, "I")
-        } else if call.name == "iterator" {
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/util/Iterator;")
-        } else if call.name == "hasNext" {
-            self.generate_method_descriptor_with_return(&call.arguments, "Z")
-        } else if call.name == "next" {
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/lang/Object;")
-        } else if call.name == "enumeration" {
-            // Collections.enumeration returns Enumeration
-            self.generate_method_descriptor_with_return(&call.arguments, "Ljava/util/Enumeration;")
+        // Try to resolve the method using rt.rs
+        let expected_arity = call.arguments.len();
+        if let Some(resolved) = resolve_method_with_context(&owner_class, &call.name, expected_arity, self.current_class.as_ref()) {
+            // Generate receiver and arguments based on method flags
+            if !resolved.is_static {
+                if let Some(receiver) = &call.target { 
+                    self.generate_expression(receiver)?; 
         } else {
-            // Default: assume Object return
-            self.generate_method_descriptor(&call.arguments)
-        };
-        
-        // Force known owners/descriptors for correctness
-        if call.name == "write2" || call.name == "write4" {
-            let forced = ResolvedMethod::new("java/base/Stream", &call.name, "(Ljava/io/OutputStream;I)V", 0x0008);
-            self.emit_invoke(&forced)?;
-            return Ok(());
-        }
-        if call.name == "addUtf8" {
-            let forced = ResolvedMethod::new("java/base/ConstantPool", &call.name, "(Ljava/util/List;Ljava/lang/String;)I", 0x0008);
-            self.emit_invoke(&forced)?;
-            return Ok(());
-        }
-        if call.name == "write" && class_name == "java/io/OutputStream" {
-            let forced = ResolvedMethod::new("java/io/OutputStream", &call.name, "([B)V", 0x0000);
-            self.emit_invoke(&forced)?;
-            return Ok(());
-        }
-
-        // Use the new emit_invoke function for proper opcode selection
-        let resolved_method = if call.name == "write2" || call.name == "write4" {
-            // Stream methods are static
-            ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0008) // ACC_STATIC
-        } else if call.name == "addUtf8" {
-            // ConstantPool methods are static
-            ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0008) // ACC_STATIC
-        } else if call.name == "size" || call.name == "iterator" || call.name == "hasNext" || call.name == "next" {
-            // List methods are interface methods
-            ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0200) // ACC_INTERFACE
-        } else if call.name == "compareTo" {
-            // Comparable methods are interface methods
-            ResolvedMethod::new("java/lang/Comparable", &call.name, &descriptor, 0x0200) // ACC_INTERFACE
-        } else if call.name == "getClass" {
-            // getClass is static
-            ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0008) // ACC_STATIC
-        } else if call.name == "findVMClass" || call.name == "findLoadedVMClass" {
-            // Special methods (likely invokespecial)
-            ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0000) // No special flags
-        } else {
-            // Default: determine if likely interface based on owner type
-            let is_interface_owner = {
-                let owner = &class_name;
-                owner.ends_with("/Iterator") || owner.ends_with("/Collection") || owner.ends_with("/List") ||
-                owner.ends_with("/Set") || owner.ends_with("/Map") || owner.ends_with("/Enumeration") ||
-                owner.ends_with("/Comparable") || owner.ends_with("/PoolEntry")
-            };
-            if is_interface_owner {
-                ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0200) // ACC_INTERFACE
-            } else {
-                ResolvedMethod::new(&class_name, &call.name, &descriptor, 0x0000) // No special flags
+                    Self::map_stack(self.bytecode_builder.aload(0))?; 
+                }
             }
-        };
-        
-        self.emit_invoke(&resolved_method)?;
-        
-        Ok(())
+            for arg in &call.arguments { 
+                self.generate_expression(arg)?; 
+            }
+            
+            // Use the resolved method information
+            self.emit_invoke(&resolved)?;
+            return Ok(());
+        }
+                // Fallback: Method not found in rt.rs, report error
+        eprintln!("ERROR: Method {}#{} with arity {} not found in rt.rs or local overlay", 
+                  owner_class, call.name, expected_arity);
+        Err(Error::codegen_error(&format!(
+            "Method resolution failed: {}#{}(arity={})", 
+            owner_class, call.name, expected_arity
+        )))
     }
 
     /// Generate method descriptor from arguments
@@ -3586,7 +3671,7 @@ impl MethodWriter {
         // Mark start label
         {
             let l = self.label_str(start_label);
-            self.mark_label(start_label);
+        self.mark_label(start_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3611,7 +3696,7 @@ impl MethodWriter {
         // Mark end label
         {
             let l = self.label_str(end_label);
-            self.mark_label(end_label);
+        self.mark_label(end_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3653,7 +3738,7 @@ impl MethodWriter {
         // Mark start label
         {
             let l = self.label_str(start_label);
-            self.mark_label(start_label);
+        self.mark_label(start_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3683,7 +3768,7 @@ impl MethodWriter {
         // Mark end label
         {
             let l = self.label_str(end_label);
-            self.mark_label(end_label);
+        self.mark_label(end_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3927,7 +4012,7 @@ impl MethodWriter {
             idx
         } else { 1 }
     }
-
+    
     /// Generate bytecode for a variable declaration
     fn generate_variable_declaration(&mut self, var_decl: &VarDeclStmt) -> Result<()> {
         for variable in &var_decl.variables {
@@ -4174,34 +4259,67 @@ impl MethodWriter {
         self.bytecode_builder.max_locals()
     }
     
-    /// Resolve field descriptor for a field in a class
-    fn resolve_field_descriptor(&self, class_name: &str, field_name: &str) -> String {
-        // Handle specific known classes and their fields
-        match class_name {
-            "java/base/FieldData" => {
-                match field_name {
-                    "flags" | "nameIndex" | "specIndex" => "I".to_string(),
-                    _ => "Ljava/lang/String;".to_string(),
-                }
-            }
-            "java/base/MethodData" => {
-                match field_name {
-                    "flags" | "nameIndex" | "specIndex" => "I".to_string(),
-                    "code" => "[B".to_string(),
-                    _ => "Ljava/lang/String;".to_string(),
-                }
-            }
-            _ => {
-                // General field type resolution based on naming conventions
-                match field_name {
-                    "value" | "count" | "size" | "length" | "index" | "id" | "flags" | "nameIndex" | "specIndex" => "I".to_string(),
-                    "name" | "message" | "text" | "description" => "Ljava/lang/String;".to_string(),
-                    "enabled" | "active" | "visible" | "valid" => "Z".to_string(),
-                    "data" | "content" | "buffer" | "array" | "code" => "[B".to_string(),
-                    _ => "Ljava/lang/String;".to_string(), // More specific than Object for safety
+    /// Resolve field descriptor from generated rt.rs index, with local class fallback.
+    /// `class_internal` must be an internal name like "java/io/OutputStream" or "java/base/FieldData".
+    fn resolve_field_descriptor(&self, class_internal: &str, field_name: &str) -> String {
+        // 1) Arrays don't have fields; `length` is a special property (returns int).
+        if class_internal.starts_with('[') && field_name == "length" {
+            return "I".to_string();
+        }
+
+        // 2) Check current class being compiled for local fields
+        if let Some(class) = &self.current_class {
+            let current_class_internal = class.name.replace(".", "/");
+            if class_internal == current_class_internal {
+                // Look for the field in the current class
+                for member in &class.body {
+                    if let crate::ast::ClassMember::Field(field) = member {
+                        if field.name == field_name {
+                            // Generate descriptor from field type
+                            return type_ref_to_descriptor(&field.type_ref);
+                        }
+                    }
                 }
             }
         }
+
+        use boot::{CLASSES, CLASSES_BY_NAME};
+
+        // helper: search a single owner in rt.rs
+        let mut search_owner = |owner: &str, name: &str| -> Option<&'static str> {
+            if let Some(&idx) = CLASSES_BY_NAME.get(owner) {
+                let c = &CLASSES[idx];
+                if let Some(fm) = c.fields.iter().find(|fm| fm.name == name) {
+                    return Some(fm.desc);
+                }
+            }
+            None
+        };
+
+        // 3a) Walk class → super chain
+        let mut cur = Some(class_internal);
+        while let Some(owner) = cur {
+            if let Some(desc) = search_owner(owner, field_name) {
+                return desc.to_string();
+            }
+            // ascend to super, if any
+            cur = boot::CLASSES_BY_NAME
+                .get(owner)
+                .and_then(|&idx| boot::CLASSES[idx].super_internal);
+        }
+
+        // 3b) (Optional) scan direct interfaces for static finals (rare but harmless)
+        if let Some(&idx0) = CLASSES_BY_NAME.get(class_internal) {
+            for itf in CLASSES[idx0].interfaces {
+                if let Some(desc) = search_owner(itf, field_name) {
+                    return desc.to_string();
+                }
+            }
+        }
+
+        // 4) Error case - field not found in rt.rs or local overlay
+        eprintln!("ERROR: Unresolved field {}#{} - not found in rt.rs or local overlay", class_internal, field_name);
+        panic!("Field resolution failed: {}#{}", class_internal, field_name);
     }
     
     /// Resolve all label references by calculating proper offsets
