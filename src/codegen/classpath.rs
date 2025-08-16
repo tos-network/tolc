@@ -1,24 +1,21 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+// Import rt.rs data
+mod rt {
+    include!("../rt.rs");
+}
+
 /// Global classpath mapping from simple class names to full internal names
 static CLASSPATH_MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// Initialize the classpath mapping from the embedded classpath data
+/// Initialize the classpath mapping from rt.rs data
 fn init_classpath_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     
-    // Parse the classpath.txt content
-    let classpath_content = include_str!("../classpath.txt");
-    
-    for line in classpath_content.lines() {
-        let line = line.trim();
-        if line.is_empty() || !line.ends_with(".class") {
-            continue;
-        }
-        
-        // Remove .class extension
-        let internal_name = &line[..line.len() - 6];
+    // Iterate through all classes in rt.rs
+    for class in rt::CLASSES.iter() {
+        let internal_name = class.internal;
         
         // Extract simple class name (after last '/' or '$')
         let simple_name = if let Some(pos) = internal_name.rfind('/') {
