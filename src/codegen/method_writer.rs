@@ -772,14 +772,10 @@ impl MethodWriter {
         }
         
         // Only generate return statement if method body doesn't end with one
-        // Check if the last statement is a return statement
+        // Check if all code paths have return statements
         println!("🔍 DEBUG: generate_method_body: About to check if return statement needed...");
         let needs_return = if let Some(body) = &method.body {
-            if let Some(last_stmt) = body.statements.last() {
-                !matches!(last_stmt, Stmt::Return(_))
-            } else {
-                true
-            }
+            !self.all_paths_have_return(&body.statements)
         } else {
             true
         };
@@ -1413,6 +1409,42 @@ impl MethodWriter {
     /// Check if opcode is a return instruction
     fn is_return_opcode(&self, opcode: u8) -> bool {
         matches!(opcode, 0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0)
+    }
+
+    /// Check if all code paths in a list of statements have return statements
+    fn all_paths_have_return(&self, statements: &[Stmt]) -> bool {
+        if statements.is_empty() {
+            return false;
+        }
+
+        // Check if the last statement guarantees a return on all paths
+        if let Some(last_stmt) = statements.last() {
+            self.statement_has_return_on_all_paths(last_stmt)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a statement guarantees a return on all code paths
+    fn statement_has_return_on_all_paths(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return(_) => true,
+            Stmt::If(if_stmt) => {
+                // For if-else statements, both branches must have returns
+                if let Some(else_branch) = &if_stmt.else_branch {
+                    self.statement_has_return_on_all_paths(&if_stmt.then_branch) &&
+                    self.statement_has_return_on_all_paths(else_branch)
+                } else {
+                    // If there's no else branch, not all paths have returns
+                    false
+                }
+            }
+            Stmt::Block(block) => {
+                self.all_paths_have_return(&block.statements)
+            }
+            // Other statements don't guarantee returns on all paths
+            _ => false,
+        }
     }
     
     /// Finalize method body
@@ -2102,7 +2134,7 @@ impl MethodWriter {
                 // Avoid popping after method calls; known void-returning calls (e.g., Stream.write2/4) shouldn't be popped.
                 let should_pop = match &expr_stmt.expr {
                     Expr::MethodCall(_) => false,
-                    Expr::Assignment(_) => false, // Assignment doesn't leave value on stack
+                    Expr::Assignment(_) => true, // Assignment now leaves value on stack for chained assignments
                     Expr::Identifier(_) | Expr::Literal(_) | Expr::Binary(_) | Expr::Unary(_) | Expr::ArrayAccess(_) | Expr::FieldAccess(_) | Expr::Cast(_) | Expr::Conditional(_) | Expr::New(_) | Expr::Parenthesized(_) | Expr::InstanceOf(_) | Expr::ArrayInitializer(_) => true,
                 };
                 if should_pop { 
@@ -2614,15 +2646,26 @@ impl MethodWriter {
                 if let Expr::Identifier(ident) = &*unary.operand {
                     let local_var = self.find_local_variable(&ident.name).cloned();
                     if let Some(local_var) = local_var {
-                        // Load current value
+                        // Local variable decrement
                         self.load_local_variable(local_var.index, &local_var.var_type)?;
-                        // Decrement
                         Self::map_stack(self.bytecode_builder.iconst_1())?;
                         Self::map_stack(self.bytecode_builder.isub())?;
-                        // Store back
                         self.store_local_variable(local_var.index, &local_var.var_type)?;
-                        // Load again for result
                         self.load_local_variable(local_var.index, &local_var.var_type)?;
+                    } else {
+                        // Instance field decrement: getfield -> iconst_1 -> isub -> dup -> putfield
+                        Self::map_stack(self.bytecode_builder.aload(0))?; // Load 'this'
+                        let class_name = self.current_class_name.as_ref()
+                            .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class"))?;
+                        let field_descriptor = self.resolve_field_descriptor(&class_name.replace(".", "/"), &ident.name);
+                        let field_ref_index = self.add_field_ref(&class_name.replace(".", "/"), &ident.name, &field_descriptor);
+                        Self::map_stack(self.bytecode_builder.getfield(field_ref_index))?;
+                        Self::map_stack(self.bytecode_builder.iconst_1())?;
+                        Self::map_stack(self.bytecode_builder.isub())?;
+                        Self::map_stack(self.bytecode_builder.dup())?; // Keep result for expression value
+                        Self::map_stack(self.bytecode_builder.aload(0))?; // Load 'this' again
+                        Self::map_stack(self.bytecode_builder.swap())?; // Swap to get [this, value]
+                        Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
                     }
                 }
             }
@@ -2631,15 +2674,27 @@ impl MethodWriter {
                 if let Expr::Identifier(ident) = &*unary.operand {
                     let local_var = self.find_local_variable(&ident.name).cloned();
                     if let Some(local_var) = local_var {
-                        // Load current value
+                        // Local variable post-decrement
                         self.load_local_variable(local_var.index, &local_var.var_type)?;
-                        // DUP to keep copy for result
                         Self::map_stack(self.bytecode_builder.dup())?;
-                        // Decrement
                         Self::map_stack(self.bytecode_builder.iconst_1())?;
                         Self::map_stack(self.bytecode_builder.isub())?;
-                        // Store back
                         self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Original value is still on stack
+                    } else {
+                        // Instance field post-decrement: getfield -> dup -> iconst_1 -> isub -> putfield
+                        Self::map_stack(self.bytecode_builder.aload(0))?; // Load 'this'
+                        let class_name = self.current_class_name.as_ref()
+                            .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class"))?;
+                        let field_descriptor = self.resolve_field_descriptor(&class_name.replace(".", "/"), &ident.name);
+                        let field_ref_index = self.add_field_ref(&class_name.replace(".", "/"), &ident.name, &field_descriptor);
+                        Self::map_stack(self.bytecode_builder.getfield(field_ref_index))?;
+                        Self::map_stack(self.bytecode_builder.dup())?; // Keep original value for result
+                        Self::map_stack(self.bytecode_builder.iconst_1())?;
+                        Self::map_stack(self.bytecode_builder.isub())?;
+                        Self::map_stack(self.bytecode_builder.aload(0))?; // Load 'this' again
+                        Self::map_stack(self.bytecode_builder.swap())?; // Swap to get [this, value]
+                        Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
                         // Original value is still on stack
                     }
                 }
@@ -3029,7 +3084,27 @@ impl MethodWriter {
                 }
             }
             Expr::MethodCall(method_call) => {
-                // For method calls, try to infer the return type
+                // Try to resolve the method and get its return type from the descriptor
+                let owner_class = if let Some(target) = &method_call.target {
+                    let target_type = self.resolve_expression_type(target);
+                    self.resolve_class_name(&target_type)
+                } else {
+                    self.current_class_name.as_ref()
+                        .unwrap_or(&"java/lang/Object".to_string())
+                        .clone()
+                };
+                
+                let expected_arity = method_call.arguments.len();
+                if let Some(resolved) = resolve_method_with_context(&owner_class, &method_call.name, expected_arity, self.current_class.as_ref(), self.all_types.as_deref()) {
+                    // Extract return type from method descriptor
+                    let descriptor = &resolved.descriptor;
+                    if let Some(closing_paren) = descriptor.find(')') {
+                        let return_part = &descriptor[closing_paren + 1..];
+                        return self.descriptor_to_class_name(return_part);
+                    }
+                }
+                
+                // Fallback to hardcoded rules for common methods
                 match method_call.name.as_str() {
                     "getClass" => "java/lang/Class".to_string(),
                     "iterator" => "java/util/Iterator".to_string(),
@@ -3372,6 +3447,8 @@ impl MethodWriter {
     }
     
     /// Generate bytecode for an assignment expression
+    /// Note: Assignment expressions in Java have a value (the assigned value)
+    /// which should be left on the stack for use in chained assignments like a = b = c
     fn generate_assignment(&mut self, assign: &AssignmentExpr) -> Result<()> {
         // Handle compound assignments
         if assign.operator != AssignmentOp::Assign {
@@ -3399,17 +3476,31 @@ impl MethodWriter {
         match &*assign.target {
             Expr::Identifier(ident) => {
                 // x = value → evaluate RHS then store to local (or this.field fallback)
+                // For chained assignments, we need to leave the value on the stack
                 self.generate_expression(&assign.value)?;
                 if let Some(local_var) = self.find_local_variable(&ident.name) {
+                    // Extract local variable info to avoid borrow checker issues
+                    let index = local_var.index;
                     let var_type = local_var.var_type.clone();
-                    self.store_local_variable(local_var.index, &var_type)?;
+                    // Duplicate the value on stack so we can store it and also return it
+                    Self::map_stack(self.bytecode_builder.dup())?;
+                    self.store_local_variable(index, &var_type)?;
+                    // Value remains on stack for chained assignments
                 } else {
                     // Assume it's a field on 'this'
                     Self::map_stack(self.bytecode_builder.aload(0))?;
-                    // objectref is under value; swap to [objectref, value]
+                    // Stack: value, this → this, value
                     Self::map_stack(self.bytecode_builder.swap())?;
-                    // Placeholder CP index; descriptor/class are resolved later in full impl
-                    Self::map_stack(self.bytecode_builder.putfield(1))?;
+                    // Duplicate the value: this, value → this, value, value
+                    Self::map_stack(self.bytecode_builder.dup_x1())?;
+                    // Stack: value, this, value → putfield consumes this and value, leaving value
+                    let class_name = self.current_class_name.as_ref()
+                        .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
+                        .clone();
+                    let field_descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
+                    let field_ref_index = self.add_field_ref(&class_name, &ident.name, &field_descriptor);
+                    Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
+                    // Value remains on stack for chained assignments
                 }
             }
             Expr::FieldAccess(field_access) => {
@@ -3423,9 +3514,28 @@ impl MethodWriter {
                 }
                 // Then evaluate RHS value
                 self.generate_expression(&assign.value)?;
-                // Stack: objectref, value → putfield
-                // Use placeholder CP index
-                Self::map_stack(self.bytecode_builder.putfield(1))?;
+                // For chained assignments, duplicate the value before putfield
+                // Stack: objectref, value → objectref, value, value
+                Self::map_stack(self.bytecode_builder.dup_x1())?;
+                // Stack: value, objectref, value → putfield consumes objectref and value, leaving value
+                // Determine the field class based on receiver type
+                let field_class = if let Some(receiver) = &field_access.target {
+                    let receiver_type = self.resolve_expression_type(receiver);
+                    // Convert type to internal class name format
+                    if receiver_type.ends_with("[]") {
+                        receiver_type.replace("[]", "").replace(".", "/")
+                    } else if receiver_type.contains(".") {
+                        receiver_type.replace(".", "/")
+                    } else {
+                        receiver_type
+                    }
+                } else {
+                    self.current_class_name.clone().unwrap_or_else(|| "java/lang/String".to_string())
+                };
+                let field_descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
+                let field_ref_index = self.add_field_ref(&field_class, &field_access.name, &field_descriptor);
+                Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
+                // Value remains on stack for chained assignments
             }
             Expr::ArrayAccess(array_access) => {
                 // arr[idx] = value
@@ -4574,6 +4684,75 @@ impl MethodWriter {
         self.bytecode_builder.max_locals()
     }
     
+    /// Convert JVM descriptor to class name
+    fn descriptor_to_class_name(&self, descriptor: &str) -> String {
+        match descriptor {
+            "V" => "void".to_string(),
+            "I" => "int".to_string(),
+            "J" => "long".to_string(),
+            "F" => "float".to_string(),
+            "D" => "double".to_string(),
+            "Z" => "boolean".to_string(),
+            "B" => "byte".to_string(),
+            "C" => "char".to_string(),
+            "S" => "short".to_string(),
+            _ if descriptor.starts_with('L') && descriptor.ends_with(';') => {
+                // Object type: LClassName; -> ClassName
+                descriptor[1..descriptor.len()-1].replace('/', ".")
+            }
+            _ if descriptor.starts_with('[') => {
+                // Array type: [ElementType -> ElementType[]
+                let element_descriptor = &descriptor[1..];
+                format!("{}[]", self.descriptor_to_class_name(element_descriptor))
+            }
+            _ => descriptor.to_string(), // Fallback
+        }
+    }
+
+    /// Try to parse a class file from the file system to resolve field types
+    fn try_parse_class_from_filesystem(&self, class_internal: &str) -> Option<crate::ast::ClassDecl> {
+        // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Looking for class {}", class_internal);
+        // Convert internal name to file path
+        let class_name = class_internal.replace('/', ".");
+        
+        // Try different possible paths
+        let possible_paths = vec![
+            format!("tests/java/{}.java", class_internal),
+            format!("tests/java/util/{}.java", class_internal),
+            format!("tests/java/lang/{}.java", class_internal),
+        ];
+        
+        for file_path in possible_paths {
+            // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Trying to read file {}", file_path);
+            
+            // Try to read and parse the file
+            if let Ok(source) = std::fs::read_to_string(&file_path) {
+                // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Successfully read file, length = {}", source.len());
+                if let Ok(ast) = crate::parser::parser::parse(&source) {
+                    // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Successfully parsed AST, found {} type declarations", ast.type_decls.len());
+                    // Find the matching class declaration
+                    for type_decl in ast.type_decls {
+                        if let crate::ast::TypeDecl::Class(class) = type_decl {
+                            // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Found class '{}', looking for '{}'", class.name, class_name);
+                            if class.name == class_name || class.name.ends_with(&format!(".{}", class_internal)) {
+                                // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Found matching class!");
+                                return Some(class);
+                            }
+                        }
+                    }
+                    // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: No matching class found in this file");
+                } else {
+                    // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Failed to parse AST");
+                }
+            } else {
+                // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: Failed to read file");
+            }
+        }
+        
+        // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: No matching class found in any path");
+        None
+    }
+
     /// Resolve field descriptor from generated rt.rs index, with local class fallback.
     /// `class_internal` must be an internal name like "java/io/OutputStream" or "java/base/FieldData".
     fn resolve_field_descriptor(&self, class_internal: &str, field_name: &str) -> String {
@@ -4634,6 +4813,19 @@ impl MethodWriter {
                         }
                     }
                     _ => {} // Skip other types
+                }
+            }
+        }
+
+        // 4) Try to parse the class from the file system
+        if let Some(class) = self.try_parse_class_from_filesystem(class_internal) {
+            // Look for the field in the parsed class
+            for member in &class.body {
+                if let crate::ast::ClassMember::Field(field) = member {
+                    if field.name == field_name {
+                        // Generate descriptor from field type
+                        return type_ref_to_descriptor(&field.type_ref);
+                    }
                 }
             }
         }

@@ -13,6 +13,9 @@ fn classes_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("classes").join("java")
 }
 
+
+// cargo test --test java_suite_ordered -- --nocapture
+// TOLC_FILTER_FILE=ArraysComparator.java cargo test --test java_suite_ordered -- --nocapture
 #[test]
 fn parse_java_files_in_order() {
     // Initialize logger for diagnostics
@@ -27,6 +30,8 @@ fn parse_java_files_in_order() {
     // Reference compiled classes root for javap parity
     let ref_root = classes_root();
     assert!(ref_root.exists(), "tests/classes/java not found: {}", ref_root.display());
+    if env::var("TOLC_CLASSPATH").is_err() { env::set_var("TOLC_CLASSPATH", root.display().to_string()); }
+    if env::var("TOLC_JAVAC_COMPAT").is_err() { env::set_var("TOLC_JAVAC_COMPAT", "1".to_string()); }
 
     // Check if we should filter to a specific file
     let filter_file = env::var("TOLC_FILTER_FILE").ok();

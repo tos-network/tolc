@@ -2776,13 +2776,21 @@ fn walk_expr(
             if let Some(g) = global {
                 if let Some(mt) = resolve_type_in_index(g, &c.target_type.name) {
                     if c.target_type.type_args.len() != mt.type_param_count {
+                        // Only tolerate raw usage (zero args) in compatibility mode; otherwise error
+                        if c.target_type.type_args.len() == 0 && crate::review::compat_mode() {
+                            super::debug_log(format!(
+                                "compat: tolerate raw-type usage in cast: {} expects {}, found 0",
+                                c.target_type.name, mt.type_param_count
+                            ));
+                        } else {
                             super::debug_log(format!(
                                 "GenericArityMismatch (cast): type={} expected_params={} found_args={} (resolved via index)",
                                 c.target_type.name,
                                 mt.type_param_count,
                                 c.target_type.type_args.len()
                             ));
-                        return Err(ReviewError::GenericArityMismatch { typename: c.target_type.name.clone(), expected: mt.type_param_count, found: c.target_type.type_args.len() });
+                            return Err(ReviewError::GenericArityMismatch { typename: c.target_type.name.clone(), expected: mt.type_param_count, found: c.target_type.type_args.len() });
+                        }
                     }
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in c.target_type.type_args.iter().enumerate() {
@@ -2812,13 +2820,21 @@ fn walk_expr(
             if let Some(g) = global {
                 if let Some(mt) = resolve_type_in_index(g, &io.target_type.name) {
                     if io.target_type.type_args.len() != mt.type_param_count {
+                        // Only tolerate raw usage (zero args) in compatibility mode; otherwise error
+                        if io.target_type.type_args.len() == 0 && crate::review::compat_mode() {
+                            super::debug_log(format!(
+                                "compat: tolerate raw-type usage in instanceof: {} expects {}, found 0",
+                                io.target_type.name, mt.type_param_count
+                            ));
+                        } else {
                             super::debug_log(format!(
                                 "GenericArityMismatch (instanceof): type={} expected_params={} found_args={} (resolved via index)",
                                 io.target_type.name,
                                 mt.type_param_count,
                                 io.target_type.type_args.len()
                             ));
-                        return Err(ReviewError::GenericArityMismatch { typename: io.target_type.name.clone(), expected: mt.type_param_count, found: io.target_type.type_args.len() });
+                            return Err(ReviewError::GenericArityMismatch { typename: io.target_type.name.clone(), expected: mt.type_param_count, found: io.target_type.type_args.len() });
+                        }
                     }
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in io.target_type.type_args.iter().enumerate() {
