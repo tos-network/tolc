@@ -2065,13 +2065,11 @@ impl MethodWriter {
                 let after = self.create_label();
                 {
                     let l = self.label_str(try_start);
-                self.mark_label(try_start);
                     self.bytecode_builder.mark_label(&l);
                 }
                 self.generate_block(&try_stmt.try_block)?;
                 {
                     let l = self.label_str(try_end);
-                self.mark_label(try_end);
                     self.bytecode_builder.mark_label(&l);
                 }
                 // Normal close
@@ -2086,7 +2084,6 @@ impl MethodWriter {
                 // Handler
                 {
                     let l = self.label_str(handler);
-                self.mark_label(handler);
                     self.bytecode_builder.mark_label(&l);
                 }
                 // JVM automatically pushes the exception object onto the stack when entering exception handler
@@ -2111,7 +2108,6 @@ impl MethodWriter {
                     let inner_after = self.create_label();
                     {
                         let l = self.label_str(inner_start);
-                    self.mark_label(inner_start);
                         self.bytecode_builder.mark_label(&l);
                     }
                     // Resource is not null - load it again for the method call
@@ -2122,7 +2118,6 @@ impl MethodWriter {
                     self.bytecode_builder.push_short(1); self.bytecode_builder.push_byte(1); self.bytecode_builder.push_byte(0);
                     {
                         let l = self.label_str(inner_end);
-                    self.mark_label(inner_end);
                         self.bytecode_builder.mark_label(&l);
                     }
                     {
@@ -2131,7 +2126,6 @@ impl MethodWriter {
                     }
                     {
                         let l = self.label_str(inner_handler);
-                    self.mark_label(inner_handler);
                         self.bytecode_builder.mark_label(&l);
                     }
                     // JVM automatically pushes the exception object onto the stack when entering exception handler
@@ -2150,12 +2144,14 @@ impl MethodWriter {
                     
                     {
                         let l = self.label_str(inner_after);
-                    self.mark_label(inner_after);
                         self.bytecode_builder.mark_label(&l);
                     }
                     self.add_exception_handler_labels(inner_start, inner_end, inner_handler, 0);
                     
-                    self.mark_label(skip);
+                    {
+                        let l = self.label_str(skip);
+                        self.bytecode_builder.mark_label(&l);
+                    }
                 }
                 // rethrow
                 Self::map_stack(self.bytecode_builder.aload(0))?; self.bytecode_builder.push_byte(primary_exc as u8);
@@ -2165,7 +2161,6 @@ impl MethodWriter {
                 // after
                 {
                     let l = self.label_str(after);
-                self.mark_label(after);
                     self.bytecode_builder.mark_label(&l);
                 }
                 if let Some(finally_block) = &try_stmt.finally_block { self.generate_block(finally_block)?; }
@@ -2218,7 +2213,6 @@ impl MethodWriter {
                 // end:
                 {
                     let l = self.label_str(end_label);
-                self.mark_label(end_label);
                     self.bytecode_builder.mark_label(&l);
                 }
             }
@@ -3121,7 +3115,10 @@ impl MethodWriter {
         self.bytecode_builder.push_byte(0);
         
         // end label - both paths converge here with stack depth 0
-        self.mark_label(end_label);
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
         
         Ok(())
     }
@@ -3329,8 +3326,16 @@ impl MethodWriter {
         let mut case_end_labels: Vec<u16> = Vec::new();
         for (idx, case) in switch_stmt.cases.iter().enumerate() {
             // mark labels that jump here
-            for (lbl, _i) in case_labels.iter().filter(|(_, i)| *i == idx) { self.mark_label(*lbl); }
-            if let Some((dl, i)) = default_label { if i == idx { self.mark_label(dl); } }
+            for (lbl, _i) in case_labels.iter().filter(|(_, i)| *i == idx) { 
+                let l = self.label_str(*lbl);
+                self.bytecode_builder.mark_label(&l);
+            }
+            if let Some((dl, i)) = default_label { 
+                if i == idx { 
+                    let l = self.label_str(dl);
+                    self.bytecode_builder.mark_label(&l);
+                } 
+            }
             // emit statements
             for stmt in &case.statements {
                 self.generate_statement(stmt)?;
@@ -3346,8 +3351,14 @@ impl MethodWriter {
             case_end_labels.push(after_case);
         }
         // mark end
-        self.mark_label(end_label);
-        for l in case_end_labels { self.mark_label(l); }
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        for l in case_end_labels { 
+            let label_str = self.label_str(l);
+            self.bytecode_builder.mark_label(&label_str);
+        }
         Ok(())
     }
     
@@ -3414,13 +3425,19 @@ impl MethodWriter {
         }
         
         // Mark else label
-        self.mark_label(else_label);
+        {
+            let l = self.label_str(else_label);
+            self.bytecode_builder.mark_label(&l);
+        }
         
         // Generate else expression
         self.generate_expression(&ternary.else_expr)?;
         
         // Mark end label
-        self.mark_label(end_label);
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
         
         Ok(())
     }
@@ -3450,7 +3467,10 @@ impl MethodWriter {
         }
         
         // Mark else label
-        self.mark_label(else_label);
+        {
+            let l = self.label_str(else_label);
+            self.bytecode_builder.mark_label(&l);
+        }
         
         // Generate else branch if present
         if let Some(else_branch) = &if_stmt.else_branch {
@@ -3458,7 +3478,10 @@ impl MethodWriter {
         }
         
         // Mark end label
-        self.mark_label(end_label);
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
         
         // Validate control flow structure
         self.validate_control_flow_structure()?;
@@ -3700,7 +3723,6 @@ impl MethodWriter {
         // Mark start label
         {
             let l = self.label_str(start_label);
-        self.mark_label(start_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3725,7 +3747,6 @@ impl MethodWriter {
         // Mark end label
         {
             let l = self.label_str(end_label);
-        self.mark_label(end_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3767,7 +3788,6 @@ impl MethodWriter {
         // Mark start label
         {
             let l = self.label_str(start_label);
-        self.mark_label(start_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3782,7 +3802,10 @@ impl MethodWriter {
         self.generate_statement(&for_stmt.body)?;
         
         // Mark continue label and generate updates
-        self.mark_label(continue_label);
+        {
+            let l = self.label_str(continue_label);
+            self.bytecode_builder.mark_label(&l);
+        }
         for upd in &for_stmt.update {
             self.generate_expression(&upd.expr)?;
             Self::map_stack(self.bytecode_builder.pop())?;
@@ -3797,7 +3820,6 @@ impl MethodWriter {
         // Mark end label
         {
             let l = self.label_str(end_label);
-        self.mark_label(end_label);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3866,7 +3888,6 @@ impl MethodWriter {
         // Mark loop start
         {
             let l = self.label_str(loop_start);
-            self.mark_label(loop_start);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3905,7 +3926,6 @@ impl MethodWriter {
         // Mark loop end
         {
             let l = self.label_str(loop_end);
-            self.mark_label(loop_end);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -3957,7 +3977,6 @@ impl MethodWriter {
         // Mark loop start
         {
             let l = self.label_str(loop_start);
-            self.mark_label(loop_start);
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -4008,7 +4027,6 @@ impl MethodWriter {
         // Mark loop end
         {
             let l = self.label_str(loop_end);
-            self.mark_label(loop_end);
             self.bytecode_builder.mark_label(&l);
         }
         

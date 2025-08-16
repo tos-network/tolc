@@ -381,6 +381,8 @@ impl BytecodeBuilder {
                 // ref_pc stores the instruction pc (position of opcode)
                 let instruction_pc_i32 = (*ref_pc) as i32;
                 // JVM branch offset is signed 16-bit: target_pc - (instruction_pc + 3)
+                // instruction_pc points to the opcode (start of the branch instruction)
+                // +3 because branch instruction is 3 bytes: opcode + 2-byte offset
                 let offset_i32 = current_pc - (instruction_pc_i32 + 3);
                 let offset_i16 = offset_i32 as i16;
                 // Update the offset at instruction_pc + 1 (position where offset bytes start)
@@ -2457,8 +2459,7 @@ mod tests {
         assert_eq!(code[1], opcodes::IFEQ);
         // The offset should be resolved to point to the label
         // IFEQ is at position 1, offset bytes at position 2-3, label is at position 5
-        // JVM offset calculation: target_pc - (current_pc + 2) = 5 - (1 + 2) = 2
-        // But our implementation uses: current_pc - ref_pc - 2 = 5 - 2 - 2 = 1
+        // JVM offset calculation: target_pc - (instruction_pc + 3) = 5 - (1 + 3) = 1
         // This is correct for JVM bytecode where the offset is relative to the instruction after the branch
         let offset = ((code[2] as u16) << 8) | (code[3] as u16);
         println!("Calculated offset: {}", offset);
