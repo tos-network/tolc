@@ -192,6 +192,17 @@ fn resolve_method(
     resolve_method_with_context(owner_internal, name, expected_arity, None)
 }
 
+/// Check if a type string represents an array type
+fn is_array_type(type_str: &str) -> bool {
+    // Handle different array type formats:
+    // 1. Java format: "Object[]", "int[]", etc.
+    // 2. JVM descriptor format: "[Ljava/lang/Object;", "[I", etc.
+    // 3. Mixed format: "LObject" (should be treated as Object[] in this context)
+    type_str.ends_with("[]") || 
+    type_str.starts_with('[') || 
+    (type_str.starts_with('L') && !type_str.contains('/') && !type_str.contains('.'))
+}
+
 /// Argument layout information for method generation
 #[derive(Debug, Clone)]
 struct ArgLayout {
@@ -2679,8 +2690,23 @@ impl MethodWriter {
         let owner_class = if let Some(target) = &call.target {
             // Resolve the type of the target expression
             let target_type = self.resolve_expression_type(target);
-            // Convert to internal name format (e.g., java.util.List -> java/util/List)
-            target_type.replace(".", "/")
+            // Convert to internal name format and handle well-known types
+            let internal_name = match target_type.as_str() {
+                "String" => "java/lang/String",
+                "Object" => "java/lang/Object",
+                "Integer" => "java/lang/Integer",
+                "Boolean" => "java/lang/Boolean",
+                "Long" => "java/lang/Long",
+                "Double" => "java/lang/Double",
+                "Float" => "java/lang/Float",
+                "Character" => "java/lang/Character",
+                "Byte" => "java/lang/Byte",
+                "Short" => "java/lang/Short",
+                "Method" => "java/lang/reflect/Method",
+                "Class" => "java/lang/Class",
+                _ => &target_type.replace(".", "/"),
+            };
+            internal_name.to_string()
         } else {
             // No target means calling on 'this' - use current class name
             self.current_class_name.as_ref()
@@ -2690,6 +2716,7 @@ impl MethodWriter {
         
         // Try to resolve the method using rt.rs
         let expected_arity = call.arguments.len();
+
         if let Some(resolved) = resolve_method_with_context(&owner_class, &call.name, expected_arity, self.current_class.as_ref()) {
             // Generate receiver and arguments based on method flags
             if !resolved.is_static {
@@ -2759,6 +2786,8 @@ impl MethodWriter {
                                 "FieldData" => "java.base.FieldData".to_string(),
                                 "MethodData" => "java.base.MethodData".to_string(),
                                 "PoolEntry" => "java.base.PoolEntry".to_string(),
+                                "Method" => "java.lang.reflect.Method".to_string(),
+                                "Object" => "java.lang.Object".to_string(),
                                 _ => ref_type.clone(),
                             }
                         }
@@ -2995,7 +3024,7 @@ impl MethodWriter {
             self.generate_expression(receiver)?;
             // Special-case: array.length → arraylength
             let recv_ty = self.resolve_expression_type(receiver);
-            if field_access.name == "length" && (recv_ty.ends_with("[]") || recv_ty.starts_with('[')) {
+            if field_access.name == "length" && is_array_type(&recv_ty) {
                 Self::map_stack(self.bytecode_builder.arraylength())?;
                 return Ok(());
             }
