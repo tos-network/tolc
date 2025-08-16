@@ -918,120 +918,135 @@ impl BytecodeBuilder {
     // Control flow - Use OpcodeGenerator
     pub fn ifeq(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
-        // Store the position of the instruction (opcode) for JVM offset calculation
-        let instruction_pc = self.code.len() as u16;
-        self.labels.push((label.to_string(), instruction_pc));
-        self.emit_opcode(self.opcode_generator.ifeq(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFEQ);
+        self.add_label_reference(label);
         Ok(())
     }
 
     pub fn ifne(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.ifne(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFNE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn iflt(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.iflt(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFLT);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn ifge(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.ifge(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFGE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn ifgt(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.ifgt(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFGT);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn ifle(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.ifle(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFLE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_icmpeq(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two int values for comparison
-        self.emit_opcode(self.opcode_generator.if_icmpeq(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ICMPEQ);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_icmpne(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two int values for comparison
-        self.emit_opcode(self.opcode_generator.if_icmpne(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ICMPNE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_icmplt(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two int values for comparison
-        self.emit_opcode(self.opcode_generator.if_icmplt(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ICMPLT);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_icmpge(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two int values for comparison
-        self.emit_opcode(self.opcode_generator.if_icmpge(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ICMPGE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_icmpgt(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two int values for comparison
-        self.emit_opcode(self.opcode_generator.if_icmpgt(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ICMPGT);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_icmple(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two int values for comparison
-        self.emit_opcode(self.opcode_generator.if_icmple(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ICMPLE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_acmpeq(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two reference values for comparison
-        self.emit_opcode(self.opcode_generator.if_acmpeq(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ACMPEQ);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn if_acmpne(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(2)?; // Pop two reference values for comparison
-        self.emit_opcode(self.opcode_generator.if_acmpne(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IF_ACMPNE);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn ifnull(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop one reference value for null check
-        self.emit_opcode(self.opcode_generator.ifnull(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFNULL);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn ifnonnull(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?; // Pop one reference value for null check
-        self.emit_opcode(self.opcode_generator.ifnonnull(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::IFNONNULL);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn goto(&mut self, label: &str) -> Result<(), StackError> {
-        self.emit_opcode(self.opcode_generator.goto(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::GOTO);
         self.add_label_reference(label);
         Ok(())
     }
@@ -1397,14 +1412,16 @@ impl BytecodeBuilder {
     // Subroutine and wide operations - Use OpcodeGenerator
     pub fn jsr(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.push(1)?; // Push return address
-        self.emit_opcode(self.opcode_generator.jsr(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::JSR);
         self.add_label_reference(label);
         Ok(())
     }
 
     pub fn jsr_w(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.push(1)?; // Push return address
-        self.emit_opcode(self.opcode_generator.jsr_w(0)); // Placeholder offset
+        // Emit only the opcode, add_label_reference will handle the offset
+        self.code.push(crate::codegen::opcodes::JSR_W);
         self.add_label_reference(label);
         Ok(())
     }
