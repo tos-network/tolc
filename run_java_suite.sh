@@ -2,6 +2,9 @@
 
 # Java Suite Test Runner - Segmented Execution
 # This script helps run the Java test suite in segments to avoid timeouts
+# Sample usage:
+# JAVA_SUITE_SEGMENT_SIZE=10 ./run_java_suite.sh segment 0
+# JAVA_SUITE_FILTER=Assembler FIRST_ONLY=true ./run_java_suite.sh segment 0
 
 set -e
 
@@ -11,7 +14,7 @@ TOTAL_SEGMENTS=${JAVA_SUITE_TOTAL_SEGMENTS:-10}
 FILTER=${JAVA_SUITE_FILTER:-""}
 FIRST_ONLY=${JAVA_SUITE_FIRST_ONLY:-""}
 MAX_FILES=${TOLC_MAXFILES:-""}
-TIMEOUT=${JAVA_SUITE_TIMEOUT:-300}
+TIMEOUT=${JAVA_SUITE_TIMEOUT:-10}
 
 echo "=== Java Suite Test Runner ==="
 echo "Segment size: $SEGMENT_SIZE"
@@ -42,20 +45,41 @@ run_segment() {
     echo "  JAVA_SUITE_TIMEOUT=$JAVA_SUITE_TIMEOUT"
     echo ""
     
-    # Run the test with timeout (macOS compatible)
+    # Run the test with timeout (portable)
+    local exit_code
     if command -v timeout >/dev/null 2>&1; then
         timeout $TIMEOUT cargo test --test java_suite -- --nocapture
+        exit_code=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout $TIMEOUT cargo test --test java_suite -- --nocapture
+        exit_code=$?
     else
-        # macOS doesn't have timeout, use gtimeout if available, otherwise no timeout
-        if command -v gtimeout >/dev/null 2>&1; then
-            gtimeout $TIMEOUT cargo test --test java_suite -- --nocapture
+        echo "Info: using builtin timeout watchdog (no timeout/gtimeout found)"
+        cargo test --test java_suite -- --nocapture &
+        local test_pid=$!
+        local start_ts=$(date +%s)
+        local timed_out=0
+        while kill -0 $test_pid >/dev/null 2>&1; do
+            local now_ts=$(date +%s)
+            if [ $(( now_ts - start_ts )) -ge $TIMEOUT ]; then
+                echo "❌ Segment $segment_num timed out after ${TIMEOUT}s (builtin watchdog)"
+                timed_out=1
+                kill -TERM $test_pid >/dev/null 2>&1 || true
+                sleep 2
+                kill -KILL $test_pid >/dev/null 2>&1 || true
+                break
+            fi
+            sleep 1
+        done
+        if [ $timed_out -eq 1 ]; then
+            wait $test_pid >/dev/null 2>&1 || true
+            exit_code=124
         else
-            echo "Warning: timeout command not available, running without timeout"
-            cargo test --test java_suite -- --nocapture
+            wait $test_pid
+            exit_code=$?
         fi
     fi
     
-    local exit_code=$?
     if [ $exit_code -eq 124 ]; then
         echo "❌ Segment $segment_num timed out after ${TIMEOUT}s"
         return 1

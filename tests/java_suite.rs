@@ -57,7 +57,7 @@ fn parse_all_java_files_under_tests_java() {
     let timeout_seconds = std::env::var("JAVA_SUITE_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(300); // Default: 5 minutes
+        .unwrap_or(10); // Default: 10 seconds
 
     eprintln!("[CONFIG] Segment: {}/?, Size: {}, Max files: {}, Timeout: {}s", 
               segment_number, segment_size, max_files, timeout_seconds);
@@ -83,17 +83,7 @@ fn parse_all_java_files_under_tests_java() {
         .collect();
     
     // Skip the 10 known failing files for now to test compilation success
-    let skip_files = [
-        "tests/java/base/AnnotationInvocationHandler.java",
-        "tests/java/base/SystemClassLoader.java",
-        "tests/java/lang/Bytes1.java",
-        "tests/java/lang/Class.java",
-        "tests/java/lang/Int184.java",
-        "tests/java/lang/NullPointerException.java",
-        "tests/java/lang/Uint.java",
-        "tests/java/lang/contract/ERC20InvalidSender.java",
-        "tests/java/util/AbstractList.java",
-        "tests/java/util/IteratorEnumeration.java",
+    let skip_files: &[&str] = &[
     ];
     
     java_files.retain(|entry| {

@@ -2652,16 +2652,17 @@ impl Parser {
                     let var_type = self.parse_type_ref()?;
                     let var_name = self.parse_identifier()?;
                     self.consume(&Token::Colon, "Expected ':' in enhanced for")?;
-                    let _iterable_expr = self.parse_expression()?; // not represented precisely yet
+                    let iterable_expr = self.parse_expression()?; // Store the iterable expression
                     self.consume(&Token::RParen, "Expected ')' after enhanced for header")?;
                     // Parse body
                     let body = if self.check(&Token::LBrace) { Box::new(Stmt::Block(self.parse_block()?)) } else { Box::new(self.parse_statement()?) };
                     let span = Span::new(start.start, self.previous_span().end);
                     // Represent as a generic for-statement with declaration in init and no condition/update
+                    // Store the iterable expression in the initializer as a temporary solution
                     let decl = VarDeclStmt {
                         modifiers: Vec::new(),
                         type_ref: var_type,
-                        variables: vec![VariableDeclarator { name: var_name, array_dims: 0, initializer: None, span }],
+                        variables: vec![VariableDeclarator { name: var_name, array_dims: 0, initializer: Some(iterable_expr), span }],
                         span,
                     };
                     return Ok(Stmt::For(ForStmt { init: vec![Stmt::Declaration(decl)], condition: None, update: Vec::new(), body, span }));

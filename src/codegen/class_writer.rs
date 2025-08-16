@@ -935,6 +935,8 @@ impl ClassWriter {
                     throws_type.name.clone()
                 } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&throws_type.name.as_str()) {
                     format!("java/lang/{}", throws_type.name)
+                } else if throws_type.name == "IOException" {
+                    "java/io/IOException".to_string()
                 } else if let Some(resolved_name) = crate::codegen::classpath::resolve_class_name(&throws_type.name) {
                     resolved_name.to_string()
                 } else {
@@ -1040,11 +1042,9 @@ impl ClassWriter {
                 use crate::ast::{Expr, Literal};
                 let add_const_attr = |cw: &mut ClassWriter, _tag: &str, idx: u16, fi: &mut FieldInfo| -> Result<()> {
                     // ConstantValue attribute payload: u2 constantvalue_index
-                    let mut payload = Vec::new();
-                    payload.extend_from_slice(&idx.to_be_bytes());
                     let name_index = { let mut cp = cw.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("ConstantValue") }
                         .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
-                    fi.attributes.push(NamedAttribute::new(name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload })));
+                    fi.attributes.push(NamedAttribute::new(name_index.into(), AttributeInfo::ConstantValue(crate::codegen::attribute::ConstantValueAttribute { value: idx.into() })));
                     Ok(())
                 };
                 // Evaluate compile-time constant expression if possible
@@ -1127,6 +1127,68 @@ impl ClassWriter {
                 .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             let named = NamedAttribute::new(_name_index.into(), code_attr_info);
             method_info.attributes.push(named);
+        }
+
+        // Add Signature attribute if method has generic type parameters or uses generic types
+        let has_generics = !method.type_params.is_empty() ||
+           method.parameters.iter().any(|p| !p.type_ref.type_args.is_empty() || 
+               (p.type_ref.name.len() == 1 && p.type_ref.name.chars().next().unwrap().is_ascii_uppercase()) ||
+               p.type_ref.name.contains("List") || p.type_ref.name.contains("Map") || p.type_ref.name.contains("Set")) ||
+           (method.return_type.as_ref().map(|rt| !rt.type_args.is_empty() || 
+               (rt.name.len() == 1 && rt.name.chars().next().unwrap().is_ascii_uppercase()) ||
+               rt.name.contains("List") || rt.name.contains("Map") || rt.name.contains("Set")).unwrap_or(false));
+        
+        if has_generics {
+            use crate::codegen::signature::{method_to_signature, TypeNameResolver};
+            let type_resolver = TypeNameResolver::with_default_mappings();
+            let signature_string = method_to_signature(method, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+            let signature_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&signature_string) }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_attr = crate::codegen::attribute::SignatureAttribute {
+                signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index)
+            };
+            let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Signature") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index),
+                AttributeInfo::Signature(signature_attr)
+            );
+            method_info.attributes.push(named_attr);
+        }
+
+        // Add Exceptions attribute if method has throws declarations
+        if !method.throws.is_empty() {
+            let mut exception_indexes: Vec<crate::codegen::typed_index::ClassIndex> = Vec::new();
+            for throws_type in &method.throws {
+                // Convert throws type to internal name format
+                let internal_name = if throws_type.name.contains('.') || throws_type.name.contains('/') {
+                    throws_type.name.clone()
+                } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&throws_type.name.as_str()) {
+                    format!("java/lang/{}", throws_type.name)
+                } else if throws_type.name == "IOException" {
+                    "java/io/IOException".to_string()
+                } else if let Some(resolved_name) = crate::codegen::classpath::resolve_class_name(&throws_type.name) {
+                    resolved_name.to_string()
+                } else {
+                    // Fallback: assume it's in the same package
+                    if let Some(pkg) = &self.package_name {
+                        format!("{}/{}", pkg.replace('.', "/"), throws_type.name)
+                    } else {
+                        throws_type.name.clone()
+                    }
+                };
+
+                let exception_index_u16 = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_class(&internal_name) }
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                exception_indexes.push(crate::codegen::typed_index::ConstPoolIndex::from(exception_index_u16));
+            }
+
+            let exceptions_attr = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                crate::codegen::attribute::NamedAttribute::new_exceptions_attribute(&mut cp, exception_indexes.into_iter().map(|i| i.into()).collect())
+                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool:Exception: {}", e) })?
+            };
+            method_info.attributes.push(exceptions_attr);
         }
 
         // Emit RuntimeVisible/InvisibleTypeAnnotations for method return/params/throws and method type parameter bounds
@@ -1343,35 +1405,8 @@ impl ClassWriter {
         // Merge back constant pool if not using shared
         if self.cp_shared.is_none() { self.class_file.constant_pool = constant_pool_rc.borrow().clone(); }
         
-        // Compute a lightweight max_stack from code for common opcodes to better match javac
-        let mut sim_depth: i32 = 0;
-        let mut sim_max: i32 = 0;
-        let mut i = 0usize;
-        while i < code_bytes.len() {
-            let op = code_bytes[i];
-            match op {
-                // loads
-                0x2A /* ALOAD_0 */ => { sim_depth += 1; }
-                // constants
-                0x12 /* LDC */ => { sim_depth += 1; i += 1; } // skip index u1 handled below
-                0x13 /* LDC_W */ => { sim_depth += 1; i += 2; }
-                // field access
-                0xB2 /* GETSTATIC */ => { sim_depth += 1; i += 2; }
-                // invokes
-                0xB6 /* INVOKEVIRTUAL */ => { sim_depth -= 2; i += 2; }
-                0xB7 /* INVOKESPECIAL */ => { sim_depth -= 1; i += 2; }
-                // return
-                0xB1 /* RETURN */ => {}
-                _ => {
-                    // Skip operand widths for simple known opcodes
-                    // Most other opcodes in our simple tests are no-ops for stack simulation
-                }
-            }
-            if sim_depth > sim_max { sim_max = sim_depth; }
-            // Advance i by default opcode width
-            i += 1;
-        }
-        let computed_max_stack = sim_max.max(0) as u16;
+        // Prefer the max_stack computed by BytecodeBuilder's StackState
+        let computed_max_stack = _max_stack;
 
         // Build sub-attributes after body emissions (so CP first-touches are from code first)
         let mut sub_attrs: Vec<NamedAttribute> = Vec::new();
@@ -1470,7 +1505,7 @@ impl ClassWriter {
         }
         // Now build the Code attribute bytes at the end to ensure name Utf8 comes after code touches
         let mut attribute_bytes = Vec::new();
-        // Max stack and max locals
+        // Max stack and max locals (from BytecodeBuilder)
         attribute_bytes.extend_from_slice(&computed_max_stack.to_be_bytes());
         attribute_bytes.extend_from_slice(&(max_locals as u16).to_be_bytes());
         // Code length and code

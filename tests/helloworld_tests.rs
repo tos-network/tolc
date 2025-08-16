@@ -80,7 +80,6 @@ public class HelloWorld {
             println!("✅ DEBUG: generate_class() completed successfully in {:?}", duration);
         }
         Err(e) => {
-            println!("❌ DEBUG: generate_class() failed after {:?}: {}", duration, e);
             panic!("Failed to generate class: {}", e);
         }
     }
@@ -88,10 +87,6 @@ public class HelloWorld {
     println!("🔍 DEBUG: Getting generated class file...");
     // Get generated class file
     let class_file = class_writer.get_class_file();
-    println!("🔍 DEBUG: Class file retrieved successfully");
-    println!("🔍 DEBUG: Class file has {} methods", class_file.methods.len());
-    println!("🔍 DEBUG: Class file has {} fields", class_file.fields.len());
-    println!("🔍 DEBUG: Class file has {} attributes", class_file.attributes.len());
     
     // Verify basic structure of class file
     // Constant pool index starts from 1, so the first class reference should be 1

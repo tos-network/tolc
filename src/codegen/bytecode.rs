@@ -229,10 +229,13 @@ impl LocalType {
             LocalType::Float => "F".to_string(),
             LocalType::Double => "D".to_string(),
             LocalType::Reference(class_name) => {
-                // Use internal names (pkg/Type). Map well-known java.lang simple names only.
-                let simple = !class_name.contains('/') && !class_name.contains('.') && !class_name.is_empty();
-                let internal = if simple {
-                    if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
+                // Produce an internal name (with '/') and wrap as L...; descriptor.
+                // Prefer classpath mappings for simple names (e.g., List -> java/util/List).
+                let is_simple = !class_name.contains('/') && !class_name.contains('.') && !class_name.is_empty();
+                let internal = if is_simple {
+                    if let Some(mapped) = crate::codegen::classpath::resolve_class_name(class_name) {
+                        mapped.to_string()
+                    } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
                         format!("java/lang/{}", class_name)
                     } else {
                         class_name.replace('.', "/")
@@ -337,32 +340,54 @@ impl BytecodeBuilder {
         self.stack_state.max_locals()
     }
     
+    /// Get the current stack depth
+    pub fn stack_depth(&self) -> u16 {
+        self.stack_state.depth()
+    }
+    
+    /// Manually update stack state (for instructions not handled by high-level methods)
+    pub fn update_stack(&mut self, dec: u16, inc: u16) -> Result<(), StackError> {
+        self.stack_state.update(dec, inc)
+    }
+    
     /// Update local variable lifetime
     pub fn update_lifetime(&mut self, index: u16, start_pc: u16, end_pc: u16) {
         self.stack_state.frame.update_lifetime(index, start_pc, end_pc);
     }
+
+    /// Adjust stack for an invoke instruction given call-site metadata
+    /// - is_static: whether the target is static (no receiver)
+    /// - arg_slots: total slot count of arguments in the method descriptor
+    /// - ret_slots: 0 for void, 1 for category-1, 2 for category-2 (long/double)
+    pub fn adjust_invoke_stack(&mut self, is_static: bool, arg_slots: u16, ret_slots: u16) -> Result<(), StackError> {
+        // Pop receiver for non-static
+        let recv = if is_static { 0 } else { 1 };
+        // Pop arguments and receiver
+        self.stack_state.pop(arg_slots + recv)?;
+        // Push return value if any
+        if ret_slots > 0 { self.stack_state.push(ret_slots)?; }
+        Ok(())
+    }
     
     /// Mark a label at the current position
     pub fn mark_label(&mut self, label: &str) {
-        let current_pc = self.code.len() as u16;
+        let current_pc_u16 = self.code.len() as u16;
+        let current_pc = current_pc_u16 as i32;
         
         // Update all references to this label
         let mut resolved_indices = Vec::new();
         for (i, (ref_label, ref_pc)) in self.labels.iter_mut().enumerate() {
             if ref_label == label {
-                // JVM offset calculation: target_pc - (instruction_pc + 3)
-                // where instruction_pc is the position of the opcode
-                // +3 accounts for: 1 byte opcode + 2 bytes offset
-                // ref_pc is now the position of the instruction
-                let instruction_pc = *ref_pc;
-                let offset = current_pc - (instruction_pc + 3);
+                // ref_pc stores the instruction pc (position of opcode)
+                let instruction_pc_i32 = (*ref_pc) as i32;
+                // JVM branch offset is signed 16-bit: target_pc - (instruction_pc + 3)
+                let offset_i32 = current_pc - (instruction_pc_i32 + 3);
+                let offset_i16 = offset_i32 as i16;
                 // Update the offset at instruction_pc + 1 (position where offset bytes start)
-                let offset_bytes = offset.to_be_bytes();
-                self.code[(instruction_pc + 1) as usize] = offset_bytes[0];
-                self.code[(instruction_pc + 1) as usize + 1] = offset_bytes[1];
-                
-
-                
+                let offset_bytes = offset_i16.to_be_bytes();
+                let start = (*ref_pc + 1) as usize;
+                self.code[start] = offset_bytes[0];
+                self.code[start + 1] = offset_bytes[1];
                 // Mark this reference as resolved
                 resolved_indices.push(i);
             }
@@ -1430,10 +1455,12 @@ impl BytecodeBuilder {
     
     /// Add a label reference that will be resolved later
     fn add_label_reference(&mut self, label: &str) {
-        // Store the position where the offset bytes start for later updating
-        let offset_pc = self.code.len() as u16;
-        self.labels.push((label.to_string(), offset_pc));
-        // Emit placeholder offset (will be updated when label is marked)
+        // We store the instruction pc (position of opcode)
+        // Currently, add_label_reference is called immediately after emitting the opcode,
+        // so the instruction pc is (current len - 1)
+        let instruction_pc = (self.code.len() as u16).saturating_sub(1);
+        self.labels.push((label.to_string(), instruction_pc));
+        // Emit placeholder signed 16-bit offset (to be backpatched in mark_label)
         self.emit_short(0);
     }
 
