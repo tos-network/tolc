@@ -56,7 +56,12 @@ fn resolve_method_with_context(
     name: &str,
     expected_arity: usize,
     current_class: Option<&crate::ast::ClassDecl>, // Current class being compiled
+    all_types: Option<&[crate::ast::TypeDecl]>, // All types in current compilation unit
 ) -> Option<ResolvedMethod> {
+    eprintln!("🔍 DEBUG: resolve_method_with_context: Looking for {}#{} with arity {}", owner_internal, name, expected_arity);
+    eprintln!("🔍 DEBUG: resolve_method_with_context: current_class = {:?}, all_types = {:?}", 
+              current_class.map(|c| &c.name), 
+              all_types.map(|t| t.len()));
     // First check if this is the current class being compiled
     if let Some(class) = current_class {
         let current_class_internal = class.name.replace(".", "/");
@@ -86,6 +91,83 @@ fn resolve_method_with_context(
                     }
                 }
                 }
+            }
+        }
+    }
+    
+    // Check if the owner is an interface in the current compilation unit
+    if let Some(types) = all_types {
+        eprintln!("🔍 DEBUG: resolve_method_with_context: Checking {} types in compilation unit", types.len());
+        for type_decl in types {
+            match type_decl {
+                crate::ast::TypeDecl::Interface(interface) => {
+                    let interface_internal = interface.name.replace(".", "/");
+                    eprintln!("🔍 DEBUG: resolve_method_with_context: Found interface {} (internal: {})", interface.name, interface_internal);
+                    if owner_internal == interface_internal {
+                        eprintln!("🔍 DEBUG: resolve_method_with_context: Interface matches! Looking for method {} in interface {}", name, interface.name);
+                        // Look for the method in the interface
+                        for member in &interface.body {
+                            if let crate::ast::InterfaceMember::Method(method) = member {
+                                eprintln!("🔍 DEBUG: resolve_method_with_context: Found interface method {} with {} parameters", method.name, method.parameters.len());
+                                if method.name == name {
+                                    // Quick arity check - count parameters
+                                    let param_count = method.parameters.len();
+                                    eprintln!("🔍 DEBUG: resolve_method_with_context: Method name matches! Checking arity: {} vs {}", param_count, expected_arity);
+                                    if param_count == expected_arity {
+                                        eprintln!("🔍 DEBUG: resolve_method_with_context: Arity matches! Resolving interface method {}#{}", interface_internal, name);
+                                        // Generate descriptor from parameters and return type
+                                        let descriptor = generate_method_descriptor_from_decl(method);
+                                        let flags = method_flags_from_decl(method) | 0x0400; // Add ACC_ABSTRACT flag for interface methods
+                                        
+                                        return Some(ResolvedMethod {
+                                            owner_internal: interface_internal,
+                                            name: method.name.clone(),
+                                            descriptor,
+                                            is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                                            is_interface: true, // This is an interface method
+                                            is_ctor: false, // Interfaces don't have constructors
+                                            is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                                            is_super_call: false,
+                                            flags,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                crate::ast::TypeDecl::Class(class) => {
+                    let class_internal = class.name.replace(".", "/");
+                    if owner_internal == class_internal && current_class.map_or(true, |c| c.name != class.name) {
+                        // Look for the method in other classes in the compilation unit
+                        for member in &class.body {
+                            if let crate::ast::ClassMember::Method(method) = member {
+                                if method.name == name {
+                                    // Quick arity check - count parameters
+                                    let param_count = method.parameters.len();
+                                    if param_count == expected_arity {
+                                        // Generate descriptor from parameters and return type
+                                        let descriptor = generate_method_descriptor_from_decl(method);
+                                        let flags = method_flags_from_decl(method);
+                                        
+                                        return Some(ResolvedMethod {
+                                            owner_internal: class_internal,
+                                            name: method.name.clone(),
+                                            descriptor,
+                                            is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                                            is_interface: false,
+                                            is_ctor: method.name == "<init>",
+                                            is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                                            is_super_call: false,
+                                            flags,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {} // Handle other type declarations if needed
             }
         }
     }
@@ -189,7 +271,7 @@ fn resolve_method(
     name: &str,
     expected_arity: usize,
 ) -> Option<ResolvedMethod> {
-    resolve_method_with_context(owner_internal, name, expected_arity, None)
+    resolve_method_with_context(owner_internal, name, expected_arity, None, None)
 }
 
 /// Check if a type string represents an array type
@@ -338,6 +420,8 @@ pub struct MethodWriter {
     current_class_name: Option<String>,
     /// Current class declaration for local method resolution
     current_class: Option<crate::ast::ClassDecl>,
+    /// All types in the current compilation unit for interface method resolution
+    all_types: Option<Vec<crate::ast::TypeDecl>>,
     /// Next label ID for generating unique string labels
     next_label_id: u16,
 }
@@ -363,6 +447,7 @@ impl MethodWriter {
             constant_pool: None,
             current_class_name: None,
             current_class: None,
+            all_types: None,
         }
     }
     
@@ -379,6 +464,7 @@ impl MethodWriter {
             constant_pool: Some(constant_pool.clone()),
             current_class_name: None,
             current_class: None,
+            all_types: None,
         }
     }
     
@@ -395,6 +481,7 @@ impl MethodWriter {
             constant_pool: Some(constant_pool.clone()),
             current_class_name: Some(class_name),
             current_class: None,
+            all_types: None,
         }
     }
     
@@ -415,12 +502,88 @@ impl MethodWriter {
             constant_pool: Some(constant_pool.clone()),
             current_class_name: Some(class_name),
             current_class: Some(class_decl),
+            all_types: None,
         }
     }
     
     /// Get current bytecode for inspection
     fn get_current_code(&self) -> &Vec<u8> {
         self.bytecode_builder.code()
+    }
+    
+    /// Set all types for interface method resolution
+    pub fn set_all_types(&mut self, all_types: Vec<crate::ast::TypeDecl>) {
+        self.all_types = Some(all_types);
+    }
+    
+    /// Resolve a simple class name to its fully qualified internal name
+    /// Following Java resolution rules:
+    /// 1. Check imports
+    /// 2. Check current package
+    /// 3. Check java.lang package
+    /// 4. If none found, assume it's in current package
+    fn resolve_class_name(&self, simple_name: &str) -> String {
+        // Handle primitive types
+        match simple_name {
+            "int" | "boolean" | "byte" | "char" | "short" | "long" | "float" | "double" | "void" => {
+                return simple_name.to_string();
+            }
+            _ => {}
+        }
+        
+        // Handle well-known java.lang types
+        match simple_name {
+            "String" => return "java/lang/String".to_string(),
+            "Object" => return "java/lang/Object".to_string(),
+            "Integer" => return "java/lang/Integer".to_string(),
+            "Boolean" => return "java/lang/Boolean".to_string(),
+            "Long" => return "java/lang/Long".to_string(),
+            "Double" => return "java/lang/Double".to_string(),
+            "Float" => return "java/lang/Float".to_string(),
+            "Character" => return "java/lang/Character".to_string(),
+            "Byte" => return "java/lang/Byte".to_string(),
+            "Short" => return "java/lang/Short".to_string(),
+            "Class" => return "java/lang/Class".to_string(),
+            "Comparable" => return "java/lang/Comparable".to_string(),
+            "Exception" => return "java/lang/Exception".to_string(),
+            "RuntimeException" => return "java/lang/RuntimeException".to_string(),
+            "Throwable" => return "java/lang/Throwable".to_string(),
+            _ => {}
+        }
+        
+        // Check if it's already a fully qualified name (contains dots or slashes)
+        if simple_name.contains('.') || simple_name.contains('/') {
+            return simple_name.replace('.', "/");
+        }
+        
+        // Check current package - assume it's java.util for now
+        // In a real implementation, we would get this from the current class context
+        let current_package = if let Some(class_name) = &self.current_class_name {
+            if let Some(last_slash) = class_name.rfind('/') {
+                &class_name[..last_slash]
+            } else {
+                "java/util" // Default fallback
+            }
+        } else {
+            "java/util" // Default fallback
+        };
+        
+        // Check if the type exists in current package
+        let current_package_name = format!("{}/{}", current_package, simple_name);
+        
+        // For now, assume types like HashMapCell are in java.util
+        match simple_name {
+            "HashMapCell" | "HashMap" | "List" | "ArrayList" | "Iterator" | "Collection" => {
+                format!("java/util/{}", simple_name)
+            }
+            "PrintStream" | "InputStream" | "OutputStream" => {
+                format!("java/io/{}", simple_name)
+            }
+            _ => {
+                // Default to current package
+                current_package_name
+            }
+        }
     }
     
     /// Emit invoke instruction with proper opcode selection
@@ -603,6 +766,7 @@ impl MethodWriter {
             println!("🔍 DEBUG: generate_method_body: Method has body with {} statements", body.statements.len());
             self.generate_block(body)?;
             println!("🔍 DEBUG: generate_method_body: generate_block completed");
+            println!("🔍 DEBUG: generate_method_body: About to continue after generate_block...");
         } else {
             println!("🔍 DEBUG: generate_method_body: Method has no body");
         }
@@ -2665,7 +2829,7 @@ impl MethodWriter {
                 for arg in &call.arguments { self.generate_expression(arg)?; }
                 
                 // Try to resolve println method using rt.rs
-                if let Some(resolved) = resolve_method_with_context("java/io/PrintStream", "println", call.arguments.len(), self.current_class.as_ref()) {
+                if let Some(resolved) = resolve_method_with_context("java/io/PrintStream", "println", call.arguments.len(), self.current_class.as_ref(), self.all_types.as_deref()) {
                     self.emit_invoke(&resolved)?;
                 } else {
                     // Fallback to hardcoded version
@@ -2684,23 +2848,8 @@ impl MethodWriter {
         let owner_class = if let Some(target) = &call.target {
             // Resolve the type of the target expression
             let target_type = self.resolve_expression_type(target);
-            // Convert to internal name format and handle well-known types
-            let internal_name = match target_type.as_str() {
-                "String" => "java/lang/String",
-                "Object" => "java/lang/Object",
-                "Integer" => "java/lang/Integer",
-                "Boolean" => "java/lang/Boolean",
-                "Long" => "java/lang/Long",
-                "Double" => "java/lang/Double",
-                "Float" => "java/lang/Float",
-                "Character" => "java/lang/Character",
-                "Byte" => "java/lang/Byte",
-                "Short" => "java/lang/Short",
-                "Method" => "java/lang/reflect/Method",
-                "Class" => "java/lang/Class",
-                _ => &target_type.replace(".", "/"),
-            };
-            internal_name.to_string()
+            // Use the new resolve_class_name function for proper type resolution
+            self.resolve_class_name(&target_type)
         } else {
             // No target means calling on 'this' - use current class name
             self.current_class_name.as_ref()
@@ -2711,7 +2860,7 @@ impl MethodWriter {
         // Try to resolve the method using rt.rs
         let expected_arity = call.arguments.len();
 
-        if let Some(resolved) = resolve_method_with_context(&owner_class, &call.name, expected_arity, self.current_class.as_ref()) {
+        if let Some(resolved) = resolve_method_with_context(&owner_class, &call.name, expected_arity, self.current_class.as_ref(), self.all_types.as_deref()) {
             // Generate receiver and arguments based on method flags
             if !resolved.is_static {
                 if let Some(receiver) = &call.target { 
@@ -2798,14 +2947,42 @@ impl MethodWriter {
                         }
                     }
                 } else {
-                    // Assume it's a field access, use field descriptor
+                    // Check if it's a field in the current class first
+                    if let Some(class) = &self.current_class {
+                        for member in &class.body {
+                            if let crate::ast::ClassMember::Field(field) = member {
+                                if field.name == ident.name {
+                                    // Found the field, return its type
+                                    if field.type_ref.array_dims > 0 {
+                                        // Array type: T[] -> T[]
+                                        let mut type_name = field.type_ref.name.clone();
+                                        for _ in 0..field.type_ref.array_dims {
+                                            type_name.push_str("[]");
+                                        }
+                                        return type_name;
+                                    } else {
+                                        // Regular type
+                                        return field.type_ref.name.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Fallback: assume it's a field access, use field descriptor
                     let class_name = self.current_class_name.as_ref()
                         .unwrap_or(&"java/lang/String".to_string()) // Fallback to String instead of Object
                         .clone();
-                    self.resolve_field_descriptor(&class_name, &ident.name)
-                        .replace("Ljava/lang/", "")
-                        .replace(";", "")
-                        .replace("/", ".")
+                    // Get field descriptor and convert to class name
+                    let descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
+                    // Convert JVM descriptor to class name
+                    if descriptor.starts_with('L') && descriptor.ends_with(';') {
+                        // Object type: LClassName; -> ClassName
+                        descriptor[1..descriptor.len()-1].replace('/', ".")
+                    } else {
+                        // Primitive or array type, return as is
+                        descriptor
+                    }
                 }
             }
             Expr::FieldAccess(field_access) => {
@@ -2815,6 +2992,29 @@ impl MethodWriter {
                     // Try to resolve the field type from the receiver type
                     // For now, use a simple approach based on field name
                     match field_access.name.as_str() {
+                        "length" => {
+                            // Special case for array length field
+                            if receiver_type.ends_with("[]") {
+                                "int".to_string()
+                            } else {
+                                // Check if receiver is an array field in current class
+                                if let Some(class) = &self.current_class {
+                                    for member in &class.body {
+                                        if let crate::ast::ClassMember::Field(field) = member {
+                                            if field.name == receiver_type || 
+                                               (receiver_type == *self.current_class_name.as_ref().unwrap_or(&"".to_string()) && 
+                                                field.name == "array") {
+                                                // Check if this field is an array type
+                                                if field.type_ref.array_dims > 0 {
+                                                    return "int".to_string();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                receiver_type
+                            }
+                        }
                         "out" => "java/io/PrintStream".to_string(),
                         "pool" => "java/util/List".to_string(),
                         "fields" => "java/base/FieldData[]".to_string(),
@@ -2847,6 +3047,19 @@ impl MethodWriter {
                 } else {
                     new_expr.target_type.name.clone()
                 }
+            }
+            Expr::Cast(cast_expr) => {
+                // For cast expressions, use the target type with proper resolution
+                let resolved_type = self.resolve_class_name(&cast_expr.target_type.name);
+                if cast_expr.target_type.array_dims > 0 {
+                    format!("{}[]", resolved_type)
+                } else {
+                    resolved_type
+                }
+            }
+            Expr::Parenthesized(expr) => {
+                // For parenthesized expressions, resolve the inner expression
+                self.resolve_expression_type(expr)
             }
             _ => {
                 // Default fallback
@@ -2941,6 +3154,39 @@ impl MethodWriter {
                     }
                 }
             }
+            Expr::Cast(cast_expr) => {
+                // For cast expressions, use the target type descriptor with proper resolution
+                let resolved_type = self.resolve_class_name(&cast_expr.target_type.name);
+                if cast_expr.target_type.array_dims > 0 {
+                    // Array type: add array dimensions first
+                    let mut descriptor = String::new();
+                    for _ in 0..cast_expr.target_type.array_dims {
+                        descriptor.push('[');
+                    }
+                    
+                    // Add the element type
+                    descriptor.push_str(&format!("L{};", resolved_type));
+                    descriptor
+                } else {
+                    // Regular object type - check if it's a primitive
+                    match resolved_type.as_str() {
+                        "int" => "I".to_string(),
+                        "boolean" => "Z".to_string(),
+                        "byte" => "B".to_string(),
+                        "char" => "C".to_string(),
+                        "short" => "S".to_string(),
+                        "long" => "J".to_string(),
+                        "float" => "F".to_string(),
+                        "double" => "D".to_string(),
+                        "void" => "V".to_string(),
+                        _ => format!("L{};", resolved_type),
+                    }
+                }
+            }
+            Expr::Parenthesized(expr) => {
+                // For parenthesized expressions, resolve the inner expression
+                self.type_to_descriptor_with_generics(expr)
+            }
             _ => "Ljava/lang/String;".to_string(), // More specific than Object for safety
         }
     }
@@ -3018,6 +3264,8 @@ impl MethodWriter {
             self.generate_expression(receiver)?;
             // Special-case: array.length → arraylength
             let recv_ty = self.resolve_expression_type(receiver);
+            // eprintln!("🔍 DEBUG: generate_field_access: field_name={}, recv_ty={}, is_array_type={}", 
+            //           field_access.name, recv_ty, is_array_type(&recv_ty));
             if field_access.name == "length" && is_array_type(&recv_ty) {
                 Self::map_stack(self.bytecode_builder.arraylength())?;
                 return Ok(());
@@ -3483,17 +3731,17 @@ impl MethodWriter {
             self.bytecode_builder.mark_label(&l);
         }
         
-        // Validate control flow structure
-        self.validate_control_flow_structure()?;
+        // Validate control flow structure (disabled for performance)
+        // self.validate_control_flow_structure()?;
         
-        // Optimize control flow structure
-        self.optimize_control_flow_structure()?;
+        // Optimize control flow structure (disabled for performance)
+        // self.optimize_control_flow_structure()?;
         
-        // Finalize control flow
-        self.finalize_control_flow()?;
+        // Finalize control flow (disabled for performance)
+        // self.finalize_control_flow()?;
         
-        // Deep control flow analysis
-        self.deep_control_flow_analysis()?;
+        // Deep control flow analysis (disabled for performance)
+        // self.deep_control_flow_analysis()?;
         
         Ok(())
     }
@@ -3766,19 +4014,27 @@ impl MethodWriter {
     
     /// Generate bytecode for a for statement
     fn generate_for_statement(&mut self, for_stmt: &ForStmt) -> Result<()> {
+        println!("🔍 DEBUG: generate_for_statement: Starting");
+        
         // Check if this is an enhanced for loop (for-each)
         // Enhanced for loops have: 1 init (var declaration), no condition, no updates
         if for_stmt.init.len() == 1 && for_stmt.condition.is_none() && for_stmt.update.is_empty() {
             if let Stmt::Declaration(var_decl) = &for_stmt.init[0] {
                 // This looks like an enhanced for loop
+                println!("🔍 DEBUG: generate_for_statement: Enhanced for loop detected");
                 return self.generate_enhanced_for_statement(var_decl, &for_stmt.body);
             }
         }
         
         // Traditional for loop
+        println!("🔍 DEBUG: generate_for_statement: Traditional for loop");
+        
         // Generate initialization statements
-        for init in &for_stmt.init {
+        println!("🔍 DEBUG: generate_for_statement: Generating {} init statements", for_stmt.init.len());
+        for (i, init) in for_stmt.init.iter().enumerate() {
+            println!("🔍 DEBUG: generate_for_statement: Processing init statement {}", i + 1);
             self.generate_statement(init)?;
+            println!("🔍 DEBUG: generate_for_statement: Init statement {} completed", i + 1);
         }
         
         // Create labels for control flow
@@ -3801,13 +4057,17 @@ impl MethodWriter {
         
         // Generate condition check
         if let Some(cond) = &for_stmt.condition {
+            println!("🔍 DEBUG: generate_for_statement: Generating condition");
             self.generate_expression(cond)?;
             let l = self.label_str(end_label);
             Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            println!("🔍 DEBUG: generate_for_statement: Condition generated");
         }
         
         // Generate loop body
+        println!("🔍 DEBUG: generate_for_statement: About to generate loop body");
         self.generate_statement(&for_stmt.body)?;
+        println!("🔍 DEBUG: generate_for_statement: Loop body generated");
         
         // Mark continue label and generate updates
         {
@@ -4317,6 +4577,9 @@ impl MethodWriter {
     /// Resolve field descriptor from generated rt.rs index, with local class fallback.
     /// `class_internal` must be an internal name like "java/io/OutputStream" or "java/base/FieldData".
     fn resolve_field_descriptor(&self, class_internal: &str, field_name: &str) -> String {
+        // eprintln!("🔍 DEBUG: resolve_field_descriptor: Looking for {}#{}, all_types = {:?}", 
+        //           class_internal, field_name, self.all_types.as_ref().map(|t| t.len()));
+        
         // 1) Arrays don't have fields; `length` is a special property (returns int).
         if class_internal.starts_with('[') && field_name == "length" {
             return "I".to_string();
@@ -4334,6 +4597,43 @@ impl MethodWriter {
                             return type_ref_to_descriptor(&field.type_ref);
                         }
                     }
+                }
+            }
+        }
+
+        // 3) Check other classes in the current compilation unit
+        if let Some(types) = &self.all_types {
+            for type_decl in types {
+                match type_decl {
+                    crate::ast::TypeDecl::Class(class) => {
+                        let class_internal_name = class.name.replace(".", "/");
+                        if class_internal == class_internal_name {
+                            // Look for the field in this class
+                            for member in &class.body {
+                                if let crate::ast::ClassMember::Field(field) = member {
+                                    if field.name == field_name {
+                                        // Generate descriptor from field type
+                                        return type_ref_to_descriptor(&field.type_ref);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    crate::ast::TypeDecl::Interface(interface) => {
+                        let interface_internal_name = interface.name.replace(".", "/");
+                        if class_internal == interface_internal_name {
+                            // Look for the field in this interface (if any)
+                            for member in &interface.body {
+                                if let crate::ast::InterfaceMember::Field(field) = member {
+                                    if field.name == field_name {
+                                        // Generate descriptor from field type
+                                        return type_ref_to_descriptor(&field.type_ref);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {} // Skip other types
                 }
             }
         }

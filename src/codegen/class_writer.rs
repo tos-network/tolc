@@ -31,6 +31,8 @@ pub struct ClassWriter {
     pending_default_ctor_method_idx: Option<usize>,
     // Annotation retention index for the current compilation unit: simple or FQ name -> retention
     annotation_retention: HashMap<String, crate::codegen::attribute::RetentionPolicy>,
+    // All types in the current compilation unit for interface method resolution
+    all_types: Option<Vec<crate::ast::TypeDecl>>,
 }
 
 impl ClassWriter {
@@ -45,6 +47,7 @@ impl ClassWriter {
             cp_shared: None,
             pending_default_ctor_method_idx: None,
             annotation_retention: HashMap::new(),
+            all_types: None,
         }
     }
 
@@ -58,12 +61,18 @@ impl ClassWriter {
             cp_shared: None,
             pending_default_ctor_method_idx: None,
             annotation_retention: HashMap::new(),
+            all_types: None,
         }
     }
 
     /// Optionally set the package name (e.g., "mono" or "com.example")
     pub fn set_package_name<S: Into<String>>(&mut self, package: Option<S>) {
         self.package_name = package.map(|s| s.into());
+    }
+    
+    /// Set all types for interface method resolution
+    pub fn set_all_types(&mut self, all_types: Vec<crate::ast::TypeDecl>) {
+        self.all_types = Some(all_types);
     }
 
     /// Provide CU-wide annotation retention mapping
@@ -318,6 +327,9 @@ impl ClassWriter {
         ) -> Result<()> {
             let constant_pool_rc = cw.cp_shared.as_ref().unwrap().clone();
             let mut code_writer = BodyWriter::new_with_constant_pool_and_class_decl(constant_pool_rc, cw.current_class_decl.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_decl not set".into() })?);
+            if let Some(all_types) = &cw.all_types {
+                code_writer.set_all_types(all_types.clone());
+            }
             code_writer.generate_method_body(method)?;
             let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
             let access_flags = modifiers_to_flags(&method.modifiers);
@@ -1402,6 +1414,9 @@ impl ClassWriter {
         // Generate bytecode for method body, using shared pool if available
         let constant_pool_rc = if let Some(rc) = &self.cp_shared { rc.clone() } else { std::rc::Rc::new(std::cell::RefCell::new(self.class_file.constant_pool.clone())) };
         let mut code_writer = BodyWriter::new_with_constant_pool_and_class_decl(constant_pool_rc.clone(), self.current_class_decl.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_decl not set".into() })?);
+        if let Some(all_types) = &self.all_types {
+            code_writer.set_all_types(all_types.clone());
+        }
         code_writer.generate_method_body(method)?;
         let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
         // Merge back constant pool if not using shared

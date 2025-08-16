@@ -70,6 +70,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
             TypeDecl::Class(class) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
+                class_writer.set_all_types(ast.type_decls.clone());
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
@@ -85,6 +86,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
             TypeDecl::Interface(interface) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
+                class_writer.set_all_types(ast.type_decls.clone());
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
