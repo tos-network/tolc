@@ -2799,6 +2799,11 @@ fn walk_expr(
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in c.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
+                                // Skip bound checking for wildcards in cast expressions
+                                // Wildcards in casts are allowed even if they don't satisfy bounds
+                                if let crate::ast::TypeArg::Wildcard(_) = targ {
+                                    continue;
+                                }
                                 if let Some(tname) = typearg_to_simple_name(targ) {
                                     for b in bounds {
                                         if !is_reference_assignable(g, &tname, b) {
@@ -2843,6 +2848,11 @@ fn walk_expr(
                     if !mt.type_param_bounds.is_empty() {
                         for (i, targ) in io.target_type.type_args.iter().enumerate() {
                             if let Some(bounds) = mt.type_param_bounds.get(i) {
+                                // Skip bound checking for wildcards in instanceof expressions
+                                // Wildcards in instanceof are allowed even if they don't satisfy bounds
+                                if let crate::ast::TypeArg::Wildcard(_) = targ {
+                                    continue;
+                                }
                                 if let Some(tname) = typearg_to_simple_name(targ) {
                                     for b in bounds {
                                         if !is_reference_assignable(g, &tname, b) {
