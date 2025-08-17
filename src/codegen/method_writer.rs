@@ -4,6 +4,7 @@
 
 use super::bytecode::*;
 use super::opcodes;
+use super::classpath;
 use super::opcode_generator::OpcodeGenerator;    
 use crate::ast::*;
 use crate::codegen::attribute::ExceptionTableEntry;
@@ -134,6 +135,18 @@ fn resolve_method_with_context(
                                 }
                             }
                         }
+                        
+                        // Method not found in this interface, check parent interfaces
+                        eprintln!("🔍 DEBUG: resolve_method_with_context: Method not found in interface {}, checking parent interfaces", interface.name);
+                        for parent in &interface.extends {
+                            eprintln!("🔍 DEBUG: resolve_method_with_context: Checking parent interface: {}", parent.name);
+                            let parent_internal = parent.name.replace(".", "/");
+                            // Recursively search in parent interface
+                            if let Some(resolved) = resolve_method_with_context(&parent_internal, name, expected_arity, current_class, all_types) {
+                                eprintln!("🔍 DEBUG: resolve_method_with_context: Found method in parent interface {}", parent.name);
+                                return Some(resolved);
+                            }
+                        }
                     }
                 }
                 crate::ast::TypeDecl::Class(class) => {
@@ -172,31 +185,68 @@ fn resolve_method_with_context(
         }
     }
     
-    // If not found in current class, fall back to rt.rs
+    // If not found in current class, fall back to rt.rs with complete inheritance chain resolution
+    resolve_method_in_inheritance_chain(owner_internal, name, expected_arity, current_class, all_types)
+}
+
+/// Resolve method in complete inheritance chain: self -> parent class -> interfaces -> recursive up
+fn resolve_method_in_inheritance_chain(
+    owner_internal: &str,
+    name: &str,
+    expected_arity: usize,
+    current_class: Option<&crate::ast::ClassDecl>,
+    all_types: Option<&[crate::ast::TypeDecl]>,
+) -> Option<ResolvedMethod> {
     use boot::{CLASSES, CLASSES_BY_NAME};
     
-    let mut cur = Some(owner_internal);
-    while let Some(o) = cur {
-        if let Some(&idx) = CLASSES_BY_NAME.get(o) {
-            let c = &CLASSES[idx];
-            if let Some(m) = c.methods.iter().find(|m| m.name == name && count_params(m.desc) == expected_arity) {
-                return Some(ResolvedMethod {
-                    owner_internal: c.internal.to_string(),
-                    name: m.name.to_string(),
-                    descriptor: m.desc.to_string(),
-                    is_static: m.flags & 0x0008 != 0, // ACC_STATIC
-                    is_interface: c.is_interface,
-                    is_ctor: m.name == "<init>",
-                    is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
-                    is_super_call: false,
-                    flags: m.flags,
-                });
-            }
-            cur = c.super_internal;
-        } else {
-            break;
+    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Starting search for {}#{} with arity {}", owner_internal, name, expected_arity);
+    
+    // Step 1: Check the target class itself
+    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Looking up '{}' in CLASSES_BY_NAME", owner_internal);
+    if let Some(&idx) = CLASSES_BY_NAME.get(owner_internal) {
+        let c = &CLASSES[idx];
+        eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Checking class {} (is_interface: {})", c.internal, c.is_interface);
+        
+        // Look for method in this class/interface
+        if let Some(m) = c.methods.iter().find(|m| m.name == name && count_params(m.desc) == expected_arity) {
+            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method {}#{} in {}", name, expected_arity, c.internal);
+            return Some(ResolvedMethod {
+                owner_internal: c.internal.to_string(),
+                name: m.name.to_string(),
+                descriptor: m.desc.to_string(),
+                is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                is_interface: c.is_interface,
+                is_ctor: m.name == "<init>",
+                is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                is_super_call: false,
+                flags: m.flags,
+            });
         }
+        
+        // Step 2: Check implemented interfaces (for both classes and interfaces)
+        eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Method not found in {}, checking {} interfaces", c.internal, c.interfaces.len());
+        for &interface_name in c.interfaces {
+            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Checking interface: {}", interface_name);
+            if let Some(resolved) = resolve_method_in_inheritance_chain(interface_name, name, expected_arity, current_class, all_types) {
+                eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method in interface {}", interface_name);
+                return Some(resolved);
+            }
+        }
+        
+        // Step 3: Check parent class (for both classes and interfaces)
+        // In Java, interfaces also inherit from Object, so we should check super_internal for interfaces too
+        if let Some(super_internal) = c.super_internal {
+            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Method not found in {}, checking parent class: {}", c.internal, super_internal);
+            if let Some(resolved) = resolve_method_in_inheritance_chain(super_internal, name, expected_arity, current_class, all_types) {
+                eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method in parent class {}", super_internal);
+                return Some(resolved);
+            }
+        }
+    } else {
+        eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Class {} not found in rt.rs", owner_internal);
     }
+    
+    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Method {}#{} not found in inheritance chain starting from {}", name, expected_arity, owner_internal);
     None
 }
 
@@ -571,6 +621,11 @@ impl MethodWriter {
         // Check if the type exists in current package
         let current_package_name = format!("{}/{}", current_package, simple_name);
         
+        // First try to resolve using classpath
+        if let Some(internal_name) = classpath::resolve_class_name(simple_name) {
+            return internal_name.to_string();
+        }
+        
         // For now, assume types like HashMapCell are in java.util
         match simple_name {
             "HashMapCell" | "HashMap" | "List" | "ArrayList" | "Iterator" | "Collection" => {
@@ -633,9 +688,11 @@ impl MethodWriter {
     
     /// Count argument slots in a method descriptor
     fn descriptor_arg_slot_count(&self, descriptor: &str) -> u8 {
+        // eprintln!("🔍 DEBUG: descriptor_arg_slot_count: descriptor={}", descriptor);
         if let Some(args_start) = descriptor.find('(') {
             if let Some(args_end) = descriptor.find(')') {
                 let args_part = &descriptor[args_start + 1..args_end];
+                // eprintln!("🔍 DEBUG: descriptor_arg_slot_count: args_part={}", args_part);
                 let mut count = 0;
                 let mut i = 0;
                 while i < args_part.len() {
@@ -682,6 +739,7 @@ impl MethodWriter {
                         }
                     }
                 }
+                // eprintln!("🔍 DEBUG: descriptor_arg_slot_count: final count={}", count);
                 count
             } else {
                 0
@@ -2127,9 +2185,12 @@ impl MethodWriter {
     
     /// Generate bytecode for a statement
     fn generate_statement(&mut self, stmt: &Stmt) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_statement: Starting, stack_depth={}", self.bytecode_builder.stack_depth());
         match stmt {
             Stmt::Expression(expr_stmt) => {
+                eprintln!("🔍 DEBUG: generate_statement: Expression statement, about to generate expression");
                 self.generate_expression(&expr_stmt.expr)?;
+                eprintln!("🔍 DEBUG: generate_statement: Expression generated, stack_depth={}", self.bytecode_builder.stack_depth());
                 // Pop only if expression likely leaves a value on stack and is not a method call (which may be void).
                 // Avoid popping after method calls; known void-returning calls (e.g., Stream.write2/4) shouldn't be popped.
                 let should_pop = match &expr_stmt.expr {
@@ -2137,8 +2198,11 @@ impl MethodWriter {
                     Expr::Assignment(_) => true, // Assignment now leaves value on stack for chained assignments
                     Expr::Identifier(_) | Expr::Literal(_) | Expr::Binary(_) | Expr::Unary(_) | Expr::ArrayAccess(_) | Expr::FieldAccess(_) | Expr::Cast(_) | Expr::Conditional(_) | Expr::New(_) | Expr::Parenthesized(_) | Expr::InstanceOf(_) | Expr::ArrayInitializer(_) => true,
                 };
+                eprintln!("🔍 DEBUG: generate_statement: should_pop={}, stack_depth={}", should_pop, self.bytecode_builder.stack_depth());
                 if should_pop { 
+                    eprintln!("🔍 DEBUG: generate_statement: About to pop, stack_depth={}", self.bytecode_builder.stack_depth());
                     Self::map_stack(self.bytecode_builder.pop())?;
+                    eprintln!("🔍 DEBUG: generate_statement: After pop, stack_depth={}", self.bytecode_builder.stack_depth());
                 }
                 
                 // Validate statement structure (disabled for performance)
@@ -2423,6 +2487,24 @@ impl MethodWriter {
     
     /// Generate bytecode for an expression
     fn generate_expression(&mut self, expr: &Expr) -> Result<()> {
+        let expr_name = match expr {
+            Expr::Literal(_) => "Literal",
+            Expr::Identifier(_) => "Identifier", 
+            Expr::Binary(_) => "Binary",
+            Expr::Unary(_) => "Unary",
+            Expr::Assignment(_) => "Assignment",
+            Expr::MethodCall(_) => "MethodCall",
+            Expr::FieldAccess(_) => "FieldAccess",
+            Expr::ArrayAccess(_) => "ArrayAccess",
+            Expr::Cast(_) => "Cast",
+            Expr::InstanceOf(_) => "InstanceOf",
+            Expr::Conditional(_) => "Conditional",
+            Expr::New(_) => "New",
+            Expr::Parenthesized(_) => "Parenthesized",
+            Expr::ArrayInitializer(_) => "ArrayInitializer",
+        };
+        eprintln!("🔍 DEBUG: generate_expression: Starting {}, stack_depth={}", 
+                 expr_name, self.bytecode_builder.stack_depth());
         match expr {
             Expr::Literal(lit_expr) => {
                 self.generate_literal_expression(lit_expr)?;
@@ -2467,18 +2549,25 @@ impl MethodWriter {
                 // Only used in annotations; no code emission
             }
         }
+        eprintln!("🔍 DEBUG: generate_expression: Completed {}, stack_depth={}", expr_name, self.bytecode_builder.stack_depth());
         Ok(())
     }
     
     /// Generate bytecode for a binary expression
     fn generate_binary_expression(&mut self, binary: &BinaryExpr) -> Result<()> {
+        eprintln!("🔍 DEBUG: Binary expression: Starting, operator={:?}, stack_depth={}", binary.operator, self.bytecode_builder.stack_depth());
         // Generate left operand
+        eprintln!("🔍 DEBUG: Binary expression: Generating left operand");
         self.generate_expression(&binary.left)?;
+        eprintln!("🔍 DEBUG: Binary expression: After left operand, stack_depth={}", self.bytecode_builder.stack_depth());
         
         // Generate right operand
+        eprintln!("🔍 DEBUG: Binary expression: Generating right operand");
         self.generate_expression(&binary.right)?;
+        eprintln!("🔍 DEBUG: Binary expression: After right operand, stack_depth={}", self.bytecode_builder.stack_depth());
         
         // Generate operation
+        eprintln!("🔍 DEBUG: Binary expression: About to apply operator {:?}", binary.operator);
         match binary.operator {
             BinaryOp::Add => { Self::map_stack(self.bytecode_builder.iadd())?; },
             BinaryOp::Sub => { Self::map_stack(self.bytecode_builder.isub())?; },
@@ -2486,13 +2575,18 @@ impl MethodWriter {
             BinaryOp::Div => { Self::map_stack(self.bytecode_builder.idiv())?; },
             BinaryOp::Mod => { Self::map_stack(self.bytecode_builder.irem())?; },
             BinaryOp::Lt => {
+                eprintln!("🔍 DEBUG: Binary expression: Executing Lt branch");
                 // Comparison operators should generate boolean result (0 or 1)
                 // Use simple comparison: if left < right, push 1, else push 0
                 // For now, use a simple approach: push 0 (false)
                 // TODO: Implement proper comparison result generation
+                eprintln!("🔍 DEBUG: Binary expression: About to pop right operand, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop right operand
+                eprintln!("🔍 DEBUG: Binary expression: About to pop left operand, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop left operand
+                eprintln!("🔍 DEBUG: Binary expression: About to push iconst_0, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.iconst_0())?; // Push false for now
+                eprintln!("🔍 DEBUG: Binary expression: Lt branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
             }
             BinaryOp::Le => {
                 // For now, use a simple approach: push 0 (false)
@@ -2523,21 +2617,30 @@ impl MethodWriter {
                 Self::map_stack(self.bytecode_builder.iconst_0())?; // Push false for now
             }
             BinaryOp::Ne => {
+                eprintln!("🔍 DEBUG: Binary expression: Executing Ne branch");
                 // For now, use a simple approach: push 0 (false)
                 // TODO: Implement proper comparison result generation
+                eprintln!("🔍 DEBUG: Binary expression: About to pop right operand, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop right operand
+                eprintln!("🔍 DEBUG: Binary expression: About to pop left operand, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop left operand
+                eprintln!("🔍 DEBUG: Binary expression: About to push iconst_0, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.iconst_0())?; // Push false for now
+                eprintln!("🔍 DEBUG: Binary expression: Ne branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
             }
             BinaryOp::And => { 
+                eprintln!("🔍 DEBUG: Binary expression: Executing And branch, stack_depth={}", self.bytecode_builder.stack_depth());
                 self.emit_opcode(self.opcode_generator.iand()); 
                 // iand: pops 2 ints, pushes 1 int
                 Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                eprintln!("🔍 DEBUG: Binary expression: And branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
             },
             BinaryOp::Or => { 
+                eprintln!("🔍 DEBUG: Binary expression: Executing Or branch, stack_depth={}", self.bytecode_builder.stack_depth());
                 self.emit_opcode(self.opcode_generator.ior()); 
                 // ior: pops 2 ints, pushes 1 int
                 Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                eprintln!("🔍 DEBUG: Binary expression: Or branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
             },
             BinaryOp::Xor => { 
                 self.emit_opcode(self.opcode_generator.ixor()); 
@@ -2903,13 +3006,21 @@ impl MethodWriter {
         let owner_class = if let Some(target) = &call.target {
             // Resolve the type of the target expression
             let target_type = self.resolve_expression_type(target);
+            eprintln!("🔍 DEBUG: generate_method_call: target_type = '{}'", target_type);
             // Use the new resolve_class_name function for proper type resolution
-            self.resolve_class_name(&target_type)
+            let resolved = self.resolve_class_name(&target_type);
+            eprintln!("🔍 DEBUG: generate_method_call: resolved owner_class = '{}'", resolved);
+            resolved
         } else {
             // No target means calling on 'this' - use current class name
-            self.current_class_name.as_ref()
+            let current = self.current_class_name.as_ref()
                 .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
-                .clone()
+                .clone();
+            eprintln!("🔍 DEBUG: generate_method_call: current class name = '{}'", current);
+            // Resolve the current class name to get the full internal name
+            let resolved = self.resolve_class_name(&current);
+            eprintln!("🔍 DEBUG: generate_method_call: resolved current class = '{}'", resolved);
+            resolved
         };
         
         // Try to resolve the method using rt.rs
@@ -3014,29 +3125,49 @@ impl MethodWriter {
                                         for _ in 0..field.type_ref.array_dims {
                                             type_name.push_str("[]");
                                         }
+                                        eprintln!("🔍 DEBUG: resolve_expression_type: Found array field {}={}", ident.name, type_name);
                                         return type_name;
                                     } else {
                                         // Regular type
+                                        eprintln!("🔍 DEBUG: resolve_expression_type: Found regular field {}={}", ident.name, field.type_ref.name);
                                         return field.type_ref.name.clone();
                                     }
                                 }
                             }
                         }
+                    } else {
+                        eprintln!("🔍 DEBUG: resolve_expression_type: self.current_class is None for identifier {}", ident.name);
                     }
                     
-                    // Fallback: assume it's a field access, use field descriptor
-                    let class_name = self.current_class_name.as_ref()
-                        .unwrap_or(&"java/lang/String".to_string()) // Fallback to String instead of Object
-                        .clone();
-                    // Get field descriptor and convert to class name
-                    let descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
-                    // Convert JVM descriptor to class name
-                    if descriptor.starts_with('L') && descriptor.ends_with(';') {
-                        // Object type: LClassName; -> ClassName
-                        descriptor[1..descriptor.len()-1].replace('/', ".")
+                    // Check if this is a known package name or class name
+                    // First check if this is a known class name using classpath
+                    if let Some(internal_name) = classpath::resolve_class_name(&ident.name) {
+                        // This is a class reference, return the internal name with dots
+                        internal_name.replace("/", ".")
                     } else {
-                        // Primitive or array type, return as is
-                        descriptor
+                        match ident.name.as_str() {
+                            "java" => {
+                                // This is likely the start of a package name like java.base.Data
+                                // Return a special marker to indicate this is a package reference
+                                "java".to_string()
+                            }
+                            _ => {
+                                // Fallback: assume it's a field access, use field descriptor
+                                let class_name = self.current_class_name.as_ref()
+                                    .unwrap_or(&"java/lang/String".to_string()) // Fallback to String instead of Object
+                                    .clone();
+                                // Get field descriptor and convert to class name
+                                let descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
+                                // Convert JVM descriptor to class name
+                                if descriptor.starts_with('L') && descriptor.ends_with(';') {
+                                    // Object type: LClassName; -> ClassName
+                                    descriptor[1..descriptor.len()-1].replace('/', ".")
+                                } else {
+                                    // Primitive or array type, return as is
+                                    descriptor
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3074,7 +3205,43 @@ impl MethodWriter {
                         "pool" => "java/util/List".to_string(),
                         "fields" => "java/base/FieldData[]".to_string(),
                         "methods" => "java/base/MethodData[]".to_string(),
-                        _ => receiver_type,
+                        _ => {
+                            // Check if this is a package name chain like java.base
+                            if receiver_type == "java" && field_access.name == "base" {
+                                "java.base".to_string()
+                            } else if receiver_type == "java.base" && field_access.name == "Data" {
+                                "java.base.Data".to_string()
+                            } else {
+                                // Try to resolve the field type from the receiver class
+                                let receiver_internal = receiver_type.replace(".", "/");
+                                let field_descriptor = self.resolve_field_descriptor(&receiver_internal, &field_access.name);
+                                eprintln!("🔍 DEBUG: resolve_expression_type FieldAccess: receiver_type={}, field_name={}, field_descriptor={}", 
+                                         receiver_type, field_access.name, field_descriptor);
+                                // Convert descriptor back to type name
+                                if field_descriptor.starts_with('[') {
+                                    // Array type: convert JVM descriptor to Java type name
+                                    let result = self.descriptor_to_class_name(&field_descriptor);
+                                    eprintln!("🔍 DEBUG: resolve_expression_type FieldAccess: Array descriptor {} -> {}", field_descriptor, result);
+                                    result
+                                } else if field_descriptor.starts_with('L') && field_descriptor.ends_with(';') {
+                                    // Object type: LClassName; -> ClassName
+                                    field_descriptor[1..field_descriptor.len()-1].replace('/', ".")
+                                } else {
+                                    // Primitive type or fallback
+                                    match field_descriptor.as_str() {
+                                        "I" => "int".to_string(),
+                                        "J" => "long".to_string(),
+                                        "F" => "float".to_string(),
+                                        "D" => "double".to_string(),
+                                        "Z" => "boolean".to_string(),
+                                        "B" => "byte".to_string(),
+                                        "C" => "char".to_string(),
+                                        "S" => "short".to_string(),
+                                        _ => receiver_type, // Fallback to receiver type
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     // Assume 'this' for instance fields
@@ -3334,20 +3501,29 @@ impl MethodWriter {
 
     /// Generate bytecode for field access
     fn generate_field_access(&mut self, field_access: &FieldAccessExpr) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_field_access: Starting field_name={}, has_receiver={}", 
+                 field_access.name, field_access.target.is_some());
+        eprintln!("🔍 DEBUG: generate_field_access: Stack depth before = {}", self.bytecode_builder.stack_depth());
+        
         // Generate receiver expression if present
         if let Some(receiver) = &field_access.target {
+            eprintln!("🔍 DEBUG: generate_field_access: Generating receiver expression: {:?}", receiver);
             self.generate_expression(receiver)?;
+            eprintln!("🔍 DEBUG: generate_field_access: Stack depth after receiver = {}", self.bytecode_builder.stack_depth());
             // Special-case: array.length → arraylength
             let recv_ty = self.resolve_expression_type(receiver);
-            // eprintln!("🔍 DEBUG: generate_field_access: field_name={}, recv_ty={}, is_array_type={}", 
-            //           field_access.name, recv_ty, is_array_type(&recv_ty));
+            eprintln!("🔍 DEBUG: generate_field_access: field_name={}, recv_ty={}, is_array_type={}", 
+                      field_access.name, recv_ty, is_array_type(&recv_ty));
             if field_access.name == "length" && is_array_type(&recv_ty) {
+                eprintln!("🔍 DEBUG: generate_field_access: Using arraylength instruction for array.length");
                 Self::map_stack(self.bytecode_builder.arraylength())?;
                 return Ok(());
             }
         } else {
+            eprintln!("🔍 DEBUG: generate_field_access: No receiver, loading 'this'");
             // Assume 'this' for instance fields
             Self::map_stack(self.bytecode_builder.aload(0))?;
+            eprintln!("🔍 DEBUG: generate_field_access: Stack depth after loading 'this' = {}", self.bytecode_builder.stack_depth());
         }
         
         // Generate field access
@@ -3453,21 +3629,46 @@ impl MethodWriter {
         // Handle compound assignments
         if assign.operator != AssignmentOp::Assign {
             // For compound assignments, we need to load the target first
-            if let Expr::Identifier(ident) = &*assign.target {
-                if let Some(local_var) = self.find_local_variable(&ident.name) {
-                    // Extract local variable info to avoid borrow checker issues
-                    let index = local_var.index;
-                    let var_type = local_var.var_type.clone();
-                    
-                    // Load current value
-                    self.load_local_variable(index, &var_type)?;
-                    // Generate right operand
+            match &*assign.target {
+                Expr::Identifier(ident) => {
+                    if let Some(local_var) = self.find_local_variable(&ident.name) {
+                        // Extract local variable info to avoid borrow checker issues
+                        let index = local_var.index;
+                        let var_type = local_var.var_type.clone();
+                        
+                        // Load current value
+                        self.load_local_variable(index, &var_type)?;
+                        // Generate right operand
+                        self.generate_expression(&assign.value)?;
+                        // Apply operation
+                        self.generate_compound_assignment(assign.operator.clone())?;
+                        // Store result
+                        self.store_local_variable(index, &var_type)?;
+                        return Ok(());
+                    }
+                }
+                Expr::ArrayAccess(array_access) => {
+                    // Handle compound assignment to array element: arr[idx] op= value
+                    // Load array and index
+                    self.generate_expression(&array_access.array)?;
+                    self.generate_expression(&array_access.index)?;
+                    // Duplicate array and index for later store: arr, idx -> arr, idx, arr, idx
+                    Self::map_stack(self.bytecode_builder.dup2())?;
+                    // Load current array element: arr, idx, arr, idx -> arr, idx, current_value
+                    Self::map_stack(self.bytecode_builder.iaload())?;
+                    // Generate right operand: arr, idx, current_value -> arr, idx, current_value, rhs_value
                     self.generate_expression(&assign.value)?;
-                    // Apply operation
+                    // Apply operation: arr, idx, current_value, rhs_value -> arr, idx, result
                     self.generate_compound_assignment(assign.operator.clone())?;
-                    // Store result
-                    self.store_local_variable(index, &var_type)?;
+                    // Duplicate result for return value: arr, idx, result -> arr, idx, result, result
+                    Self::map_stack(self.bytecode_builder.dup_x2())?;
+                    // Store result: result, arr, idx, result -> result (empty)
+                    Self::map_stack(self.bytecode_builder.iastore())?;
+                    // Result value remains on stack for chained assignments
                     return Ok(());
+                }
+                _ => {
+                    // Other compound assignment targets not supported yet
                 }
             }
         }
@@ -3539,13 +3740,24 @@ impl MethodWriter {
             }
             Expr::ArrayAccess(array_access) => {
                 // arr[idx] = value
+                eprintln!("🔍 DEBUG: Array assignment: Starting, stack_depth={}", self.bytecode_builder.stack_depth());
                 // Evaluate array and index first
                 self.generate_expression(&array_access.array)?;
+                eprintln!("🔍 DEBUG: Array assignment: After array, stack_depth={}", self.bytecode_builder.stack_depth());
                 self.generate_expression(&array_access.index)?;
+                eprintln!("🔍 DEBUG: Array assignment: After index, stack_depth={}", self.bytecode_builder.stack_depth());
                 // Then evaluate RHS value
                 self.generate_expression(&assign.value)?;
-                // Choose store opcode; use int-array store as a reasonable default
+                eprintln!("🔍 DEBUG: Array assignment: After value, stack_depth={}", self.bytecode_builder.stack_depth());
+                // For chained assignments, duplicate the value before iastore
+                // Stack: arrayref, index, value → arrayref, index, value, value
+                eprintln!("🔍 DEBUG: Array assignment: About to call dup_x2");
+                Self::map_stack(self.bytecode_builder.dup_x2())?;
+                eprintln!("🔍 DEBUG: Array assignment: After dup_x2, stack_depth={}", self.bytecode_builder.stack_depth());
+                // Stack: value, arrayref, index, value → iastore consumes arrayref, index and value, leaving value
                 Self::map_stack(self.bytecode_builder.iastore())?;
+                eprintln!("🔍 DEBUG: Array assignment: After iastore, stack_depth={}", self.bytecode_builder.stack_depth());
+                // Value remains on stack for chained assignments
             }
             other => {
                 return Err(Error::codegen_error(format!("Unsupported assignment target: {:?}", other)));
@@ -3612,15 +3824,66 @@ impl MethodWriter {
     
     /// Generate bytecode for an array access expression
     fn generate_array_access(&mut self, array_access: &ArrayAccessExpr) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_array_access: Starting, stack_depth={}", self.bytecode_builder.stack_depth());
         // Generate array expression
         self.generate_expression(&array_access.array)?;
+        eprintln!("🔍 DEBUG: generate_array_access: After array, stack_depth={}", self.bytecode_builder.stack_depth());
         
         // Generate index expression
         self.generate_expression(&array_access.index)?;
+        eprintln!("🔍 DEBUG: generate_array_access: After index, stack_depth={}", self.bytecode_builder.stack_depth());
         
-        // Generate array access
-        // Assume int array for now
-        Self::map_stack(self.bytecode_builder.iaload())?;
+        // Generate array access - determine array type
+        let array_type = self.resolve_expression_type(&array_access.array);
+        eprintln!("🔍 DEBUG: generate_array_access: Array type resolved to: {}", array_type);
+        
+        if array_type.ends_with("[]") {
+            let element_type = &array_type[..array_type.len()-2];
+            eprintln!("🔍 DEBUG: generate_array_access: Element type: {}", element_type);
+            match element_type {
+                "long" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call laload, stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.laload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After laload, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                "double" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call daload, stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.daload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After daload, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                "float" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call faload, stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.faload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After faload, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                "boolean" | "byte" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call baload, stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.baload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After baload, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                "char" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call caload, stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.caload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After caload, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                "short" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call saload, stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.saload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After saload, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                _ => {
+                    // Reference type or int (default)
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call iaload (default), stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.iaload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After iaload (default), stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+            }
+        } else {
+            // Fallback to int array
+            eprintln!("🔍 DEBUG: generate_array_access: About to call iaload (fallback), stack_depth={}", self.bytecode_builder.stack_depth());
+            Self::map_stack(self.bytecode_builder.iaload())?;
+            eprintln!("🔍 DEBUG: generate_array_access: After iaload (fallback), stack_depth={}", self.bytecode_builder.stack_depth());
+        }
         
         Ok(())
     }
@@ -4767,13 +5030,17 @@ impl MethodWriter {
         // 2) Check current class being compiled for local fields
         if let Some(class) = &self.current_class {
             let current_class_internal = class.name.replace(".", "/");
+            // eprintln!("🔍 DEBUG: resolve_field_descriptor: current_class_internal={}, class_internal={}", current_class_internal, class_internal);
             if class_internal == current_class_internal {
                 // Look for the field in the current class
                 for member in &class.body {
                     if let crate::ast::ClassMember::Field(field) = member {
+                        // eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {} in current class", field.name);
                         if field.name == field_name {
                             // Generate descriptor from field type
-                            return type_ref_to_descriptor(&field.type_ref);
+                            let descriptor = crate::codegen::descriptor::type_to_descriptor(&field.type_ref);
+                            eprintln!("🔍 DEBUG: resolve_field_descriptor: Field {}#{} -> descriptor={}", class_internal, field_name, descriptor);
+                            return descriptor;
                         }
                     }
                 }
@@ -4792,7 +5059,7 @@ impl MethodWriter {
                                 if let crate::ast::ClassMember::Field(field) = member {
                                     if field.name == field_name {
                                         // Generate descriptor from field type
-                                        return type_ref_to_descriptor(&field.type_ref);
+                                        return crate::codegen::descriptor::type_to_descriptor(&field.type_ref);
                                     }
                                 }
                             }
@@ -4806,7 +5073,7 @@ impl MethodWriter {
                                 if let crate::ast::InterfaceMember::Field(field) = member {
                                     if field.name == field_name {
                                         // Generate descriptor from field type
-                                        return type_ref_to_descriptor(&field.type_ref);
+                                        return crate::codegen::descriptor::type_to_descriptor(&field.type_ref);
                                     }
                                 }
                             }

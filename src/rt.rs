@@ -2054,10 +2054,10 @@ pub static FIELDS_JAVA_LANG_MAPPING: &[FieldMeta] = &[
 
 pub static METHODS_JAVA_LANG_MATH: &[MethodMeta] = &[
     MethodMeta { owner_internal: "java/lang/Math", name: "<init>", desc: "()V", flags: 2 },
-    MethodMeta { owner_internal: "java/lang/Math", name: "max", desc: "(JJ)J", flags: 9 },
-    MethodMeta { owner_internal: "java/lang/Math", name: "min", desc: "(JJ)J", flags: 9 },
     MethodMeta { owner_internal: "java/lang/Math", name: "max", desc: "(II)I", flags: 9 },
     MethodMeta { owner_internal: "java/lang/Math", name: "min", desc: "(II)I", flags: 9 },
+    MethodMeta { owner_internal: "java/lang/Math", name: "max", desc: "(JJ)J", flags: 9 },
+    MethodMeta { owner_internal: "java/lang/Math", name: "min", desc: "(JJ)J", flags: 9 },
     MethodMeta { owner_internal: "java/lang/Math", name: "abs", desc: "(I)I", flags: 9 },
     MethodMeta { owner_internal: "java/lang/Math", name: "abs", desc: "(J)J", flags: 9 },
     MethodMeta { owner_internal: "java/lang/Math", name: "randomInt", desc: "()I", flags: 9 },

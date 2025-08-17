@@ -92,6 +92,13 @@ impl StackState {
     /// Update stack state after an instruction
     pub fn update(&mut self, dec: u16, inc: u16) -> Result<(), StackError> {
         if self.depth < dec {
+            eprintln!("🔍 DEBUG: Stack underflow detected! current_depth={}, required={}, dec={}, inc={}", 
+                     self.depth, dec, dec, inc);
+            eprintln!("🔍 DEBUG: Stack trace:");
+            // Print a simple stack trace to help identify the caller
+            eprintln!("🔍 DEBUG: This stack underflow was caused by an operation that tried to pop {} values from a stack with only {} values", dec, self.depth);
+            // let backtrace = std::backtrace::Backtrace::capture();
+            // eprintln!("{}", backtrace);
             return Err(StackError::Underflow {
                 current: self.depth,
                 required: dec,
@@ -362,6 +369,9 @@ impl BytecodeBuilder {
     pub fn adjust_invoke_stack(&mut self, is_static: bool, arg_slots: u16, ret_slots: u16) -> Result<(), StackError> {
         // Pop receiver for non-static
         let recv = if is_static { 0 } else { 1 };
+        eprintln!("🔍 DEBUG: adjust_invoke_stack: is_static={}, arg_slots={}, ret_slots={}, recv={}, total_pop={}", 
+                 is_static, arg_slots, ret_slots, recv, arg_slots + recv);
+        eprintln!("🔍 DEBUG: adjust_invoke_stack: current_stack_depth={}", self.stack_state.depth);
         // Pop arguments and receiver
         self.stack_state.pop(arg_slots + recv)?;
         // Push return value if any
@@ -607,6 +617,7 @@ impl BytecodeBuilder {
     }
 
     pub fn pop2(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: pop2: About to pop 2 values, current stack_depth={}", self.stack_state.depth());
         self.stack_state.pop(2)?;
         self.emit_opcode(self.opcode_generator.pop2());
         Ok(())
@@ -620,6 +631,7 @@ impl BytecodeBuilder {
     }
 
     pub fn dup_x1(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: dup_x1: About to pop 2 values, current stack_depth={}", self.stack_state.depth());
         self.stack_state.pop(2)?;
         self.stack_state.push(3)?;
         self.emit_opcode(self.opcode_generator.dup_x1());
@@ -634,6 +646,7 @@ impl BytecodeBuilder {
     }
 
     pub fn dup2(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: dup2: About to pop 2 values, current stack_depth={}", self.stack_state.depth());
         self.stack_state.pop(2)?;
         self.stack_state.push(4)?;
         self.emit_opcode(self.opcode_generator.dup2());
@@ -655,6 +668,7 @@ impl BytecodeBuilder {
     }
 
     pub fn swap(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: swap: About to pop 2 values, current stack_depth={}", self.stack_state.depth());
         self.stack_state.pop(2)?;
         self.stack_state.push(2)?;
         self.emit_opcode(self.opcode_generator.swap());
@@ -663,6 +677,7 @@ impl BytecodeBuilder {
 
     // Arithmetic operations - Use OpcodeGenerator
     pub fn iadd(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: iadd: About to pop 2 values, current stack_depth={}", self.stack_state.depth());
         self.stack_state.pop(2)?;
         self.stack_state.push(1)?;
         self.emit_opcode(self.opcode_generator.iadd());
@@ -691,6 +706,7 @@ impl BytecodeBuilder {
     }
 
     pub fn isub(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: isub: About to pop 2 values, current stack_depth={}", self.stack_state.depth());
         self.stack_state.pop(2)?;
         self.stack_state.push(1)?;
         self.emit_opcode(self.opcode_generator.isub());
@@ -1160,8 +1176,11 @@ impl BytecodeBuilder {
     }
 
     pub fn arraylength(&mut self) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: arraylength: Before - stack_depth={}", self.stack_state.depth);
         self.stack_state.pop(1)?; // Pop array reference
+        eprintln!("🔍 DEBUG: arraylength: After pop - stack_depth={}", self.stack_state.depth);
         self.stack_state.push(1)?; // Push array length
+        eprintln!("🔍 DEBUG: arraylength: After push - stack_depth={}", self.stack_state.depth);
         self.emit_opcode(self.opcode_generator.arraylength());
         Ok(())
     }
@@ -1272,8 +1291,11 @@ impl BytecodeBuilder {
 
     // Field access operations - Use OpcodeGenerator
     pub fn getfield(&mut self, index: u16) -> Result<(), StackError> {
+        eprintln!("🔍 DEBUG: getfield: Before - stack_depth={}", self.stack_state.depth);
         self.stack_state.pop(1)?; // Pop object reference
+        eprintln!("🔍 DEBUG: getfield: After pop - stack_depth={}", self.stack_state.depth);
         self.stack_state.push(1)?; // Push field value (size depends on field type)
+        eprintln!("🔍 DEBUG: getfield: After push - stack_depth={}", self.stack_state.depth);
         self.emit_opcode(self.opcode_generator.getfield(index));
         Ok(())
     }
