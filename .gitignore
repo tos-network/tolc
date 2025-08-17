@@ -1,6 +1,7 @@
 ## Rust build artifacts
 target/
 **/target/
+__pycache__/
 debug/
 **/debug/
 release/
