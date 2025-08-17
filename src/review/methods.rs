@@ -19,10 +19,28 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
             // Check duplicate annotations on the method and its parameters
             super::annotation::review_method_annotations(m)?;
             super::annotation::review_method_annotations(m)?;
+            // Build method signature with generic type erasure
+            let method_sig: Vec<String> = m.parameters.iter().map(|p| {
+                let type_name = &p.type_ref.name;
+                if type_name.len() == 1 && type_name.chars().next().unwrap().is_uppercase() {
+                    // Single uppercase letter is likely a generic type parameter, erase to Object
+                    "Object".to_string()
+                } else {
+                    type_name.clone()
+                }
+            }).collect();
             declared_method_sigs
                 .entry(m.name.clone())
                 .or_default()
-                .insert(m.parameters.iter().map(|p| p.type_ref.name.clone()).collect());
+                .insert(method_sig.clone());
+            // Also insert the original signature for exact matching
+            let original_sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
+            if original_sig != method_sig {
+                declared_method_sigs
+                    .entry(m.name.clone())
+                    .or_default()
+                    .insert(original_sig);
+            }
             // visibility exclusivity: public/protected/private
             ensure_visibility_exclusive(&m.modifiers, &m.name)?;
             // basic illegal combos akin to Check.java subset

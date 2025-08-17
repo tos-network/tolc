@@ -835,7 +835,8 @@ impl MethodWriter {
         let needs_return = if let Some(body) = &method.body {
             !self.all_paths_have_return(&body.statements)
         } else {
-            true
+            // Abstract methods have no body and don't need return statements
+            false
         };
         println!("🔍 DEBUG: generate_method_body: needs_return = {}", needs_return);
         
@@ -3681,8 +3682,11 @@ impl MethodWriter {
                     self.generate_expression(&assign.value)?;
                     // Apply operation
                     self.generate_compound_assignment(assign.operator.clone())?;
+                    // Duplicate the result for chained assignments
+                    Self::map_stack(self.bytecode_builder.dup())?;
                     // Store result
                     self.store_local_variable(index, &var_type)?;
+                    // Value remains on stack for chained assignments
                     return Ok(());
                     }
                 }
