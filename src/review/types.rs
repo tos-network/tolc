@@ -156,7 +156,8 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         let sig: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                         mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
                         let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
-                        mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                        // For method overloads, if any overload is static, mark the method as having static variants
+                        mt.methods_static.entry(m.name.clone()).and_modify(|existing| *existing = *existing || is_static).or_insert(is_static);
                         // Map generic type-variable throws to erased upper bounds (best-effort)
                         let throws: Vec<String> = m.throws.iter().map(|t| {
                             let tn = &t.name;
@@ -281,7 +282,8 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                                     let sig: Vec<String> = m2.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                                     nmt.methods_signatures.entry(m2.name.clone()).or_default().push(sig);
                                     let is_static = m2.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
-                                    nmt.methods_static.entry(m2.name.clone()).or_insert(is_static);
+                                    // For method overloads, if any overload is static, mark the method as having static variants
+                                    nmt.methods_static.entry(m2.name.clone()).and_modify(|existing| *existing = *existing || is_static).or_insert(is_static);
                                 }
                                 ClassMember::Constructor(cons) => {
                                     let arity = cons.parameters.len();
@@ -344,7 +346,8 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                     let sig_full: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                     mt.methods_signatures.entry(m.name.clone()).or_default().push(sig_full);
                     let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
-                    mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                    // For method overloads, if any overload is static, mark the method as having static variants
+                    mt.methods_static.entry(m.name.clone()).and_modify(|existing| *existing = *existing || is_static).or_insert(is_static);
                     let sig: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                     // Map generic type-variable throws to erased upper bounds using method or interface bounds
                     let throws_vec: Vec<String> = m.throws.iter().map(|t| {
@@ -459,7 +462,8 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                                 let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
                                 mt.methods_signatures.entry(m.name.clone()).or_default().push(sig);
                                 let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
-                                mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                                // For method overloads, if any overload is static, mark the method as having static variants
+                                mt.methods_static.entry(m.name.clone()).and_modify(|existing| *existing = *existing || is_static).or_insert(is_static);
                                 // Map generic type-variable throws to erased upper bounds (best-effort),
                                 // mirroring the logic used in build_global_member_index
                                 let throws: Vec<String> = m.throws.iter().map(|t| {
@@ -583,7 +587,8 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                             let sig_full: Vec<String> = m.parameters.iter().map(|p| type_ref_signature_name(&p.type_ref)).collect();
                             mt.methods_signatures.entry(m.name.clone()).or_default().push(sig_full);
                             let is_static = m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static));
-                            mt.methods_static.entry(m.name.clone()).or_insert(is_static);
+                            // For method overloads, if any overload is static, mark the method as having static variants
+                            mt.methods_static.entry(m.name.clone()).and_modify(|existing| *existing = *existing || is_static).or_insert(is_static);
                             let sig: Vec<String> = m.parameters.iter().map(|p| p.type_ref.name.clone()).collect();
                             let throws_vec: Vec<String> = m.throws.iter().map(|t| t.name.clone()).collect();
                             let meta = MethodMeta {
@@ -738,8 +743,31 @@ pub(crate) fn resolve_type_in_index<'a>(global: &'a GlobalMemberIndex, name: &st
 pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
     use std::collections::HashSet;
     let global_index = if let Ok(cp) = std::env::var("TOLC_CLASSPATH") {
-        // Use cached classpath-wide index for performance
-        get_or_build_classpath_index(ast, &cp)
+        // Use cached classpath-wide index for performance, but update package info for current AST
+        let cached_index = get_or_build_classpath_index(ast, &cp);
+        let mut index = (*cached_index).clone();
+        // Override package and imports with current AST's information
+        index.package = ast.package_decl.as_ref().map(|p| p.name.clone());
+        index.imports.clear();
+        index.wildcard_imports.clear();
+        index.static_explicit.clear();
+        index.static_wildcard.clear();
+        for imp in &ast.imports {
+            if imp.is_static {
+                if imp.is_wildcard {
+                    index.static_wildcard.push(imp.name.clone());
+                } else if let Some(dot) = imp.name.rfind('.') {
+                    let type_name = imp.name[..dot].to_string();
+                    let member = imp.name[dot + 1..].to_string();
+                    index.static_explicit.insert(member, type_name);
+                }
+            } else if imp.is_wildcard {
+                index.wildcard_imports.push(imp.name.clone());
+            } else {
+                index.imports.push(imp.name.clone());
+            }
+        }
+        Arc::new(index)
     } else {
         Arc::new(build_global_member_index(ast))
     };

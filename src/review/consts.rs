@@ -3,7 +3,6 @@
 pub use crate::consts::{
     UNCHECKED_BASE_EXCEPTIONS,
     UNCHECKED_COMMON_SUBCLASSES,
-    CHECKED_EXCEPTIONS,
 };
 
 

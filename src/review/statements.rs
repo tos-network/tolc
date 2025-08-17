@@ -995,6 +995,8 @@ pub(crate) fn review_body_checked_exceptions(
                             // Compare declaring type's package vs current CU package
                             let decl_pkg = crate::review::types::resolve_type_in_index(global, &decl).and_then(|m| m.package_name.clone());
                             let same_package = decl_pkg.as_deref() == global.package.as_deref();
+                            eprintln!("🔍 DEBUG: Field access check (walk_expr_for_exn): field={}, tname={}, decl={}, vis={:?}, same_package={}, decl_pkg={:?}, g_pkg={:?}", 
+                                     f.name, tname, decl, vis, same_package, decl_pkg, global.package);
                             match vis {
                                 crate::review::types::Visibility::Private => {
                                     // Only within the declaring class
@@ -1411,7 +1413,7 @@ pub(crate) fn enforce_member_access_in_block(
                 if let Some(t) = &fa.target {
                     if let Some(tname) = expr_static_type(current_class, t, global, local_types) {
                         // try lookup field type from index signature table
-                        if let Some(g) = global { if let Some(mt) = crate::review::types::resolve_type_in_index(g, &tname) {
+                        if let Some(g) = global { if let Some(_mt) = crate::review::types::resolve_type_in_index(g, &tname) {
                             // simplified: no field types table; return declaring type name as best effort
                             return Some(tname);
                         }}
@@ -2085,7 +2087,7 @@ fn walk_stmt_locals(
                             'outer_enum: for c in &sw.cases {
                                 for lab in &c.labels {
                                     let mut matched_this_label: Option<(String, usize)> = None;
-                                    for (ename, inner) in &g.enum_index {
+                                    for (ename, _inner) in &g.enum_index {
                                         if let Some(ord) = fold_case_value_for_enum_switch_global(ename, Some(g), lab) {
                                             matched_this_label = Some((ename.clone(), ord));
                                             break;
@@ -2701,6 +2703,8 @@ fn walk_expr(
                                     return Err(ReviewError::IllegalStaticCall { typename: id.name.clone(), name: mc.name.clone() });
                                 }
                             }
+                        }
+                        if let Some(mt) = resolve_type_in_index(g, &id.name) {
                             let found_arity = mc.arguments.len();
                             if let Some(expected_list) = mt.methods_arities.get(&mc.name) {
                                 let matches_fixed = expected_list.iter().any(|a| *a == found_arity);
@@ -2876,9 +2880,14 @@ fn walk_expr(
                             // Accessibility: private/package/protected/public
                             if let Some(vis) = mt.fields_visibility.get(&fa.name) {
                                 let same_package = mt.package_name.as_deref() == g.package.as_deref();
+                                eprintln!("🔍 DEBUG: Field access check: field={}, class={}, vis={:?}, same_package={}, mt_pkg={:?}, g_pkg={:?}", 
+                                         fa.name, id.name, vis, same_package, mt.package_name, g.package);
                                 match vis {
                                     super::types::Visibility::Private => {
-                                        return Err(ReviewError::InaccessibleMember { typename: id.name.clone(), name: fa.name.clone() });
+                                        // Private fields are only accessible within the declaring class
+                                        if current_class_name != &id.name {
+                                            return Err(ReviewError::InaccessibleMember { typename: id.name.clone(), name: fa.name.clone() });
+                                        }
                                     }
                                     super::types::Visibility::Package => {
                                         if !same_package {

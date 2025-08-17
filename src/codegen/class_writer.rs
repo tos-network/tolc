@@ -156,6 +156,9 @@ impl ClassWriter {
     
     /// Generate bytecode for an interface declaration
     pub fn generate_interface(&mut self, interface: &InterfaceDecl) -> Result<()> {
+        // Initialize a shared constant pool for the whole interface emission
+        self.cp_shared = Some(std::rc::Rc::new(std::cell::RefCell::new(self.class_file.constant_pool.clone())));
+        
         // Set interface name and access flags
         let internal_name = if let Some(pkg) = &self.package_name {
             if pkg.is_empty() { interface.name.clone() } else { format!("{}/{}", pkg.replace('.', "/"), interface.name) }
@@ -236,6 +239,12 @@ impl ClassWriter {
             AttributeInfo::SourceFile(source_file_attr)
         );
         self.class_file.attributes.push(named_attr);
+        
+        // Finalize: write back shared pool
+        if let Some(cp) = &self.cp_shared { 
+            self.class_file.constant_pool = cp.borrow().clone(); 
+        }
+        self.cp_shared = None;
         
         Ok(())
     }

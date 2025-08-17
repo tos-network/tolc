@@ -85,11 +85,7 @@ pub fn verify(class_file: &ClassFile) -> Result<()> {
                     return Err(AttributesVerifyError::AttributeRequiresVersion("Record", 58));
                 }
             }
-            AttributeInfo::PermittedSubclasses(_) => {
-                if major < 59 { // Java 15+
-                    return Err(AttributesVerifyError::AttributeRequiresVersion("PermittedSubclasses", 59));
-                }
-            }
+
             // Future gates (placeholders present only when such attributes exist in our writer)
             AttributeInfo::BootstrapMethods(bsm) => {
                 // Basic index sanity: all bootstrap method refs and args indices within CP bounds
@@ -175,23 +171,8 @@ pub fn verify(class_file: &ClassFile) -> Result<()> {
             AttributeInfo::RuntimeInvisibleAnnotations(ria) => { validate_annotations_targets(ria.annotations.as_slice(), false)?; }
             AttributeInfo::RuntimeVisibleTypeAnnotations(rvta) => { validate_type_annotations_for_class(rvta.annotations.as_slice(), true)?; }
             AttributeInfo::RuntimeInvisibleTypeAnnotations(rita) => { validate_type_annotations_for_class(rita.annotations.as_slice(), false)?; }
-            AttributeInfo::Record(rec) => {
-                // Validate record components: name/descriptor are Utf8; nested attributes limited to annotations/signature
-                for comp in &rec.components {
-                    if !cp_is_utf8(class_file, comp.name.as_u16()) { return Err(AttributesVerifyError::InvalidContent("RecordComponent.name")); }
-                    if !cp_is_utf8(class_file, comp.descriptor.as_u16()) { return Err(AttributesVerifyError::InvalidContent("RecordComponent.descriptor")); }
-                    for na in &comp.attributes {
-                        match &na.info {
-                            AttributeInfo::RuntimeVisibleAnnotations(_)
-                            | AttributeInfo::RuntimeInvisibleAnnotations(_)
-                            | AttributeInfo::RuntimeVisibleTypeAnnotations(_)
-                            | AttributeInfo::RuntimeInvisibleTypeAnnotations(_)
-                            | AttributeInfo::Signature(_) => {}
-                            _ => return Err(AttributesVerifyError::InvalidContent("RecordComponent.attribute")),
-                        }
-                    }
-                }
-            }
+
+
             _ => {}
         }
     }

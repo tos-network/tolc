@@ -1448,12 +1448,45 @@ impl Parser {
 
         // Methods: return type or 'void', also permit method-level type params '<>'
         if self.check(&Token::Void) || self.is_type_start() || self.check(&Token::Lt) || self.check(&Token::At) {
-            let method = self.parse_method_decl(modifiers)?;
-            return Ok(InterfaceMember::Method(method));
+            // Use lookahead to distinguish between methods and fields
+            if self.lookahead_is_method_signature() {
+                let method = self.parse_method_decl(modifiers)?;
+                return Ok(InterfaceMember::Method(method));
+            } else {
+                // It's a field (constant) declaration
+                let mut field = self.parse_field_decl(modifiers)?;
+                
+                // Interface fields are implicitly public static final
+                use crate::ast::Modifier::*;
+                if !field.modifiers.contains(&Public) {
+                    field.modifiers.push(Public);
+                }
+                if !field.modifiers.contains(&Static) {
+                    field.modifiers.push(Static);
+                }
+                if !field.modifiers.contains(&Final) {
+                    field.modifiers.push(Final);
+                }
+                
+                return Ok(InterfaceMember::Field(field));
+            }
         }
 
         // Constants (fields) as fallback
-        let field = self.parse_field_decl(modifiers)?;
+        let mut field = self.parse_field_decl(modifiers)?;
+        
+        // Interface fields are implicitly public static final
+        use crate::ast::Modifier::*;
+        if !field.modifiers.contains(&Public) {
+            field.modifiers.push(Public);
+        }
+        if !field.modifiers.contains(&Static) {
+            field.modifiers.push(Static);
+        }
+        if !field.modifiers.contains(&Final) {
+            field.modifiers.push(Final);
+        }
+        
         Ok(InterfaceMember::Field(field))
     }
     

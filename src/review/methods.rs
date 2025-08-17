@@ -435,18 +435,44 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
         // Gather interface abstract requirements and default providers
         let mut abstract_reqs: std::collections::HashMap<String, std::collections::HashSet<Vec<String>>> = std::collections::HashMap::new();
         let mut default_providers: std::collections::HashMap<String, std::collections::HashMap<Vec<String>, std::collections::HashSet<String>>> = std::collections::HashMap::new();
-        let mut iq: Vec<String> = Vec::new();
-        for itf in &class.implements { iq.push(itf.name.clone()); }
+        
+        // Store interface name with type arguments for generic substitution
+        let mut iq: Vec<(String, Vec<String>)> = Vec::new();
+        for itf in &class.implements { 
+            let type_args: Vec<String> = itf.type_args.iter().map(|arg| match arg {
+                crate::ast::TypeArg::Type(t) => t.name.clone(),
+                crate::ast::TypeArg::Wildcard { .. } => "Object".to_string(), // Conservative fallback
+            }).collect();
+            iq.push((itf.name.clone(), type_args)); 
+        }
         let mut seen_itf: std::collections::HashSet<String> = std::collections::HashSet::new();
-        while let Some(tn) = iq.pop() {
+        while let Some((tn, type_args)) = iq.pop() {
             if !seen_itf.insert(tn.clone()) { continue; }
             if let Some(mt) = global.by_type.get(&tn) {
-                for it in &mt.interfaces { iq.push(it.clone()); }
+                for it in &mt.interfaces { iq.push((it.clone(), vec![])); } // Parent interfaces without specific type args
                 // For each method meta in this interface
                 for (name, metas) in &mt.methods_meta {
                     for meta in metas {
                         if meta.is_static { continue; }
-                        let sig = meta.signature.clone();
+                        let mut sig = meta.signature.clone();
+                        
+                        // Substitute generic type parameters with actual type arguments
+                        if !type_args.is_empty() {
+                            sig = sig.iter().map(|param_type| {
+                                if param_type.len() == 1 && param_type.chars().next().unwrap().is_uppercase() {
+                                    // This is likely a generic type parameter, try to substitute
+                                    // For now, assume single type parameter interfaces like Comparable<T>
+                                    if let Some(first_arg) = type_args.first() {
+                                        first_arg.clone()
+                                    } else {
+                                        "Object".to_string() // Fallback to Object
+                                    }
+                                } else {
+                                    param_type.clone()
+                                }
+                            }).collect();
+                        }
+                        
                         if meta.is_abstract {
                             abstract_reqs.entry(name.clone()).or_default().insert(sig);
                         } else if mt.is_interface && meta.has_body {

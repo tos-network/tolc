@@ -761,7 +761,7 @@ fn simulate_effect(op: u8, code: &[u8], pc: usize, st: &mut FrameState, cp: &mut
                                 }
                                 b'L' => {
                                     // Reference element: Ljava/lang/String;
-                                    let mut i = 1usize; let mut j = i;
+                                    let i = 1usize; let mut j = i;
                                     while j < b.len() && b[j] != b';' { j += 1; }
                                     let name = String::from_utf8_lossy(&b[i..j]).to_string();
                                     VerificationType::Object(cp.add_class(&name))

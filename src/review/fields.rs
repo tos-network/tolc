@@ -106,7 +106,6 @@ fn review_field_initializer_static_imports(expr: &Expr, global: &GlobalMemberInd
         Expr::MethodCall(mc) => { if let Some(t) = &mc.target { review_field_initializer_static_imports(t, global)?; } for a in &mc.arguments { review_field_initializer_static_imports(a, global)?; } Ok(()) }
         Expr::ArrayAccess(acc) => { review_field_initializer_static_imports(&acc.array, global)?; review_field_initializer_static_imports(&acc.index, global) }
         Expr::Binary(b) => { review_field_initializer_static_imports(&b.left, global)?; review_field_initializer_static_imports(&b.right, global) }
-        Expr::Unary(u) => review_field_initializer_static_imports(&u.operand, global),
         Expr::Assignment(a) => { review_field_initializer_static_imports(&a.target, global)?; review_field_initializer_static_imports(&a.value, global) }
         Expr::Cast(c) => review_field_initializer_static_imports(&c.expr, global),
         Expr::Conditional(c) => { review_field_initializer_static_imports(&c.condition, global)?; review_field_initializer_static_imports(&c.then_expr, global)?; review_field_initializer_static_imports(&c.else_expr, global) }
