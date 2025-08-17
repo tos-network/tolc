@@ -204,24 +204,24 @@ fn resolve_method_in_inheritance_chain(
     // Step 1: Check the target class itself
     eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Looking up '{}' in CLASSES_BY_NAME", owner_internal);
     if let Some(&idx) = CLASSES_BY_NAME.get(owner_internal) {
-        let c = &CLASSES[idx];
+            let c = &CLASSES[idx];
         eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Checking class {} (is_interface: {})", c.internal, c.is_interface);
         
         // Look for method in this class/interface
-        if let Some(m) = c.methods.iter().find(|m| m.name == name && count_params(m.desc) == expected_arity) {
+            if let Some(m) = c.methods.iter().find(|m| m.name == name && count_params(m.desc) == expected_arity) {
             eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method {}#{} in {}", name, expected_arity, c.internal);
-            return Some(ResolvedMethod {
-                owner_internal: c.internal.to_string(),
-                name: m.name.to_string(),
-                descriptor: m.desc.to_string(),
-                is_static: m.flags & 0x0008 != 0, // ACC_STATIC
-                is_interface: c.is_interface,
-                is_ctor: m.name == "<init>",
-                is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
-                is_super_call: false,
-                flags: m.flags,
-            });
-        }
+                return Some(ResolvedMethod {
+                    owner_internal: c.internal.to_string(),
+                    name: m.name.to_string(),
+                    descriptor: m.desc.to_string(),
+                    is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                    is_interface: c.is_interface,
+                    is_ctor: m.name == "<init>",
+                    is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                    is_super_call: false,
+                    flags: m.flags,
+                });
+            }
         
         // Step 2: Check implemented interfaces (for both classes and interfaces)
         eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Method not found in {}, checking {} interfaces", c.internal, c.interfaces.len());
@@ -1030,6 +1030,35 @@ impl MethodWriter {
         Ok(())
     }
     
+    /// Check if a type name is a generic type parameter
+    /// Generic type parameters are typically:
+    /// - Single uppercase letters (K, V, T, E, etc.)
+    /// - Short names starting with uppercase (Key, Value, Element, etc.)
+    /// - Not found in the classpath (not a real class)
+    fn is_generic_type_parameter(&self, type_name: &str) -> bool {
+        // First check: if it's a known class in classpath, it's not a generic parameter
+        if classpath::resolve_class_name(type_name).is_some() {
+            return false;
+        }
+        
+        // Second check: common patterns for generic type parameters
+        match type_name.len() {
+            1 => {
+                // Single letter, typically uppercase (K, V, T, E, etc.)
+                type_name.chars().next().unwrap().is_uppercase()
+            }
+            2..=10 => {
+                // Short names starting with uppercase, not found in classpath
+                // This covers cases like "Key", "Value", "Element", etc.
+                type_name.chars().next().unwrap().is_uppercase() && 
+                !type_name.contains('.') && // Not a qualified class name
+                !type_name.contains('/') && // Not an internal class name
+                !type_name.ends_with("[]")  // Not an array type
+            }
+            _ => false // Long names are likely class names
+        }
+    }
+    
     /// Convert AST TypeRef to LocalType
     fn convert_type_ref_to_local_type(&self, type_ref: &TypeRef) -> LocalType {
         if type_ref.array_dims > 0 {
@@ -1046,7 +1075,17 @@ impl MethodWriter {
                 "float" => LocalType::Float,
                 "double" => LocalType::Double,
                 "void" => LocalType::Int, // void is represented as int in some contexts
-                _ => LocalType::Reference(type_ref.name.clone()),
+                _ => {
+                    // Check if this is a generic type parameter
+                    // Generic type parameters are typically single uppercase letters or short names
+                    // In Java, generic type parameters are erased to Object at runtime
+                    if self.is_generic_type_parameter(&type_ref.name) {
+                        eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to Object", type_ref.name);
+                        LocalType::Reference("java.lang.Object".to_string())
+                    } else {
+                        LocalType::Reference(type_ref.name.clone())
+                    }
+                }
             }
         }
     }
@@ -3153,9 +3192,9 @@ impl MethodWriter {
                             }
                             _ => {
                                 // Fallback: assume it's a field access, use field descriptor
-                                let class_name = self.current_class_name.as_ref()
-                                    .unwrap_or(&"java/lang/String".to_string()) // Fallback to String instead of Object
-                                    .clone();
+                    let class_name = self.current_class_name.as_ref()
+                        .unwrap_or(&"java/lang/String".to_string()) // Fallback to String instead of Object
+                        .clone();
                                 // Get field descriptor and convert to class name
                                 let descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
                                 // Convert JVM descriptor to class name
@@ -3631,20 +3670,20 @@ impl MethodWriter {
             // For compound assignments, we need to load the target first
             match &*assign.target {
                 Expr::Identifier(ident) => {
-                    if let Some(local_var) = self.find_local_variable(&ident.name) {
-                        // Extract local variable info to avoid borrow checker issues
-                        let index = local_var.index;
-                        let var_type = local_var.var_type.clone();
-                        
-                        // Load current value
-                        self.load_local_variable(index, &var_type)?;
-                        // Generate right operand
-                        self.generate_expression(&assign.value)?;
-                        // Apply operation
-                        self.generate_compound_assignment(assign.operator.clone())?;
-                        // Store result
-                        self.store_local_variable(index, &var_type)?;
-                        return Ok(());
+                if let Some(local_var) = self.find_local_variable(&ident.name) {
+                    // Extract local variable info to avoid borrow checker issues
+                    let index = local_var.index;
+                    let var_type = local_var.var_type.clone();
+                    
+                    // Load current value
+                    self.load_local_variable(index, &var_type)?;
+                    // Generate right operand
+                    self.generate_expression(&assign.value)?;
+                    // Apply operation
+                    self.generate_compound_assignment(assign.operator.clone())?;
+                    // Store result
+                    self.store_local_variable(index, &var_type)?;
+                    return Ok(());
                     }
                 }
                 Expr::ArrayAccess(array_access) => {
@@ -3874,7 +3913,7 @@ impl MethodWriter {
                 _ => {
                     // Reference type or int (default)
                     eprintln!("🔍 DEBUG: generate_array_access: About to call iaload (default), stack_depth={}", self.bytecode_builder.stack_depth());
-                    Self::map_stack(self.bytecode_builder.iaload())?;
+        Self::map_stack(self.bytecode_builder.iaload())?;
                     eprintln!("🔍 DEBUG: generate_array_access: After iaload (default), stack_depth={}", self.bytecode_builder.stack_depth());
                 }
             }
@@ -5015,7 +5054,7 @@ impl MethodWriter {
         // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: No matching class found in any path");
         None
     }
-
+    
     /// Resolve field descriptor from generated rt.rs index, with local class fallback.
     /// `class_internal` must be an internal name like "java/io/OutputStream" or "java/base/FieldData".
     fn resolve_field_descriptor(&self, class_internal: &str, field_name: &str) -> String {
