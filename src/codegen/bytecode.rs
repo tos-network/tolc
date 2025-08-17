@@ -167,6 +167,10 @@ impl StackFrame {
     
     /// Allocate a local variable slot
     pub fn allocate(&mut self, name: String, var_type: LocalType) -> u16 {
+        self.allocate_with_type_ref(name, var_type, None)
+    }
+    
+    pub fn allocate_with_type_ref(&mut self, name: String, var_type: LocalType, original_type_ref: Option<crate::ast::TypeRef>) -> u16 {
         let index = self.max_locals;
         self.locals.push(LocalSlot {
             name,
@@ -174,6 +178,7 @@ impl StackFrame {
             index,
             start_pc: 0,
             length: 0,
+            original_type_ref,
         });
         self.max_locals += 1;
         index
@@ -206,6 +211,7 @@ pub struct LocalSlot {
     pub index: u16,
     pub start_pc: u16,
     pub length: u16,
+    pub original_type_ref: Option<crate::ast::TypeRef>, // Store original TypeRef for generic information
 }
 
 /// Local variable type information
@@ -335,6 +341,11 @@ impl BytecodeBuilder {
     /// Allocate a local variable
     pub fn allocate(&mut self, name: String, var_type: LocalType) -> u16 {
         self.stack_state.frame.allocate(name, var_type)
+    }
+    
+    /// Allocate a local variable with original TypeRef information
+    pub fn allocate_with_type_ref(&mut self, name: String, var_type: LocalType, original_type_ref: Option<crate::ast::TypeRef>) -> u16 {
+        self.stack_state.frame.allocate_with_type_ref(name, var_type, original_type_ref)
     }
     
     /// Get max stack depth

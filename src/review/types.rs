@@ -395,6 +395,10 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
             super::debug_log(format!("index enum: {}", e.name));
         }
     }
+    
+    // Add runtime types from rt.rs
+    add_runtime_types_to_index(&mut idx);
+    
     idx
 }
 
@@ -649,6 +653,10 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
             }
         }
     }
+    
+    // Add runtime types from rt.rs
+    add_runtime_types_to_index(&mut idx);
+    
     idx
 }
 
@@ -861,5 +869,48 @@ pub(crate) fn review_types(ast: &Ast) -> ReviewResult<()> {
         }
     }
     Ok(())
+}
+
+/// Add runtime types from rt.rs to the global member index
+fn add_runtime_types_to_index(idx: &mut GlobalMemberIndex) {
+    // Add VMClass type with its fields
+    let mut vmclass_mt = MemberTables::default();
+    vmclass_mt.package_name = Some("java.base".to_string());
+    vmclass_mt.is_interface = false;
+    
+    // Add VMClass fields from rt.rs with public visibility
+    let vmclass_fields = [
+        ("flags", "S"),
+        ("vmFlags", "S"), 
+        ("fixedSize", "S"),
+        ("arrayElementSize", "B"),
+        ("arrayDimensions", "B"),
+        ("arrayElementClass", "Ljava/base/VMClass;"),
+        ("runtimeDataIndex", "I"),
+        ("objectMask", "[I"),
+        ("name", "[B"),  // This is the key field we need!
+        ("sourceFile", "[B"),
+        ("super_", "Ljava/base/VMClass;"),
+        ("interfaceTable", "[Ljava/lang/Object;"),
+        ("virtualTable", "[Ljava/base/VMMethod;"),
+        ("fieldTable", "[Ljava/base/VMField;"),
+        ("methodTable", "[Ljava/base/VMMethod;"),
+        ("addendum", "Ljava/base/ClassAddendum;"),
+        ("staticTable", "Ljava/base/Singleton;"),
+        ("loader", "Ljava/lang/ClassLoader;"),
+        ("source", "[B"),
+    ];
+    
+    for (field_name, _desc) in &vmclass_fields {
+        vmclass_mt.fields_static.insert(field_name.to_string(), false);
+        vmclass_mt.fields_final.insert(field_name.to_string(), false);
+        vmclass_mt.fields_visibility.insert(field_name.to_string(), Visibility::Public);
+    }
+    
+    // Insert VMClass by both simple name and fully qualified name
+    idx.by_type.insert("VMClass".to_string(), vmclass_mt.clone());
+    idx.by_type.insert("java.base.VMClass".to_string(), vmclass_mt);
+    
+    eprintln!("🔍 DEBUG: Added runtime type: VMClass with {} fields", vmclass_fields.len());
 }
 

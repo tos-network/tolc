@@ -856,6 +856,7 @@ impl MethodWriter {
             "AccessibleObject" => return "java/lang/reflect/AccessibleObject".to_string(),
             "Stream" => return "java/base/Stream".to_string(),
             "Classes" => return "java/base/Classes".to_string(),
+            "Type" => return "java/lang/bytes/Type".to_string(),
             _ => {}
         }
         
@@ -3366,31 +3367,77 @@ impl MethodWriter {
             let class_ref_index = self.add_class_constant(ident);
             Self::map_stack(self.bytecode_builder.ldc(class_ref_index))?;
         } else {
-            // Assume it's a field access on 'this'
-                Self::map_stack(self.bytecode_builder.aload(0))?;
-            // Add field reference to constant pool
+            // Try to resolve as a static field first (interface constants, static fields)
             let class_name = self.current_class_name.as_ref()
                 .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
                 .clone();
             let resolved_class_name = self.resolve_class_name(&class_name);
-            // Try to resolve field type from context, fallback to Object
-            let field_descriptor = self.resolve_field_descriptor(&resolved_class_name, ident);
-            let field_ref_index = self.add_field_ref(&resolved_class_name, ident, &field_descriptor);
             
-            // Handle getfield with proper stack management for 64-bit types
-            // getfield pops objectref and pushes field value
-            // For long/double fields, the value takes 2 stack slots
-            let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
-                2 // long or double
+            // Try to find the field in the current class or its inheritance chain
+            eprintln!("🔍 DEBUG: generate_identifier: Trying to resolve field {}#{}", resolved_class_name, ident);
+            if let Ok(field_descriptor) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.resolve_field_descriptor(&resolved_class_name, ident)
+            })) {
+                eprintln!("🔍 DEBUG: generate_identifier: Successfully resolved field {}#{} -> {}", resolved_class_name, ident, field_descriptor);
+                // Check if this is a static field by looking in rt.rs
+                use boot::{CLASSES, CLASSES_BY_NAME};
+                let mut is_static_field = false;
+                let mut field_owner = resolved_class_name.clone();
+                
+                // Search for the field in the inheritance chain to find its actual owner
+                let mut cur = Some(resolved_class_name.as_str());
+                while let Some(owner) = cur {
+                    if let Some(&idx) = CLASSES_BY_NAME.get(owner) {
+                        let c = &CLASSES[idx];
+                        if let Some(fm) = c.fields.iter().find(|fm| fm.name == ident) {
+                            is_static_field = fm.flags & 0x0008 != 0; // ACC_STATIC
+                            field_owner = owner.to_string();
+                            break;
+                        }
+                        // Check interfaces for static fields
+                        for &interface_name in c.interfaces {
+                            if let Some(&interface_idx) = CLASSES_BY_NAME.get(interface_name) {
+                                let interface_class = &CLASSES[interface_idx];
+                                if let Some(fm) = interface_class.fields.iter().find(|fm| fm.name == ident) {
+                                    is_static_field = true; // Interface fields are always static
+                                    field_owner = interface_name.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                        if is_static_field { break; }
+                    }
+                    // ascend to super, if any
+                    cur = CLASSES_BY_NAME
+                        .get(owner)
+                        .and_then(|&idx| CLASSES[idx].super_internal);
+                }
+                
+                let field_ref_index = self.add_field_ref(&field_owner, ident, &field_descriptor);
+                
+                // Handle field slots for stack management
+                let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+                    2 // long or double
+                } else {
+                    1 // all other types
+                };
+                
+                if is_static_field {
+                    eprintln!("🔍 DEBUG: generate_identifier static field access: field_descriptor={}, field_slots={}, owner={}", field_descriptor, field_slots, field_owner);
+                    // Static field access - just push the field value
+                    Self::map_stack(self.bytecode_builder.update_stack(0, field_slots))?;
+                    self.emit_opcode(self.opcode_generator.getstatic(field_ref_index));
+                } else {
+                    eprintln!("🔍 DEBUG: generate_identifier instance field access: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
+                    // Instance field access - load 'this' first
+                    Self::map_stack(self.bytecode_builder.aload(0))?;
+                    // Pop objectref (1 slot) and push field value (1 or 2 slots)
+                    Self::map_stack(self.bytecode_builder.update_stack(1, field_slots))?;
+                    self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
+                }
             } else {
-                1 // all other types
-            };
-            
-            eprintln!("🔍 DEBUG: generate_identifier field access: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
-            
-            // Pop objectref (1 slot) and push field value (1 or 2 slots)
-            Self::map_stack(self.bytecode_builder.update_stack(1, field_slots))?;
-            self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
+                return Err(Error::codegen_error(&format!("Cannot resolve identifier: {}", ident)));
+            }
             }
         }
         
@@ -3461,6 +3508,8 @@ impl MethodWriter {
             "write2" => Some("java/base/Stream".to_string()),
             "write4" => Some("java/base/Stream".to_string()),
             "set4" => Some("java/base/Stream".to_string()),
+            "read1" => Some("java/base/Stream".to_string()),
+            "read2" => Some("java/base/Stream".to_string()),
             _ => None,
         }
     }
@@ -3675,6 +3724,7 @@ impl MethodWriter {
 
     /// Generate bytecode for a method call using rt.rs method resolution
     fn generate_method_call(&mut self, call: &MethodCallExpr) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_method_call: method_name={}, args_count={}, target={:?}", call.name, call.arguments.len(), call.target);
         // Handle System.out.println specially (keep this for now as it's a common pattern)
         if call.name == "println" {
             let is_system_out = match &call.target {
@@ -3976,6 +4026,16 @@ impl MethodWriter {
     /// Resolve the type of an expression, including generic information
     fn resolve_expression_type(&self, expr: &Expr) -> String {
         match expr {
+            Expr::Literal(lit) => {
+                match &lit.value {
+                    crate::ast::Literal::Integer(_) => "int".to_string(),
+                    crate::ast::Literal::Float(_) => "float".to_string(),
+                    crate::ast::Literal::Boolean(_) => "boolean".to_string(),
+                    crate::ast::Literal::String(_) => "java.lang.String".to_string(),
+                    crate::ast::Literal::Char(_) => "char".to_string(),
+                    crate::ast::Literal::Null => "java.lang.Object".to_string(),
+                }
+            }
             Expr::Identifier(ident) => {
                 // Try to resolve from local variables first
                 if let Some(local_var) = self.find_local_variable(&ident.name) {
@@ -4041,6 +4101,22 @@ impl MethodWriter {
                 }
             }
             Expr::FieldAccess(field_access) => {
+                // Check if this is a qualified class name chain (e.g., java.lang.reflect.Array)
+                if let Some(qualified_name) = self.is_qualified_class_name_chain(field_access) {
+                    eprintln!("🔍 DEBUG: resolve_expression_type: Detected qualified class name: {}", qualified_name);
+                    // This represents a class, so return the class name
+                    return qualified_name;
+                }
+                
+                // Special handling for .class field access
+                if field_access.name == "class" && field_access.target.is_some() {
+                    if let Some(Expr::Identifier(ident)) = field_access.target.as_deref() {
+                        eprintln!("🔍 DEBUG: resolve_expression_type: .class access on {}", ident.name);
+                        // For .class access, return java.lang.Class type
+                        return "java.lang.Class".to_string();
+                    }
+                }
+                
                 // For field access, try to resolve the field type
                 if let Some(receiver) = &field_access.target {
                     let receiver_type = self.resolve_expression_type(receiver);
@@ -4136,9 +4212,29 @@ impl MethodWriter {
                     // Special handling for generic methods before using descriptor
                     if method_call.name == "next" && owner_class == "java/util/Iterator" {
                         if let Some(target) = &method_call.target {
+                            // Check if target is an identifier with generic type information
+                            if let Expr::Identifier(ident) = &**target {
+                                if let Some(local_var) = self.find_local_variable(&ident.name) {
+                                    if let Some(original_type_ref) = &local_var.original_type_ref {
+                                        eprintln!("🔍 DEBUG: Iterator.next() checking original_type_ref: {:?}", original_type_ref);
+                                        // Check if this is Iterator<Entry<K,V>>
+                                        if original_type_ref.name == "Iterator" && !original_type_ref.type_args.is_empty() {
+                                            if let Some(first_type_arg) = original_type_ref.type_args.first() {
+                                                if let crate::ast::TypeArg::Type(entry_type_ref) = first_type_arg {
+                                                    if entry_type_ref.name == "Entry" {
+                                                        eprintln!("🔍 DEBUG: Detected Iterator<Entry> pattern, returning Entry");
+                                                        return "java.util.Entry".to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
                             let target_type = self.resolve_expression_type(target);
                             eprintln!("🔍 DEBUG: Iterator.next() target_type = '{}'", target_type);
-                            // Check if this is an Iterator<Entry<K,V>> pattern
+                            // Fallback: Check if this is an Iterator<Entry<K,V>> pattern
                             if target_type.contains("Iterator") && target_type.contains("Entry") {
                                 eprintln!("🔍 DEBUG: Detected Iterator<Entry> pattern, returning Entry");
                                 return "java.util.Entry".to_string();
@@ -4413,8 +4509,49 @@ impl MethodWriter {
         }
     }
 
+    /// Check if a field access chain represents a fully qualified class name
+    fn is_qualified_class_name_chain(&self, field_access: &FieldAccessExpr) -> Option<String> {
+        // Recursively build the qualified name from the field access chain
+        fn build_qualified_name(expr: &Expr) -> Option<String> {
+            match expr {
+                Expr::Identifier(ident) => Some(ident.name.clone()),
+                Expr::FieldAccess(fa) => {
+                    if let Some(base) = fa.target.as_ref().and_then(|t| build_qualified_name(t)) {
+                        Some(format!("{}.{}", base, fa.name))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        
+        // Build the full qualified name including the current field
+        if let Some(base) = field_access.target.as_ref().and_then(|t| build_qualified_name(t)) {
+            let full_name = format!("{}.{}", base, field_access.name);
+            eprintln!("🔍 DEBUG: is_qualified_class_name_chain: Built qualified name: {}", full_name);
+            
+            // Check if this looks like a Java class name (starts with java., javax., etc.)
+            if full_name.starts_with("java.") || full_name.starts_with("javax.") {
+                Some(full_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     /// Generate bytecode for field access
     fn generate_field_access(&mut self, field_access: &FieldAccessExpr) -> Result<()> {
+        // Check if this is a qualified class name chain (e.g., java.lang.reflect.Array)
+        if let Some(qualified_name) = self.is_qualified_class_name_chain(field_access) {
+            eprintln!("🔍 DEBUG: generate_field_access: Detected qualified class name: {}", qualified_name);
+            // This is a class reference, not a field access
+            // We should not generate any bytecode here, as this will be used as a method call target
+            // The caller (generate_method_call) should handle this as a static method call
+            return Ok(());
+        }
 
         
         // Handle special .class field access
@@ -4442,6 +4579,16 @@ impl MethodWriter {
                     // Load the TYPE field from the wrapper class (e.g., Boolean.TYPE)
                     let field_ref_index = self.add_field_ref(class_name, "TYPE", "Ljava/lang/Class;");
                     Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+                    return Ok(());
+                } else {
+                    // For reference types (e.g., Enum.class, String.class), generate LDC instruction
+                    // to load the Class constant
+                    let class_name = self.resolve_class_name(&ident.name);
+                    eprintln!("🔍 DEBUG: Reference type .class access: {} -> {}", ident.name, class_name);
+                    
+                    // Use LDC to load the Class constant
+                    let class_ref_index = self.add_class_constant(&class_name);
+                    Self::map_stack(self.bytecode_builder.ldc(class_ref_index))?;
                     return Ok(());
                 }
             }
@@ -5916,7 +6063,11 @@ impl MethodWriter {
     
     /// Allocate a new local variable
     fn allocate_local_variable(&mut self, name: &str, var_type: &TypeRef) -> u16 {
-        let index = self.bytecode_builder.allocate(name.to_string(), self.convert_type_ref_to_local_type(var_type));
+        let index = self.bytecode_builder.allocate_with_type_ref(
+            name.to_string(), 
+            self.convert_type_ref_to_local_type(var_type),
+            Some(var_type.clone())
+        );
         // Track in current scope if any
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.locals.push(index as usize);
@@ -6244,6 +6395,50 @@ impl MethodWriter {
         // eprintln!("🔍 DEBUG: try_parse_class_from_filesystem: No matching class found in any path");
         None
     }
+
+    /// Try to parse an interface file from the file system to resolve field types
+    fn try_parse_interface_from_filesystem(&self, interface_internal: &str) -> Option<crate::ast::InterfaceDecl> {
+        // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Looking for interface {}", interface_internal);
+        // Convert internal name to file path
+        let interface_name = interface_internal.replace('/', ".");
+        
+        // Try different possible paths
+        let possible_paths = vec![
+            format!("tests/java/{}.java", interface_internal),
+            format!("tests/java/util/{}.java", interface_internal),
+            format!("tests/java/lang/{}.java", interface_internal),
+        ];
+        
+        for file_path in possible_paths {
+            // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Trying to read file {}", file_path);
+            
+            // Try to read and parse the file
+            if let Ok(source) = std::fs::read_to_string(&file_path) {
+                // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Successfully read file, length = {}", source.len());
+                if let Ok(ast) = crate::parser::parser::parse(&source) {
+                    // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Successfully parsed AST, found {} type declarations", ast.type_decls.len());
+                    // Find the matching interface declaration
+                    for type_decl in ast.type_decls {
+                        if let crate::ast::TypeDecl::Interface(interface) = type_decl {
+                            // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Found interface '{}', looking for '{}'", interface.name, interface_name);
+                            if interface.name == interface_name || interface.name.ends_with(&format!(".{}", interface_internal)) {
+                                // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Found matching interface!");
+                                return Some(interface);
+                            }
+                        }
+                    }
+                    // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: No matching interface found in this file");
+                } else {
+                    // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Failed to parse AST");
+                }
+            } else {
+                // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: Failed to read file");
+            }
+        }
+        
+        // eprintln!("🔍 DEBUG: try_parse_interface_from_filesystem: No matching interface found in any path");
+        None
+    }
     
     /// Resolve field descriptor from generated rt.rs index, with local class fallback.
     /// `class_internal` must be an internal name like "java/io/OutputStream" or "java/base/FieldData".
@@ -6331,11 +6526,75 @@ impl MethodWriter {
                 }
             }
             
-            // If not found in current class, check parent class
+            // Check implemented interfaces for fields (interface fields are static final)
+            for interface_ref in &class.implements {
+                // Resolve the interface name properly - it might be a simple name that needs to be resolved
+                let interface_internal = if interface_ref.name.contains(".") {
+                    interface_ref.name.replace(".", "/")
+                } else {
+                    // Try to resolve the simple interface name using imports or context
+                    self.resolve_class_name(&interface_ref.name).replace(".", "/")
+                };
+                eprintln!("🔍 DEBUG: resolve_field_descriptor: Field not found in {}, checking interface {} (resolved from {})", class_internal, interface_internal, interface_ref.name);
+                
+                // Try to recursively resolve field in interface
+                if let Some(interface_class) = self.try_parse_interface_from_filesystem(&interface_internal) {
+                    for member in &interface_class.body {
+                        if let crate::ast::InterfaceMember::Field(field) = member {
+                            if field.name == field_name {
+                                // Generate descriptor from field type
+                                eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in interface {}", class_internal, field_name, interface_internal);
+                                return type_ref_to_descriptor(&field.type_ref);
+                            }
+                        }
+                    }
+                }
+                
+                // Also try rt.rs for the interface
+                use boot::{CLASSES, CLASSES_BY_NAME};
+                if let Some(&idx) = CLASSES_BY_NAME.get(&interface_internal) {
+                    let c = &CLASSES[idx];
+                    if let Some(fm) = c.fields.iter().find(|fm| fm.name == field_name) {
+                        eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in rt.rs interface {}", class_internal, field_name, interface_internal);
+                        return fm.desc.to_string();
+                    }
+                }
+            }
+            
+            // If not found in current class or interfaces, check parent class
             if let Some(parent) = &class.extends {
                 let parent_internal = parent.name.replace(".", "/");
                 eprintln!("🔍 DEBUG: resolve_field_descriptor: Field not found in {}, checking parent class {}", class_internal, parent_internal);
                 return self.resolve_field_descriptor(&parent_internal, field_name);
+            }
+        }
+        
+        // 5) Also try to parse the class from the file system and check parent class interfaces
+        if let Some(class) = self.try_parse_class_from_filesystem(class_internal) {
+            // Check parent class interfaces recursively
+            if let Some(parent) = &class.extends {
+                let parent_internal = parent.name.replace(".", "/");
+                if let Some(parent_class) = self.try_parse_class_from_filesystem(&parent_internal) {
+                    // Check parent class interfaces for fields
+                    for interface_ref in &parent_class.implements {
+                        let interface_internal = if interface_ref.name.contains(".") {
+                            interface_ref.name.replace(".", "/")
+                        } else {
+                            self.resolve_class_name(&interface_ref.name).replace(".", "/")
+                        };
+                        eprintln!("🔍 DEBUG: resolve_field_descriptor: Checking parent class interface {} for field {}", interface_internal, field_name);
+                        
+                        // Try rt.rs for the parent interface
+                        use boot::{CLASSES, CLASSES_BY_NAME};
+                        if let Some(&idx) = CLASSES_BY_NAME.get(&interface_internal) {
+                            let c = &CLASSES[idx];
+                            if let Some(fm) = c.fields.iter().find(|fm| fm.name == field_name) {
+                                eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in rt.rs parent interface {}", class_internal, field_name, interface_internal);
+                                return fm.desc.to_string();
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -6352,25 +6611,32 @@ impl MethodWriter {
             None
         };
 
-        // 3a) Walk class → super chain
+        // 3a) Walk class → super chain and check interfaces at each level
         let mut cur = Some(class_internal);
         while let Some(owner) = cur {
+            eprintln!("🔍 DEBUG: resolve_field_descriptor: Checking class {} for field {}", owner, field_name);
             if let Some(desc) = search_owner(owner, field_name) {
+                eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in class {}", class_internal, field_name, owner);
                 return desc.to_string();
             }
+            
+            // Also check interfaces implemented by this class
+            if let Some(&idx) = CLASSES_BY_NAME.get(owner) {
+                let c = &CLASSES[idx];
+                eprintln!("🔍 DEBUG: resolve_field_descriptor: Checking {} interfaces for class {}", c.interfaces.len(), owner);
+                for &itf in c.interfaces {
+                    eprintln!("🔍 DEBUG: resolve_field_descriptor: Checking interface {} for field {}", itf, field_name);
+                    if let Some(desc) = search_owner(itf, field_name) {
+                        eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in interface {} (via class {})", class_internal, field_name, itf, owner);
+                        return desc.to_string();
+                    }
+                }
+            }
+            
             // ascend to super, if any
             cur = boot::CLASSES_BY_NAME
                 .get(owner)
                 .and_then(|&idx| boot::CLASSES[idx].super_internal);
-        }
-
-        // 3b) (Optional) scan direct interfaces for static finals (rare but harmless)
-        if let Some(&idx0) = CLASSES_BY_NAME.get(class_internal) {
-            for itf in CLASSES[idx0].interfaces {
-                if let Some(desc) = search_owner(itf, field_name) {
-                    return desc.to_string();
-                }
-            }
         }
 
         // 4) Error case - field not found in rt.rs or local overlay
