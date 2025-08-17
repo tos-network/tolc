@@ -208,8 +208,19 @@ fn resolve_method_in_inheritance_chain(
         eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Checking class {} (is_interface: {})", c.internal, c.is_interface);
         
         // Look for method in this class/interface
-            if let Some(m) = c.methods.iter().find(|m| m.name == name && count_params(m.desc) == expected_arity) {
-            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method {}#{} in {}", name, expected_arity, c.internal);
+        // Find all methods with matching name and arity
+        let candidates: Vec<_> = c.methods.iter()
+            .filter(|m| m.name == name && count_params(m.desc) == expected_arity)
+            .collect();
+            
+        if !candidates.is_empty() {
+            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found {} method candidates for {}#{} in {}", 
+                     candidates.len(), name, expected_arity, c.internal);
+            
+            // If only one candidate, use it
+            if candidates.len() == 1 {
+                let m = candidates[0];
+                eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Single candidate: {}", m.desc);
                 return Some(ResolvedMethod {
                     owner_internal: c.internal.to_string(),
                     name: m.name.to_string(),
@@ -222,6 +233,42 @@ fn resolve_method_in_inheritance_chain(
                     flags: m.flags,
                 });
             }
+            
+            // Multiple candidates - prefer methods with Object parameters over specific types
+            // This handles the HashMap.remove case: prefer remove(Object) over remove(HashMapCell)
+            for m in &candidates {
+                eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Candidate: {}", m.desc);
+                if m.desc.contains("Ljava/lang/Object;") {
+                    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Selecting Object-parameter method: {}", m.desc);
+                    return Some(ResolvedMethod {
+                        owner_internal: c.internal.to_string(),
+                        name: m.name.to_string(),
+                        descriptor: m.desc.to_string(),
+                        is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                        is_interface: c.is_interface,
+                        is_ctor: m.name == "<init>",
+                        is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                        is_super_call: false,
+                        flags: m.flags,
+                    });
+                }
+            }
+            
+            // Fallback to first candidate if no Object-parameter method found
+            let m = candidates[0];
+            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Using first candidate: {}", m.desc);
+            return Some(ResolvedMethod {
+                owner_internal: c.internal.to_string(),
+                name: m.name.to_string(),
+                descriptor: m.desc.to_string(),
+                is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                is_interface: c.is_interface,
+                is_ctor: m.name == "<init>",
+                is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                is_super_call: false,
+                flags: m.flags,
+            });
+        }
         
         // Step 2: Check implemented interfaces (for both classes and interfaces)
         eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Method not found in {}, checking {} interfaces", c.internal, c.interfaces.len());
@@ -329,10 +376,7 @@ fn is_array_type(type_str: &str) -> bool {
     // Handle different array type formats:
     // 1. Java format: "Object[]", "int[]", etc.
     // 2. JVM descriptor format: "[Ljava/lang/Object;", "[I", etc.
-    // 3. Mixed format: "LObject" (should be treated as Object[] in this context)
-    type_str.ends_with("[]") || 
-    type_str.starts_with('[') || 
-    (type_str.starts_with('L') && !type_str.contains('/') && !type_str.contains('.'))
+    type_str.ends_with("[]") || type_str.starts_with('[')
 }
 
 /// Argument layout information for method generation
@@ -667,8 +711,25 @@ impl MethodWriter {
         
         // Adjust stack according to descriptor and static-ness
         let arg_slots = self.descriptor_arg_slot_count(&callee.descriptor) as u16;
-        let ret_slots: u16 = if self.descriptor_returns_value(&callee.descriptor) { 1 } else { 0 };
+        let returns_value = self.descriptor_returns_value(&callee.descriptor);
+        let ret_slots: u16 = if returns_value {
+            // Calculate return slots based on return type
+            // long and double take 2 slots, others take 1 slot
+            if let Some(closing_paren) = callee.descriptor.find(')') {
+                let return_part = &callee.descriptor[closing_paren + 1..];
+                match return_part {
+                    "J" | "D" => 2, // long or double
+                    _ => 1,         // all other types
+                }
+            } else {
+                1 // fallback
+            }
+        } else {
+            0 // void
+        };
         let is_static = callee.is_static;
+        eprintln!("🔍 DEBUG: emit_invoke: method={}#{}, descriptor={}, returns_value={}, ret_slots={}", 
+                 callee.owner_internal, callee.name, callee.descriptor, returns_value, ret_slots);
         Self::map_stack(self.bytecode_builder.adjust_invoke_stack(is_static, arg_slots, ret_slots))?;
 
         // Emit invoke via builder for proper bookkeeping
@@ -834,7 +895,7 @@ impl MethodWriter {
         println!("🔍 DEBUG: generate_method_body: About to check if return statement needed...");
         let needs_return = if let Some(body) = &method.body {
             !self.all_paths_have_return(&body.statements)
-        } else {
+            } else {
             // Abstract methods have no body and don't need return statements
             false
         };
@@ -1031,6 +1092,33 @@ impl MethodWriter {
         Ok(())
     }
     
+    /// Get the bound type for a generic type parameter
+    /// For example, for "T extends Enum<T>", this returns "java.lang.Enum"
+    fn get_generic_type_bound(&self, type_param_name: &str) -> Option<String> {
+        if let Some(current_class) = &self.current_class {
+            for type_param in &current_class.type_params {
+                if type_param.name == type_param_name {
+                    // If the type parameter has bounds, use the first bound
+                    if let Some(first_bound) = type_param.bounds.first() {
+                        // Convert the bound type to internal name format
+                        let bound_name = &first_bound.name;
+                        // Handle common cases
+                        match bound_name.as_str() {
+                            "Enum" => return Some("java.lang.Enum".to_string()),
+                            _ => {
+                                // Try to resolve the bound type name
+                                let resolved = self.resolve_class_name(bound_name);
+                                return Some(resolved.replace("/", "."));
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        None
+    }
+    
     /// Check if a type name is a generic type parameter
     /// Generic type parameters are typically:
     /// - Single uppercase letters (K, V, T, E, etc.)
@@ -1079,10 +1167,16 @@ impl MethodWriter {
                 _ => {
                     // Check if this is a generic type parameter
                     // Generic type parameters are typically single uppercase letters or short names
-                    // In Java, generic type parameters are erased to Object at runtime
+                    // In Java, generic type parameters are erased to their bound or Object at runtime
                     if self.is_generic_type_parameter(&type_ref.name) {
-                        eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to Object", type_ref.name);
-                        LocalType::Reference("java.lang.Object".to_string())
+                        // Look for the type parameter in current class to find its bounds
+                        if let Some(bound_type) = self.get_generic_type_bound(&type_ref.name) {
+                            eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to bound '{}'", type_ref.name, bound_type);
+                            LocalType::Reference(bound_type)
+                        } else {
+                            eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to Object (no bound found)", type_ref.name);
+                            LocalType::Reference("java.lang.Object".to_string())
+                        }
                     } else {
                         LocalType::Reference(type_ref.name.clone())
                     }
@@ -3047,8 +3141,22 @@ impl MethodWriter {
             // Resolve the type of the target expression
             let target_type = self.resolve_expression_type(target);
             eprintln!("🔍 DEBUG: generate_method_call: target_type = '{}'", target_type);
-            // Use the new resolve_class_name function for proper type resolution
-            let resolved = self.resolve_class_name(&target_type);
+            // Strip generic parameters for method resolution
+            let base_type = if let Some(generic_start) = target_type.find('<') {
+                target_type[..generic_start].to_string()
+            } else {
+                target_type
+            };
+            
+            // Special handling for array types
+            // Arrays inherit from Object, so method calls should be resolved on Object
+            let resolved = if is_array_type(&base_type) {
+                eprintln!("🔍 DEBUG: generate_method_call: Detected array type '{}', redirecting to Object", base_type);
+                "java/lang/Object".to_string()
+            } else {
+                // Use the new resolve_class_name function for proper type resolution
+                self.resolve_class_name(&base_type)
+            };
             eprintln!("🔍 DEBUG: generate_method_call: resolved owner_class = '{}'", resolved);
             resolved
         } else {
@@ -3168,9 +3276,26 @@ impl MethodWriter {
                                         eprintln!("🔍 DEBUG: resolve_expression_type: Found array field {}={}", ident.name, type_name);
                                         return type_name;
                                     } else {
-                                        // Regular type
-                                        eprintln!("🔍 DEBUG: resolve_expression_type: Found regular field {}={}", ident.name, field.type_ref.name);
-                                        return field.type_ref.name.clone();
+                                        // Regular type - include generic type arguments if present
+                                        let mut type_name = field.type_ref.name.clone();
+                                        if !field.type_ref.type_args.is_empty() {
+                                            // Add generic type arguments for better type inference
+                                            type_name.push('<');
+                                            for (i, type_arg) in field.type_ref.type_args.iter().enumerate() {
+                                                if i > 0 { type_name.push_str(", "); }
+                                                match type_arg {
+                                                    crate::ast::TypeArg::Type(type_ref) => {
+                                                        type_name.push_str(&type_ref.name);
+                                                    }
+                                                    crate::ast::TypeArg::Wildcard(_) => {
+                                                        type_name.push('?');
+                                                    }
+                                                }
+                                            }
+                                            type_name.push('>');
+                                        }
+                                        eprintln!("🔍 DEBUG: resolve_expression_type: Found regular field {}={}", ident.name, type_name);
+                                        return type_name;
                                     }
                                 }
                             }
@@ -3253,7 +3378,13 @@ impl MethodWriter {
                                 "java.base.Data".to_string()
                             } else {
                                 // Try to resolve the field type from the receiver class
-                                let receiver_internal = receiver_type.replace(".", "/");
+                                // Strip generic parameters for field resolution
+                                let base_receiver_type = if let Some(generic_start) = receiver_type.find('<') {
+                                    receiver_type[..generic_start].to_string()
+                                } else {
+                                    receiver_type.clone()
+                                };
+                                let receiver_internal = base_receiver_type.replace(".", "/");
                                 let field_descriptor = self.resolve_field_descriptor(&receiver_internal, &field_access.name);
                                 eprintln!("🔍 DEBUG: resolve_expression_type FieldAccess: receiver_type={}, field_name={}, field_descriptor={}", 
                                          receiver_type, field_access.name, field_descriptor);
@@ -3294,7 +3425,13 @@ impl MethodWriter {
                 // Try to resolve the method and get its return type from the descriptor
                 let owner_class = if let Some(target) = &method_call.target {
                     let target_type = self.resolve_expression_type(target);
-                    self.resolve_class_name(&target_type)
+                    // Strip generic parameters for method resolution
+                    let base_type = if let Some(generic_start) = target_type.find('<') {
+                        target_type[..generic_start].to_string()
+                    } else {
+                        target_type
+                    };
+                    self.resolve_class_name(&base_type)
                 } else {
                     self.current_class_name.as_ref()
                         .unwrap_or(&"java/lang/Object".to_string())
@@ -3303,6 +3440,19 @@ impl MethodWriter {
                 
                 let expected_arity = method_call.arguments.len();
                 if let Some(resolved) = resolve_method_with_context(&owner_class, &method_call.name, expected_arity, self.current_class.as_ref(), self.all_types.as_deref()) {
+                    // Special handling for generic methods before using descriptor
+                    if method_call.name == "next" && owner_class == "java/util/Iterator" {
+                        if let Some(target) = &method_call.target {
+                            let target_type = self.resolve_expression_type(target);
+                            eprintln!("🔍 DEBUG: Iterator.next() target_type = '{}'", target_type);
+                            // Check if this is an Iterator<Entry<K,V>> pattern
+                            if target_type.contains("Iterator") && target_type.contains("Entry") {
+                                eprintln!("🔍 DEBUG: Detected Iterator<Entry> pattern, returning Entry");
+                                return "java.util.Entry".to_string();
+                            }
+                        }
+                    }
+                    
                     // Extract return type from method descriptor
                     let descriptor = &resolved.descriptor;
                     if let Some(closing_paren) = descriptor.find(')') {
@@ -3315,7 +3465,21 @@ impl MethodWriter {
                 match method_call.name.as_str() {
                     "getClass" => "java/lang/Class".to_string(),
                     "iterator" => "java/util/Iterator".to_string(),
-                    "next" => "java/lang/Object".to_string(),
+                    "next" => {
+                        // Special handling for Iterator.next() - try to infer generic type
+                        if let Some(target) = &method_call.target {
+                            let target_type = self.resolve_expression_type(target);
+                            // Check if this is an Iterator<Entry<K,V>> pattern
+                            if target_type.contains("Iterator") {
+                                // For Iterator<Entry<T, Object>>, next() should return Entry<T, Object>
+                                // This is a simplified pattern matching for common cases
+                                if target_type.contains("Entry") {
+                                    return "java.util.Entry".to_string();
+                                }
+                            }
+                        }
+                        "java/lang/Object".to_string()
+                    },
                     "hasNext" => "boolean".to_string(),
                     "size" => "int".to_string(),
                     "add" => "boolean".to_string(),
@@ -3571,13 +3735,23 @@ impl MethodWriter {
         let field_class = if let Some(receiver) = &field_access.target {
             let receiver_type = self.resolve_expression_type(receiver);
 
-            // Convert type to internal class name format
-            if receiver_type.ends_with("[]") {
-                receiver_type.replace("[]", "").replace(".", "/")
-            } else if receiver_type.contains(".") {
-                receiver_type.replace(".", "/")
+            // Strip generic parameters for field resolution
+            let base_type = if let Some(generic_start) = receiver_type.find('<') {
+                let stripped = receiver_type[..generic_start].to_string();
+                eprintln!("🔍 DEBUG: generate_field_access: Stripped generic from '{}' to '{}'", receiver_type, stripped);
+                stripped
             } else {
+                eprintln!("🔍 DEBUG: generate_field_access: No generic parameters in '{}'", receiver_type);
                 receiver_type
+            };
+
+            // Convert type to internal class name format
+            if base_type.ends_with("[]") {
+                base_type.replace("[]", "").replace(".", "/")
+            } else if base_type.contains(".") {
+                base_type.replace(".", "/")
+            } else {
+                base_type
             }
         } else {
             self.current_class_name.clone().unwrap_or_else(|| "java/lang/String".to_string())
@@ -3683,7 +3857,15 @@ impl MethodWriter {
                     // Apply operation
                     self.generate_compound_assignment(assign.operator.clone())?;
                     // Duplicate the result for chained assignments
-                    Self::map_stack(self.bytecode_builder.dup())?;
+                    // Use dup2 for long/double (64-bit types), dup for others
+                    match var_type {
+                        LocalType::Long | LocalType::Double => {
+                            Self::map_stack(self.bytecode_builder.dup2())?;
+                        }
+                        _ => {
+                            Self::map_stack(self.bytecode_builder.dup())?;
+                        }
+                    }
                     // Store result
                     self.store_local_variable(index, &var_type)?;
                     // Value remains on stack for chained assignments
@@ -3727,7 +3909,15 @@ impl MethodWriter {
                     let index = local_var.index;
                     let var_type = local_var.var_type.clone();
                     // Duplicate the value on stack so we can store it and also return it
-                    Self::map_stack(self.bytecode_builder.dup())?;
+                    // Use dup2 for long/double (64-bit types), dup for others
+                    match var_type {
+                        LocalType::Long | LocalType::Double => {
+                            Self::map_stack(self.bytecode_builder.dup2())?;
+                        }
+                        _ => {
+                            Self::map_stack(self.bytecode_builder.dup())?;
+                        }
+                    }
                     self.store_local_variable(index, &var_type)?;
                     // Value remains on stack for chained assignments
                 } else {
@@ -3765,13 +3955,24 @@ impl MethodWriter {
                 // Determine the field class based on receiver type
                 let field_class = if let Some(receiver) = &field_access.target {
                     let receiver_type = self.resolve_expression_type(receiver);
-                    // Convert type to internal class name format
-                    if receiver_type.ends_with("[]") {
-                        receiver_type.replace("[]", "").replace(".", "/")
-                    } else if receiver_type.contains(".") {
-                        receiver_type.replace(".", "/")
+                    
+                    // Strip generic parameters for field resolution
+                    let base_type = if let Some(generic_start) = receiver_type.find('<') {
+                        let stripped = receiver_type[..generic_start].to_string();
+                        eprintln!("🔍 DEBUG: generate_assignment FieldAccess: Stripped generic from '{}' to '{}'", receiver_type, stripped);
+                        stripped
                     } else {
+                        eprintln!("🔍 DEBUG: generate_assignment FieldAccess: No generic parameters in '{}'", receiver_type);
                         receiver_type
+                    };
+                    
+                    // Convert type to internal class name format
+                    if base_type.ends_with("[]") {
+                        base_type.replace("[]", "").replace(".", "/")
+                    } else if base_type.contains(".") {
+                        base_type.replace(".", "/")
+                    } else {
+                        base_type
                     }
                 } else {
                     self.current_class_name.clone().unwrap_or_else(|| "java/lang/String".to_string())
