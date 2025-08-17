@@ -403,7 +403,7 @@ fn parse_java_files_in_order() {
 
     eprintln!("[CONFIG] Processing {} files in predefined order", file_list.len());
 
-    for file_path in file_list {
+    for file_path in &file_list {
         let path = Path::new(file_path);
         
         // Check if we should filter to a specific file
@@ -490,7 +490,7 @@ fn parse_java_files_in_order() {
         processed += 1;
     }
 
-    eprintln!("[SUMMARY] Processed: {}, Failures: {}", processed, failures.len());
+    eprintln!("[SUMMARY] Total files: {}, Processed: {}, Failures: {}", file_list.len(), processed, failures.len());
 
     if !failures.is_empty() {
         eprintln!("First failure:");

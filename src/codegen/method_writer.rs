@@ -201,7 +201,160 @@ fn resolve_method_in_inheritance_chain(
     
     eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Starting search for {}#{} with arity {}", owner_internal, name, expected_arity);
     
-    // Step 1: Check the target class itself
+    // Step 0: First check classes in the current compilation unit (filesystem classes)
+    if let Some(types) = all_types {
+        for type_decl in types {
+            if let crate::ast::TypeDecl::Class(class) = type_decl {
+                // Check if this class matches by comparing the class name
+                // The owner_internal should end with the class name
+                if owner_internal.ends_with(&class.name) {
+                    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found class {} in compilation unit", owner_internal);
+                    
+                    // Look for method in this class - collect all candidates first
+                    let mut candidates = Vec::new();
+                    for member in &class.body {
+                        if let crate::ast::ClassMember::Method(method) = member {
+                            if method.name == name && method.parameters.len() == expected_arity {
+                                let descriptor = generate_method_descriptor_from_decl(method);
+                                candidates.push((method, descriptor));
+                            }
+                        }
+                    }
+                    
+                    if !candidates.is_empty() {
+                        // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found {} method candidates for {}#{} in compilation unit class {}", 
+                        //          candidates.len(), name, expected_arity, owner_internal);
+                        
+                        // If only one candidate, use it
+                        if candidates.len() == 1 {
+                            let (method, descriptor) = &candidates[0];
+                            // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Single candidate: {}", descriptor);
+                            return Some(ResolvedMethod {
+                                owner_internal: owner_internal.to_string(),
+                                name: method.name.clone(),
+                                descriptor: descriptor.clone(),
+                                is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                                is_interface: false,
+                                is_ctor: method.name == "<init>",
+                                is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                                is_super_call: false,
+                                flags: 0, // TODO: compute proper flags if needed
+                            });
+                        }
+                        
+                        // Multiple candidates - use smart selection based on method characteristics
+                        
+                        // Check if any method has parameters - this affects our selection strategy
+                        let has_parameters = candidates.iter().any(|(_, desc)| {
+                            let param_start = desc.find('(').unwrap_or(0) + 1;
+                            let param_end = desc.find(')').unwrap_or(desc.len());
+                            param_end > param_start
+                        });
+                        
+                        // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Method selection - has_parameters={}, candidates={}", 
+                        //          has_parameters, candidates.len());
+                        // for (_, desc) in &candidates {
+                        //     eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Candidate descriptor: {}", desc);
+                        // }
+                        
+                        if has_parameters {
+                            // For methods with parameters (like nativePrint), prefer Object parameters for compatibility
+                            for (method, descriptor) in &candidates {
+                                // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Candidate: {}", descriptor);
+                                if descriptor.contains("(Ljava/lang/Object;)") || descriptor.contains("(LObject;)") {
+                                    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Selecting Object-parameter method (has_parameters=true): {}", descriptor);
+                                    return Some(ResolvedMethod {
+                                        owner_internal: owner_internal.to_string(),
+                                        name: method.name.clone(),
+                                        descriptor: descriptor.clone(),
+                                        is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                                        is_interface: false,
+                                        is_ctor: method.name == "<init>",
+                                        is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                                        is_super_call: false,
+                                        flags: 0, // TODO: compute proper flags if needed
+                                    });
+                                }
+                            }
+                        } else {
+                            // For methods without parameters (like getValue), prefer specific return types
+                            for (method, descriptor) in &candidates {
+                                // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Candidate: {}", descriptor);
+                                if !descriptor.contains(")Ljava/lang/Object;") && !descriptor.contains(")LObject;") {
+                                    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Selecting specific-return-type method (has_parameters=false): {}", descriptor);
+                                    return Some(ResolvedMethod {
+                                        owner_internal: owner_internal.to_string(),
+                                        name: method.name.clone(),
+                                        descriptor: descriptor.clone(),
+                                        is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                                        is_interface: false,
+                                        is_ctor: method.name == "<init>",
+                                        is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                                        is_super_call: false,
+                                        flags: 0, // TODO: compute proper flags if needed
+                                    });
+                                }
+                            }
+                        }
+                        
+                        // Fallback: try any remaining methods
+                        for (method, descriptor) in &candidates {
+                            // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Fallback to method: {}", descriptor);
+                            return Some(ResolvedMethod {
+                                owner_internal: owner_internal.to_string(),
+                                name: method.name.clone(),
+                                descriptor: descriptor.clone(),
+                                is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                                is_interface: false,
+                                is_ctor: method.name == "<init>",
+                                is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                                is_super_call: false,
+                                flags: 0, // TODO: compute proper flags if needed
+                            });
+                        }
+                        
+                        // Fallback to first candidate if no Object-parameter method found
+                        let (method, descriptor) = &candidates[0];
+                        // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Using first candidate: {}", descriptor);
+                        return Some(ResolvedMethod {
+                            owner_internal: owner_internal.to_string(),
+                            name: method.name.clone(),
+                            descriptor: descriptor.clone(),
+                            is_static: method.modifiers.contains(&crate::ast::Modifier::Static),
+                            is_interface: false,
+                            is_ctor: method.name == "<init>",
+                            is_private: method.modifiers.contains(&crate::ast::Modifier::Private),
+                            is_super_call: false,
+                            flags: 0, // TODO: compute proper flags if needed
+                        });
+                    }
+                    
+                    // If not found in this class, check parent class recursively
+                    if let Some(parent) = &class.extends {
+                        let parent_internal = parent.name.replace(".", "/");
+                        
+                        if let Some(resolved) = resolve_method_in_inheritance_chain(&parent_internal, name, expected_arity, None, all_types) {
+                            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method in parent class {} (from compilation unit)", parent_internal);
+                            return Some(resolved);
+                        }
+                    }
+                    
+                    // Check interfaces
+                    for interface in &class.implements {
+                        let interface_internal = interface.name.replace(".", "/");
+                        if let Some(resolved) = resolve_method_in_inheritance_chain(&interface_internal, name, expected_arity, current_class, all_types) {
+                            eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Found method in interface {} (from compilation unit)", interface_internal);
+                            return Some(resolved);
+                        }
+                    }
+                    
+                    break; // Found the class, no need to continue searching
+                }
+            }
+        }
+    }
+    
+    // Step 1: Check the target class itself in runtime classes
     eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Looking up '{}' in CLASSES_BY_NAME", owner_internal);
     if let Some(&idx) = CLASSES_BY_NAME.get(owner_internal) {
             let c = &CLASSES[idx];
@@ -234,12 +387,25 @@ fn resolve_method_in_inheritance_chain(
                 });
             }
             
-            // Multiple candidates - prefer methods with Object parameters over specific types
-            // This handles the HashMap.remove case: prefer remove(Object) over remove(HashMapCell)
+            // Multiple candidates - use smart selection based on method characteristics
+            // Check if any method has parameters - this affects our selection strategy
+            let has_parameters = candidates.iter().any(|m| {
+                let param_start = m.desc.find('(').unwrap_or(0) + 1;
+                let param_end = m.desc.find(')').unwrap_or(m.desc.len());
+                param_end > param_start
+            });
+            
+            // eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Runtime method selection - has_parameters={}, candidates={}", 
+            //          has_parameters, candidates.len());
+            // for m in &candidates {
+            //     eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Runtime candidate descriptor: {}", m.desc);
+            // }
+            
+            if has_parameters {
+                // For methods with parameters (like HashMap.remove), prefer Object parameters for compatibility
             for m in &candidates {
-                eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Candidate: {}", m.desc);
-                if m.desc.contains("Ljava/lang/Object;") {
-                    eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Selecting Object-parameter method: {}", m.desc);
+                    if m.desc.contains("(Ljava/lang/Object;)") || m.desc.contains("(LObject;)") {
+                        eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Selecting Object-parameter method (runtime, has_parameters=true): {}", m.desc);
                     return Some(ResolvedMethod {
                         owner_internal: c.internal.to_string(),
                         name: m.name.to_string(),
@@ -251,7 +417,42 @@ fn resolve_method_in_inheritance_chain(
                         is_super_call: false,
                         flags: m.flags,
                     });
+                    }
                 }
+            } else {
+                // For methods without parameters (like getValue), prefer specific return types
+                for m in &candidates {
+                    if !m.desc.contains(")Ljava/lang/Object;") && !m.desc.contains(")LObject;") {
+                        eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Selecting specific-return-type method (runtime, has_parameters=false): {}", m.desc);
+                        return Some(ResolvedMethod {
+                            owner_internal: c.internal.to_string(),
+                            name: m.name.to_string(),
+                            descriptor: m.desc.to_string(),
+                            is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                            is_interface: c.is_interface,
+                            is_ctor: m.name == "<init>",
+                            is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                            is_super_call: false,
+                            flags: m.flags,
+                        });
+                    }
+                }
+            }
+            
+            // Fallback: try any remaining methods
+            for m in &candidates {
+                eprintln!("🔍 DEBUG: resolve_method_in_inheritance_chain: Fallback to runtime method: {}", m.desc);
+                return Some(ResolvedMethod {
+                    owner_internal: c.internal.to_string(),
+                    name: m.name.to_string(),
+                    descriptor: m.desc.to_string(),
+                    is_static: m.flags & 0x0008 != 0, // ACC_STATIC
+                    is_interface: c.is_interface,
+                    is_ctor: m.name == "<init>",
+                    is_private: m.flags & 0x0002 != 0, // ACC_PRIVATE
+                    is_super_call: false,
+                    flags: m.flags,
+                });
             }
             
             // Fallback to first candidate if no Object-parameter method found
@@ -648,6 +849,13 @@ impl MethodWriter {
             "Exception" => return "java/lang/Exception".to_string(),
             "RuntimeException" => return "java/lang/RuntimeException".to_string(),
             "Throwable" => return "java/lang/Throwable".to_string(),
+            "Bytes" => return "java/lang/Bytes".to_string(),
+            "BytesType" => return "java/lang/BytesType".to_string(),
+            "SystemClassLoader" => return "java/base/SystemClassLoader".to_string(),
+            "Method" => return "java/lang/reflect/Method".to_string(),
+            "AccessibleObject" => return "java/lang/reflect/AccessibleObject".to_string(),
+            "Stream" => return "java/base/Stream".to_string(),
+            "Classes" => return "java/base/Classes".to_string(),
             _ => {}
         }
         
@@ -1085,7 +1293,7 @@ impl MethodWriter {
         
         // Add parameters
         for (i, param) in method.parameters.iter().enumerate() {
-            println!("🔍 DEBUG: initialize_parameters: Processing parameter {}: '{}' of type '{}'", i, param.name, param.type_ref.name);
+            println!("🔍 DEBUG: initialize_parameters: Processing parameter {}: '{}' of type '{}', varargs={}", i, param.name, param.type_ref.name, param.varargs);
             // Note: index calculation is kept for future use in local variable management
             let _index = if method.modifiers.contains(&Modifier::Static) {
                 i
@@ -1093,7 +1301,20 @@ impl MethodWriter {
                 i + 1
             };
             
-            let local_type = self.convert_type_ref_to_local_type(&param.type_ref);
+            // Handle varargs parameters: Class ... ptypes becomes Class[] ptypes
+            let effective_type_ref = if param.varargs {
+                TypeRef {
+                    name: param.type_ref.name.clone(),
+                    type_args: param.type_ref.type_args.clone(),
+                    annotations: param.type_ref.annotations.clone(),
+                    array_dims: param.type_ref.array_dims + 1, // Add one array dimension for varargs
+                    span: param.type_ref.span,
+                }
+            } else {
+                param.type_ref.clone()
+            };
+            
+            let local_type = self.convert_type_ref_to_local_type(&effective_type_ref);
             self.bytecode_builder.allocate(param.name.clone(), local_type);
             println!("🔍 DEBUG: initialize_parameters: Parameter {} allocated successfully", i);
         }
@@ -3151,9 +3372,10 @@ impl MethodWriter {
             let class_name = self.current_class_name.as_ref()
                 .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
                 .clone();
+            let resolved_class_name = self.resolve_class_name(&class_name);
             // Try to resolve field type from context, fallback to Object
-            let field_descriptor = self.resolve_field_descriptor(&class_name, ident);
-            let field_ref_index = self.add_field_ref(&class_name, ident, &field_descriptor);
+            let field_descriptor = self.resolve_field_descriptor(&resolved_class_name, ident);
+            let field_ref_index = self.add_field_ref(&resolved_class_name, ident, &field_descriptor);
             
             // Handle getfield with proper stack management for 64-bit types
             // getfield pops objectref and pushes field value
@@ -3234,6 +3456,11 @@ impl MethodWriter {
             // java.util.Arrays static methods
             "copyOfRange" => Some("java/util/Arrays".to_string()),
             "copyOf" => Some("java/util/Arrays".to_string()),
+            // java.base.Stream static methods
+            "write1" => Some("java/base/Stream".to_string()),
+            "write2" => Some("java/base/Stream".to_string()),
+            "write4" => Some("java/base/Stream".to_string()),
+            "set4" => Some("java/base/Stream".to_string()),
             _ => None,
         }
     }
@@ -3351,6 +3578,33 @@ impl MethodWriter {
             // Simple class name, try to resolve using classpath
             self.resolve_class_name(&base_receiver_type)
         };
+        
+        // Special case: handle java.base.SystemClassLoader as a class name, not field access
+        if receiver_internal == "java/base" && field_name == "SystemClassLoader" {
+            // This should be treated as a class reference, not a field access
+            // Return the class type itself
+            return "java.base.SystemClassLoader".to_string();
+        }
+        
+        // Special case: handle java.base.Classes as a class name, not field access
+        if receiver_internal == "java/base" && field_name == "Classes" {
+            // This should be treated as a class reference, not a field access
+            // Return the class type itself
+            return "java.base.Classes".to_string();
+        }
+        
+        // Special case: handle generic List.get() returning specific type instead of Object
+        if base_receiver_type == "java.lang.Object" && field_name == "type" {
+            // This is likely List<MethodTypeParameter>.get(i).type
+            // The get() method returns Object due to type erasure, but should be MethodTypeParameter
+            // Check if this is in the context of MethodType class
+            if let Some(current_class) = &self.current_class_name {
+                if current_class.contains("MethodType") {
+                    // Directly return the known type for MethodTypeParameter.type field
+                    return "java.lang.Class".to_string();
+                }
+            }
+        }
         
         let field_descriptor = self.resolve_field_descriptor(&receiver_internal, field_name);
         
@@ -3564,11 +3818,49 @@ impl MethodWriter {
             if i < param_types.len() {
                 let expected_type = &param_types[i];
                 let actual_type = self.infer_expression_type(arg);
+
                 
                 // Convert int to long if needed
                 if actual_type == "I" && expected_type == "J" {
                     // Emit i2l (int to long conversion)
                     Self::map_stack(self.bytecode_builder.i2l())?;
+                }
+                // Convert wrapper types to long if needed
+                else if expected_type == "J" {
+                    match actual_type.as_str() {
+                        "Ljava/lang/Byte;" | "LByte;" => {
+                            // Byte -> byte -> long: call byteValue() then i2l (byte is promoted to int on stack)
+                            let method_ref = self.add_method_ref("java/lang/Byte", "byteValue", "()B");
+                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                            Self::map_stack(self.bytecode_builder.i2l())?; // byte is promoted to int, then convert to long
+                        }
+                        "Ljava/lang/Short;" | "LShort;" => {
+                            // Short -> short -> long: call shortValue() then i2l (short is promoted to int on stack)
+                            let method_ref = self.add_method_ref("java/lang/Short", "shortValue", "()S");
+                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                            Self::map_stack(self.bytecode_builder.i2l())?; // short is promoted to int, then convert to long
+                        }
+                        "Ljava/lang/Integer;" | "LInteger;" => {
+                            // Integer -> int -> long: call intValue() then i2l
+                            let method_ref = self.add_method_ref("java/lang/Integer", "intValue", "()I");
+                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                            Self::map_stack(self.bytecode_builder.i2l())?;
+                        }
+                        "Ljava/lang/Long;" | "LLong;" => {
+                            // Long -> long: call longValue()
+                            let method_ref = self.add_method_ref("java/lang/Long", "longValue", "()J");
+                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                        }
+                        "Ljava/lang/Character;" | "LCharacter;" => {
+                            // Character -> char -> long: call charValue() then i2l (char is promoted to int on stack)
+                            let method_ref = self.add_method_ref("java/lang/Character", "charValue", "()C");
+                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                            Self::map_stack(self.bytecode_builder.i2l())?; // char is promoted to int, then convert to long
+                        }
+                        _ => {
+                            // No conversion needed or unsupported conversion
+                        }
+                    }
                 }
                 // Add more conversions as needed
             }
@@ -3667,7 +3959,7 @@ impl MethodWriter {
             _ => "Ljava/lang/Object;".to_string(), // Default fallback
         }
     }
-
+    
     /// Generate method descriptor with specific return type
     fn generate_method_descriptor_with_return(&self, args: &[Expr], return_type: &str) -> String {
         let mut descriptor = "(".to_string();
@@ -3833,9 +4125,10 @@ impl MethodWriter {
                     };
                     self.resolve_class_name(&base_type)
                 } else {
-                    self.current_class_name.as_ref()
+                    let current_class = self.current_class_name.as_ref()
                         .unwrap_or(&"java/lang/Object".to_string())
-                        .clone()
+                        .clone();
+                    self.resolve_class_name(&current_class)
                 };
                 
                 let expected_arity = method_call.arguments.len();
@@ -4122,13 +4415,38 @@ impl MethodWriter {
 
     /// Generate bytecode for field access
     fn generate_field_access(&mut self, field_access: &FieldAccessExpr) -> Result<()> {
-        eprintln!("🔍 DEBUG: generate_field_access: Starting field_name={}, has_receiver={}", 
-                 field_access.name, field_access.target.is_some());
-        eprintln!("🔍 DEBUG: generate_field_access: Stack depth before = {}", self.bytecode_builder.stack_depth());
+
         
         // Handle special .class field access
         if field_access.name == "class" && field_access.target.is_some() {
-            eprintln!("🔍 DEBUG: generate_field_access: Converting .class to getClass() method call");
+            if let Some(Expr::Identifier(ident)) = field_access.target.as_deref() {
+                // Check if this is a primitive type .class access (e.g., boolean.class, int.class)
+                let is_primitive = matches!(ident.name.as_str(), 
+                    "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void");
+                
+                if is_primitive {
+                    // For primitive types, generate the corresponding Class constant directly
+                    let class_name = match ident.name.as_str() {
+                        "boolean" => "java/lang/Boolean",
+                        "byte" => "java/lang/Byte", 
+                        "char" => "java/lang/Character",
+                        "short" => "java/lang/Short",
+                        "int" => "java/lang/Integer",
+                        "long" => "java/lang/Long",
+                        "float" => "java/lang/Float",
+                        "double" => "java/lang/Double",
+                        "void" => "java/lang/Void",
+                        _ => unreachable!()
+                    };
+                    
+                    // Load the TYPE field from the wrapper class (e.g., Boolean.TYPE)
+                    let field_ref_index = self.add_field_ref(class_name, "TYPE", "Ljava/lang/Class;");
+                    Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+                    return Ok(());
+                }
+            }
+            
+
             // Generate receiver
             if let Some(receiver) = &field_access.target {
                 self.generate_expression(receiver)?;
@@ -4216,13 +4534,34 @@ impl MethodWriter {
                 self.resolve_class_name(&base_type)
             }
         } else {
-            self.current_class_name.clone().unwrap_or_else(|| "java/lang/String".to_string())
+            let current_class = self.current_class_name.clone().unwrap_or_else(|| "java/lang/String".to_string());
+            self.resolve_class_name(&current_class)
         };
         
         eprintln!("🔍 DEBUG: generate_field_access: field_class={}, is_static_access={}", field_class, is_static_access);
-        let field_descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
+        
+        // Special case: handle Object.type as MethodTypeParameter.type
+        let (actual_field_class, field_descriptor) = if field_class == "java/lang/Object" && field_access.name == "type" {
+            if let Some(current_class) = &self.current_class_name {
+                if current_class.contains("MethodType") {
+                    // This is likely MethodTypeParameter.type field access
+                    let method_type_param_class = "java/lang/invoke/MethodTypeParameter";
+                    let descriptor = self.resolve_field_descriptor(method_type_param_class, &field_access.name);
+                    (method_type_param_class.to_string(), descriptor)
+                } else {
+                    let descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
+                    (field_class, descriptor)
+                }
+            } else {
+                let descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
+                (field_class, descriptor)
+            }
+        } else {
+            let descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
+            (field_class, descriptor)
+        };
 
-        let field_ref_index = self.add_field_ref(&field_class, &field_access.name, &field_descriptor);
+        let field_ref_index = self.add_field_ref(&actual_field_class, &field_access.name, &field_descriptor);
         
         // Handle field access with proper stack management for 64-bit types
         let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
@@ -4638,8 +4977,8 @@ impl MethodWriter {
         } else {
             // Array creation with size: new Type[size]
             // Generate size arguments
-            for arg in &array_creation.arguments {
-                self.generate_expression(arg)?;
+        for arg in &array_creation.arguments {
+            self.generate_expression(arg)?;
             }
         }
         
