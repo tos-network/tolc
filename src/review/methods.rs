@@ -268,12 +268,15 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                 // After walking, enforce interface consistency:
                 // - If at least two distinct interfaces provide a conflicting default for the same signature
                 //   and the class does not provide its own implementation (m.body.is_none()), report error.
+                // Debug info removed
                 if default_iface_sources.len() > 1 && m.body.is_none() {
                     // diamonds with differing defaults must be overridden
                     return Err(ReviewError::ConflictingInterfaceDefaults(m.name.clone()));
                 }
                 // - If any interface in the hierarchy declares the method abstract, the class must implement it (unless it already does).
-                if !abstract_iface_sources.is_empty() && m.body.is_none() {
+                // However, abstract classes are allowed to have abstract methods, so only check for concrete classes.
+                let class_is_abstract = class.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Abstract));
+                if !abstract_iface_sources.is_empty() && m.body.is_none() && !class_is_abstract {
                     return Err(ReviewError::MissingInterfaceMethodImplementation(m.name.clone()));
                 }
             }
@@ -392,7 +395,19 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
                 for (name, metas) in &mt.methods_meta {
                     for meta in metas {
                         if !meta.is_static && !meta.is_abstract {
+                            // Also add the erased signature for generic type parameters
+                            let erased_sig: Vec<String> = meta.signature.iter().map(|param_type| {
+                                if param_type.len() == 1 && param_type.chars().next().unwrap().is_uppercase() {
+                                    // Single uppercase letter is likely a generic type parameter, erase to Object
+                                    "Object".to_string()
+                                } else {
+                                    param_type.clone()
+                                }
+                            }).collect();
                             provided_by_super.entry(name.clone()).or_default().insert(meta.signature.clone());
+                            if erased_sig != meta.signature {
+                                provided_by_super.entry(name.clone()).or_default().insert(erased_sig);
+                            }
                         }
                     }
                 }
@@ -443,22 +458,56 @@ pub(crate) fn review_methods_of_class(class: &ClassDecl, global: &GlobalMemberIn
         }
 
         // Check abstract requirements: must be implemented by class/super or satisfied by a default
+        // However, abstract classes are allowed to have unimplemented interface methods
+        let class_is_abstract = class.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Abstract));
         for (name, sigs) in &abstract_reqs {
             for sig in sigs {
-                let class_has = declared_method_sigs.get(name).map_or(false, |s| s.contains(sig));
-                let super_has = provided_by_super.get(name).map_or(false, |s| s.contains(sig));
+                // Handle generic type erasure: T, E, K, V, etc. should be treated as Object
+                let erased_sig: Vec<String> = sig.iter().map(|param_type| {
+                    if param_type.len() == 1 && param_type.chars().next().unwrap().is_uppercase() {
+                        // Single uppercase letter is likely a generic type parameter, erase to Object
+                        "Object".to_string()
+                    } else {
+                        param_type.clone()
+                    }
+                }).collect();
+                // Check if this method is provided by Object class (special case)
+                let object_provides = is_object_method(name, sig);
+                let class_has = declared_method_sigs.get(name).map_or(false, |s| s.contains(sig) || s.contains(&erased_sig));
+                let super_has = provided_by_super.get(name).map_or(false, |s| s.contains(sig) || s.contains(&erased_sig)) || object_provides;
                 let default_ok = default_providers
                     .get(name)
                     .and_then(|m| m.get(sig))
                     .map(|set| !set.is_empty())
                     .unwrap_or(false);
-                if !class_has && !super_has && !default_ok {
+                if !class_has && !super_has && !default_ok && !class_is_abstract {
                     return Err(ReviewError::MissingInterfaceMethodImplementation(name.clone()));
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Check if a method is provided by java.lang.Object
+fn is_object_method(method_name: &str, signature: &[String]) -> bool {
+    match method_name {
+        "equals" => signature == &["Object"],
+        "hashCode" => signature.is_empty(),
+        "toString" => signature.is_empty(),
+        "clone" => signature.is_empty(),
+        "finalize" => signature.is_empty(),
+        "getClass" => signature.is_empty(),
+        "notify" => signature.is_empty(),
+        "notifyAll" => signature.is_empty(),
+        "wait" => {
+            // wait() has multiple overloads: wait(), wait(long), wait(long, int)
+            signature.is_empty() || 
+            signature == &["long"] || 
+            signature == &["long", "int"]
+        },
+        _ => false,
+    }
 }
 
 fn reduces_visibility(here: Visibility, superv: Visibility) -> bool {
