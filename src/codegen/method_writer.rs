@@ -3053,7 +3053,21 @@ impl MethodWriter {
             // Try to resolve field type from context, fallback to Object
             let field_descriptor = self.resolve_field_descriptor(&class_name, ident);
             let field_ref_index = self.add_field_ref(&class_name, ident, &field_descriptor);
-                Self::map_stack(self.bytecode_builder.getfield(field_ref_index))?;
+            
+            // Handle getfield with proper stack management for 64-bit types
+            // getfield pops objectref and pushes field value
+            // For long/double fields, the value takes 2 stack slots
+            let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+                2 // long or double
+            } else {
+                1 // all other types
+            };
+            
+            eprintln!("🔍 DEBUG: generate_identifier field access: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
+            
+            // Pop objectref (1 slot) and push field value (1 or 2 slots)
+            Self::map_stack(self.bytecode_builder.update_stack(1, field_slots))?;
+            self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
             }
         }
         
@@ -3759,7 +3773,21 @@ impl MethodWriter {
         let field_descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
 
         let field_ref_index = self.add_field_ref(&field_class, &field_access.name, &field_descriptor);
-        Self::map_stack(self.bytecode_builder.getfield(field_ref_index))?;
+        
+        // Handle getfield with proper stack management for 64-bit types
+        // getfield pops objectref and pushes field value
+        // For long/double fields, the value takes 2 stack slots
+        let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+            2 // long or double
+        } else {
+            1 // all other types
+        };
+        
+        eprintln!("🔍 DEBUG: generate_field_access: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
+        
+        // Pop objectref (1 slot) and push field value (1 or 2 slots)
+        Self::map_stack(self.bytecode_builder.update_stack(1, field_slots))?;
+        self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
         
         Ok(())
     }
@@ -3979,7 +4007,21 @@ impl MethodWriter {
                 };
                 let field_descriptor = self.resolve_field_descriptor(&field_class, &field_access.name);
                 let field_ref_index = self.add_field_ref(&field_class, &field_access.name, &field_descriptor);
-                Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
+                
+                // Handle putfield with proper stack management for 64-bit types
+                // putfield pops objectref and field value
+                // For long/double fields, the value takes 2 stack slots
+                let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+                    2 // long or double
+                } else {
+                    1 // all other types
+                };
+                
+                eprintln!("🔍 DEBUG: generate_assignment FieldAccess: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
+                
+                // Pop objectref (1 slot) and field value (1 or 2 slots)
+                Self::map_stack(self.bytecode_builder.update_stack(1 + field_slots, 0))?;
+                self.emit_opcode(self.opcode_generator.putfield(field_ref_index));
                 // Value remains on stack for chained assignments
             }
             Expr::ArrayAccess(array_access) => {
