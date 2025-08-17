@@ -4631,16 +4631,35 @@ impl MethodWriter {
     
     /// Generate bytecode for an array creation expression
     fn generate_array_creation(&mut self, array_creation: &NewExpr) -> Result<()> {
-        // Generate arguments
-        for arg in &array_creation.arguments {
-            self.generate_expression(arg)?;
+        if array_creation.arguments.is_empty() {
+            // Empty array initializer: new Type[] {}
+            // Push size 0 onto stack
+            Self::map_stack(self.bytecode_builder.iconst_0())?;
+        } else {
+            // Array creation with size: new Type[size]
+            // Generate size arguments
+            for arg in &array_creation.arguments {
+                self.generate_expression(arg)?;
+            }
         }
         
-        // Generate new array
-        // TODO: Handle different array types
-        // TODO: resolve atype for primitive arrays
-        Self::map_stack(self.bytecode_builder.newarray(0))?;
-        self.bytecode_builder.push_byte(10); // T_INT
+        // Generate new array with correct type
+        let element_type = &array_creation.target_type.name;
+        match element_type.as_str() {
+            "byte" => Self::map_stack(self.bytecode_builder.newarray(8))?, // T_BYTE
+            "char" => Self::map_stack(self.bytecode_builder.newarray(5))?, // T_CHAR
+            "double" => Self::map_stack(self.bytecode_builder.newarray(7))?, // T_DOUBLE
+            "float" => Self::map_stack(self.bytecode_builder.newarray(6))?, // T_FLOAT
+            "int" => Self::map_stack(self.bytecode_builder.newarray(10))?, // T_INT
+            "long" => Self::map_stack(self.bytecode_builder.newarray(11))?, // T_LONG
+            "short" => Self::map_stack(self.bytecode_builder.newarray(9))?, // T_SHORT
+            "boolean" => Self::map_stack(self.bytecode_builder.newarray(4))?, // T_BOOLEAN
+            _ => {
+                // Reference type array
+                let class_index = self.add_class_constant(element_type);
+                Self::map_stack(self.bytecode_builder.anewarray(class_index))?;
+            }
+        }
         
         Ok(())
     }
