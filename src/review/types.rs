@@ -368,8 +368,8 @@ pub(crate) fn build_global_member_index(ast: &Ast) -> GlobalMemberIndex {
                         visibility: visibility_of(&m.modifiers),
                         is_static: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static)),
                         is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
-                        // For interface methods: abstract unless it has 'default' modifier
-                        is_abstract: !m.modifiers.iter().any(|mm| matches!(mm, Modifier::Default)),
+                        // For interface methods: abstract unless it has 'default' modifier OR has a body
+                        is_abstract: !m.modifiers.iter().any(|mm| matches!(mm, Modifier::Default)) && m.body.is_none(),
                         has_body: m.body.is_some(),
                         return_type: m.return_type.as_ref().map(|t| t.name.clone()),
                     };
@@ -600,8 +600,8 @@ pub(crate) fn build_global_member_index_with_classpath(current_ast: &Ast, classp
                                 visibility: visibility_of(&m.modifiers),
                                 is_static: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Static)),
                                 is_final: m.modifiers.iter().any(|mm| matches!(mm, Modifier::Final)),
-                                // For interface methods: abstract unless it has 'default' modifier
-                                is_abstract: !m.modifiers.iter().any(|mm| matches!(mm, Modifier::Default)),
+                                // For interface methods: abstract unless it has 'default' modifier OR has a body
+                                is_abstract: !m.modifiers.iter().any(|mm| matches!(mm, Modifier::Default)) && m.body.is_none(),
                                 has_body: m.body.is_some(),
                                 return_type: m.return_type.as_ref().map(|t| t.name.clone()),
                             };

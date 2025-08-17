@@ -865,39 +865,34 @@ impl MethodWriter {
             return simple_name.replace('.', "/");
         }
         
-        // Check current package - assume it's java.util for now
-        // In a real implementation, we would get this from the current class context
-        let current_package = if let Some(class_name) = &self.current_class_name {
-            if let Some(last_slash) = class_name.rfind('/') {
-                &class_name[..last_slash]
-            } else {
-                "java/util" // Default fallback
-            }
-        } else {
-            "java/util" // Default fallback
-        };
-        
-        // Check if the type exists in current package
-        let current_package_name = format!("{}/{}", current_package, simple_name);
-        
         // First try to resolve using classpath
         if let Some(internal_name) = classpath::resolve_class_name(simple_name) {
             return internal_name.to_string();
         }
         
-        // For now, assume types like HashMapCell are in java.util
+        // For well-known types, use explicit package mapping
         match simple_name {
             "HashMapCell" | "HashMap" | "List" | "ArrayList" | "Iterator" | "Collection" => {
-                format!("java/util/{}", simple_name)
+                return format!("java/util/{}", simple_name);
             }
             "PrintStream" | "InputStream" | "OutputStream" => {
-                format!("java/io/{}", simple_name)
+                return format!("java/io/{}", simple_name);
             }
-            _ => {
-                // Default to current package
-                current_package_name
+            _ => {}
+        }
+        
+        // Check current package context
+        if let Some(class_name) = &self.current_class_name {
+            if let Some(last_slash) = class_name.rfind('/') {
+                // Current class has a package, use the same package for the simple name
+                let current_package = &class_name[..last_slash];
+                return format!("{}/{}", current_package, simple_name);
             }
         }
+        
+        // No package context found - this is likely a test class or class in default package
+        // Return the simple name as-is (no package prefix)
+        simple_name.to_string()
     }
     
     /// Emit invoke instruction with proper opcode selection
@@ -3398,7 +3393,7 @@ impl MethodWriter {
                         for &interface_name in c.interfaces {
                             if let Some(&interface_idx) = CLASSES_BY_NAME.get(interface_name) {
                                 let interface_class = &CLASSES[interface_idx];
-                                if let Some(fm) = interface_class.fields.iter().find(|fm| fm.name == ident) {
+                                if let Some(_fm) = interface_class.fields.iter().find(|fm| fm.name == ident) {
                                     is_static_field = true; // Interface fields are always static
                                     field_owner = interface_name.to_string();
                                     break;
