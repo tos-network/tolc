@@ -550,6 +550,7 @@ fn parse_all_java_files_under_tests_java() {
         let mut cw = ClassWriter::new();
         cw.set_package_name(package_name_opt.as_deref());
         cw.set_debug(true);
+        cw.set_all_types(ast.type_decls.clone());
         let gen_res = match type_decl {
             TypeDecl::Class(c) => cw.generate_class(c),
             TypeDecl::Interface(i) => cw.generate_interface(i),
@@ -591,6 +592,7 @@ fn parse_all_java_files_under_tests_java() {
             s = strip_debug_tables(&s);
             s = strip_signatures_and_header_generics(&s);
             s = normalize_cp_indices(&s);
+            s = normalize_field_references(&s);
             s = collapse_spaces(&s);
             Ok(s)
         };
@@ -726,6 +728,39 @@ fn normalize_cp_indices(s: &str) -> String {
         }
     }
     out
+}
+
+fn normalize_field_references(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for line in s.lines() {
+        if let Some(field_start) = line.find("// Field ") {
+            let prefix = &line[..field_start];
+            let field_part = &line[field_start + 9..]; // Skip "// Field "
+            
+            // Look for pattern: ClassName.fieldName:descriptor
+            if let Some(dot_pos) = field_part.find('.') {
+                if let Some(colon_pos) = field_part.find(':') {
+                    if dot_pos < colon_pos {
+                        // Extract fieldName:descriptor part
+                        let field_name_and_desc = &field_part[dot_pos + 1..];
+                        result.push_str(prefix);
+                        result.push_str("// Field ");
+                        result.push_str(field_name_and_desc);
+                        result.push('\n');
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    
+    // Remove the trailing newline
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    result
 }
 
 fn collapse_spaces(s: &str) -> String {

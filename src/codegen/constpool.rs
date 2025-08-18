@@ -164,9 +164,17 @@ impl ConstantPool {
     fn resolve_index(&mut self, idx: u16) {
         if idx == 0 { return; }
         let pos = (idx - 1) as usize;
-        if pos >= self.constants.len() { return; }
-        if self.pending.get(pos).cloned().unwrap_or(None).is_none() { return; }
+        // eprintln!("🔍 DEBUG: resolve_index({}) - entry: constants.len={}, pending.len={}", idx, self.constants.len(), self.pending.len());
+        if pos >= self.constants.len() { 
+            eprintln!("🔍 DEBUG: resolve_index - idx {} out of bounds (constants.len={})", idx, self.constants.len());
+            return; 
+        }
+        if self.pending.get(pos).cloned().unwrap_or(None).is_none() { 
+            eprintln!("🔍 DEBUG: resolve_index - idx {} has no pending entry (pending.len={})", idx, self.pending.len());
+            return; 
+        }
         if let Some(p) = self.pending[pos].clone() {
+            // eprintln!("🔍 DEBUG: resolve_index - resolving idx {} with pending {:?}", idx, p);
             match p {
                 Pending::Class(name) => {
                     let name_index = self.try_add_utf8(&name).unwrap();
@@ -197,10 +205,12 @@ impl ConstantPool {
                     self.pending[pos] = None;
                 }
                 Pending::MethodRef { class, name, descriptor } => {
+                    // eprintln!("🔍 DEBUG: Resolving MethodRef - class: {}, name: {}, descriptor: {}", class, name, descriptor);
                     let class_index = self.try_add_class(&class).unwrap();
                     self.resolve_index(class_index);
                     let nt_index = self.try_add_name_and_type(&name, &descriptor).unwrap();
                     self.resolve_index(nt_index);
+                    eprintln!("🔍 DEBUG: MethodRef resolved - class_index: {}, nt_index: {}", class_index, nt_index);
                     self.constants[pos] = Constant::MethodRef(class_index, nt_index);
                     self.pending[pos] = None;
                 }
@@ -236,8 +246,10 @@ impl ConstantPool {
         if let Some(idx) = self.utf8_map.get(value) { return Ok(*idx); }
         self.ensure_space(1)?;
         let constant = Constant::Utf8(value.to_string());
+        eprintln!("🔍 DEBUG: try_add_utf8('{}') - before push: constants.len={}, pending.len={}", value, self.constants.len(), self.pending.len());
         self.constants.push(constant);
         self.pending.push(None);
+        eprintln!("🔍 DEBUG: try_add_utf8('{}') - after push: constants.len={}, pending.len={}", value, self.constants.len(), self.pending.len());
         let idx = self.constants.len() as u16;
         self.utf8_map.insert(value.to_string(), idx);
         Ok(idx)
@@ -254,8 +266,10 @@ impl ConstantPool {
         // First add Utf8 for the class name to stabilize index ordering like javac
         let name_utf8 = self.try_add_utf8(name)?;
         // Now add the Class entry pointing to the Utf8
+        eprintln!("🔍 DEBUG: try_add_class - before push: constants.len={}, pending.len={}", self.constants.len(), self.pending.len());
         self.constants.push(Constant::Class(name_utf8));
         self.pending.push(None);
+        eprintln!("🔍 DEBUG: try_add_class - after push: constants.len={}, pending.len={}", self.constants.len(), self.pending.len());
         let idx = self.constants.len() as u16;
         self.class_map.insert(name.to_string(), idx);
         Ok(idx)
@@ -285,8 +299,11 @@ impl ConstantPool {
         if let Some(idx) = self.fieldref_key_map.get(&key) { return Ok(*idx); }
         self.ensure_space(1)?;
         let idx = (self.constants.len() + 1) as u16;
+        eprintln!("🔍 DEBUG: Adding FieldRef - idx: {}, class: {}, name: {}, descriptor: {}", idx, class, name, descriptor);
+        eprintln!("🔍 DEBUG: Before push - constants.len: {}, pending.len: {}", self.constants.len(), self.pending.len());
         self.constants.push(Constant::FieldRef(0, 0));
         self.pending.push(Some(Pending::FieldRef { class: class.to_string(), name: name.to_string(), descriptor: descriptor.to_string() }));
+        eprintln!("🔍 DEBUG: After push - constants.len: {}, pending.len: {}", self.constants.len(), self.pending.len());
         self.fieldref_key_map.insert(key, idx);
         self.top_touches.push(idx);
         self.resolve_index(idx);
@@ -300,8 +317,11 @@ impl ConstantPool {
         if let Some(idx) = self.methodref_key_map.get(&key) { return Ok(*idx); }
         self.ensure_space(1)?;
         let idx = (self.constants.len() + 1) as u16;
+        eprintln!("🔍 DEBUG: Adding MethodRef - idx: {}, class: {}, name: {}, descriptor: {}", idx, class, name, descriptor);
+        eprintln!("🔍 DEBUG: Before push - constants.len: {}, pending.len: {}", self.constants.len(), self.pending.len());
         self.constants.push(Constant::MethodRef(0, 0));
         self.pending.push(Some(Pending::MethodRef { class: class.to_string(), name: name.to_string(), descriptor: descriptor.to_string() }));
+        eprintln!("🔍 DEBUG: After push - constants.len: {}, pending.len: {}", self.constants.len(), self.pending.len());
         self.methodref_key_map.insert(key, idx);
         self.top_touches.push(idx);
         self.resolve_index(idx);
@@ -317,6 +337,7 @@ impl ConstantPool {
         self.ensure_space(1)?;
         let constant = Constant::InterfaceMethodRef(class_index, name_and_type_index);
         self.constants.push(constant);
+        self.pending.push(None);
         let idx = self.constants.len() as u16;
         self.interfaceref_map.insert((class_index, name_and_type_index), idx);
         Ok(idx)
@@ -342,6 +363,7 @@ impl ConstantPool {
         self.ensure_space(1)?;
         let constant = Constant::Integer(value);
         self.constants.push(constant);
+        self.pending.push(None);
         Ok(self.constants.len() as u16)
     }
 
@@ -356,6 +378,7 @@ impl ConstantPool {
         self.ensure_space(1)?;
         let constant = Constant::Float(value);
         self.constants.push(constant);
+        self.pending.push(None);
         Ok(self.constants.len() as u16)
     }
 

@@ -3014,6 +3014,17 @@ impl Parser {
 
     fn is_variable_declaration_start(&self) -> bool {
         let mut i = self.current;
+        
+        // Skip modifiers (like 'final')
+        while matches!(self.peek_token_type(i), 
+            Some(Token::Public) | Some(Token::Protected) | Some(Token::Private) |
+            Some(Token::Abstract) | Some(Token::Static) | Some(Token::Final) |
+            Some(Token::Native) | Some(Token::Synchronized) | Some(Token::Transient) |
+            Some(Token::Volatile) | Some(Token::Strictfp) | Some(Token::Default)
+        ) {
+            i += 1;
+        }
+        
         // Try to see if a type ref starts here
         if !self.lookahead_type_ref(&mut i) { return false; }
         // Next token after a type should be an identifier (variable name)

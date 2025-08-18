@@ -76,6 +76,8 @@ pub struct StackState {
     pub max_stack: u16,
     /// Stack frame for tracking local variables
     pub frame: StackFrame,
+    /// Code generation enabled? (javac-style alive tracking)
+    pub alive: bool,
 }
 
 impl StackState {
@@ -86,6 +88,7 @@ impl StackState {
             max_depth: 0,
             max_stack: 0,
             frame: StackFrame::new(),
+            alive: true,
         }
     }
     
@@ -105,12 +108,15 @@ impl StackState {
             });
         }
         
+        let old_depth = self.depth;
         self.depth -= dec;
         self.depth += inc;
         
         if self.depth > self.max_depth {
+            let old_max = self.max_depth;
             self.max_depth = self.depth;
             self.max_stack = self.max_depth;
+            // eprintln!("🔍 DEBUG: MAX_STACK UPDATE: {} -> {} (depth: {} -> {})", old_max, self.max_depth, old_depth, self.depth);
         }
         
         Ok(())
@@ -131,6 +137,16 @@ impl StackState {
         self.depth
     }
     
+    /// Set the current stack depth (for control flow analysis)
+    pub fn set_depth(&mut self, depth: u16) {
+        self.depth = depth;
+        // Update max_depth if necessary
+        if self.depth > self.max_depth {
+            self.max_depth = self.depth;
+            self.max_stack = self.max_depth;
+        }
+    }
+    
     /// Get the maximum stack depth
     pub fn max_depth(&self) -> u16 {
         self.max_depth
@@ -144,6 +160,21 @@ impl StackState {
     /// Get the maximum number of local variables
     pub fn max_locals(&self) -> u16 {
         self.frame.max_locals
+    }
+    
+    /// Check if code generation is currently enabled (javac-style)
+    pub fn is_alive(&self) -> bool {
+        self.alive
+    }
+    
+    /// Mark code as dead (unreachable) - javac-style
+    pub fn mark_dead(&mut self) {
+        self.alive = false;
+    }
+    
+    /// Mark code as alive (reachable) - for label resolution
+    pub fn mark_alive(&mut self) {
+        self.alive = true;
     }
 }
 
@@ -366,6 +397,11 @@ impl BytecodeBuilder {
         self.stack_state.depth()
     }
     
+    /// Set the current stack depth (for control flow analysis)
+    pub fn set_stack_depth(&mut self, depth: u16) {
+        self.stack_state.set_depth(depth);
+    }
+    
     /// Manually update stack state (for instructions not handled by high-level methods)
     pub fn update_stack(&mut self, dec: u16, inc: u16) -> Result<(), StackError> {
         self.stack_state.update(dec, inc)
@@ -374,6 +410,22 @@ impl BytecodeBuilder {
     /// Update local variable lifetime
     pub fn update_lifetime(&mut self, index: u16, start_pc: u16, end_pc: u16) {
         self.stack_state.frame.update_lifetime(index, start_pc, end_pc);
+    }
+    
+    /// Check if code generation is currently enabled (javac-style)
+    pub fn is_alive(&self) -> bool {
+        // javac-style: alive OR has pending jumps (forward references)
+        self.stack_state.is_alive() || !self.labels.is_empty()
+    }
+    
+    /// Mark code as dead (unreachable) - javac-style
+    pub fn mark_dead(&mut self) {
+        self.stack_state.mark_dead();
+    }
+    
+    /// Mark code as alive (reachable) - for label resolution
+    pub fn mark_alive(&mut self) {
+        self.stack_state.mark_alive();
     }
 
     /// Adjust stack for an invoke instruction given call-site metadata
@@ -410,10 +462,6 @@ impl BytecodeBuilder {
             if ref_label == label {
                 // ref_pc stores the instruction pc (position of opcode)
                 let instruction_pc_i32 = (*ref_pc) as i32;
-                // JVM branch offset is signed 16-bit: target_pc - (instruction_pc + 3)
-                // instruction_pc points to the opcode (start of the branch instruction)
-                // +3 because branch instruction is 3 bytes: opcode + 2-byte offset
-                let offset_i32 = current_pc - (instruction_pc_i32 + 3);
                 // Use javac's offset calculation method: target_pc - instruction_pc
                 // This differs from the JVM specification formula: target_pc - (instruction_pc + 3)
                 // javac's approach is simpler and avoids the need for the +3 adjustment
@@ -435,32 +483,50 @@ impl BytecodeBuilder {
             self.labels.remove(index);
         }
         
+        // Mark code as alive when a label is resolved (javac-style)
+        // This allows code generation to continue after jumps to this label
+        self.mark_alive();
 
     }
     
     /// Push raw bytes
     pub fn push(&mut self, byte: u8) {
-        self.code.push(byte);
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.push(byte);
+        }
     }
     
     /// Extend with bytes
     pub fn extend_from_slice(&mut self, bytes: &[u8]) {
-        self.code.extend_from_slice(bytes);
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.extend_from_slice(bytes);
+        }
     }
     
     /// Push instruction opcode
     pub fn push_instruction(&mut self, opcode: u8) {
-        self.code.push(opcode);
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.push(opcode);
+        }
     }
     
     /// Push byte value
     pub fn push_byte(&mut self, value: u8) {
-        self.code.push(value);
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.push(value);
+        }
     }
     
     /// Push short value (big-endian)
     pub fn push_short(&mut self, value: i16) {
-        self.code.extend_from_slice(&value.to_be_bytes());
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.extend_from_slice(&value.to_be_bytes());
+        }
     }
     
     // Constants - Use OpcodeGenerator
@@ -1088,9 +1154,13 @@ impl BytecodeBuilder {
     }
 
     pub fn goto(&mut self, label: &str) -> Result<(), StackError> {
-        // Emit only the opcode, add_label_reference will handle the offset
-        self.code.push(crate::codegen::opcodes::GOTO);
-        self.add_label_reference(label);
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            // Emit only the opcode, add_label_reference will handle the offset
+            self.code.push(crate::codegen::opcodes::GOTO);
+            self.add_label_reference(label);
+            self.mark_dead(); // Mark subsequent code as unreachable (javac-style)
+        }
         Ok(())
     }
 
@@ -1146,37 +1216,61 @@ impl BytecodeBuilder {
 
     // Returns - Use OpcodeGenerator
     pub fn ireturn(&mut self) -> Result<(), StackError> {
-        self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.ireturn());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.stack_state.pop(1)?;
+            self.emit_opcode(self.opcode_generator.ireturn());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
     pub fn lreturn(&mut self) -> Result<(), StackError> {
-        self.stack_state.pop(2)?;
-        self.emit_opcode(self.opcode_generator.lreturn());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.stack_state.pop(2)?;
+            self.emit_opcode(self.opcode_generator.lreturn());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
     pub fn freturn(&mut self) -> Result<(), StackError> {
-        self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.freturn());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.stack_state.pop(1)?;
+            self.emit_opcode(self.opcode_generator.freturn());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
     pub fn dreturn(&mut self) -> Result<(), StackError> {
-        self.stack_state.pop(2)?;
-        self.emit_opcode(self.opcode_generator.dreturn());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.stack_state.pop(2)?;
+            self.emit_opcode(self.opcode_generator.dreturn());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
     pub fn areturn(&mut self) -> Result<(), StackError> {
-        self.stack_state.pop(1)?;
-        self.emit_opcode(self.opcode_generator.areturn());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.stack_state.pop(1)?;
+            self.emit_opcode(self.opcode_generator.areturn());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
     pub fn return_(&mut self) -> Result<(), StackError> {
-        self.emit_opcode(self.opcode_generator.return_void());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.emit_opcode(self.opcode_generator.return_void());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
@@ -1318,11 +1412,8 @@ impl BytecodeBuilder {
 
     // Field access operations - Use OpcodeGenerator
     pub fn getfield(&mut self, index: u16) -> Result<(), StackError> {
-        eprintln!("🔍 DEBUG: getfield: Before - stack_depth={}", self.stack_state.depth);
         self.stack_state.pop(1)?; // Pop object reference
-        eprintln!("🔍 DEBUG: getfield: After pop - stack_depth={}", self.stack_state.depth);
         self.stack_state.push(1)?; // Push field value (size depends on field type)
-        eprintln!("🔍 DEBUG: getfield: After push - stack_depth={}", self.stack_state.depth);
         self.emit_opcode(self.opcode_generator.getfield(index));
         Ok(())
     }
@@ -1408,8 +1499,12 @@ impl BytecodeBuilder {
 
     // Exception handling and synchronization - Use OpcodeGenerator
     pub fn athrow(&mut self) -> Result<(), StackError> {
-        self.stack_state.pop(1)?; // Pop exception object
-        self.emit_opcode(self.opcode_generator.athrow());
+        // Only process if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.stack_state.pop(1)?; // Pop exception object
+            self.emit_opcode(self.opcode_generator.athrow());
+            self.mark_dead(); // Mark subsequent code as unreachable
+        }
         Ok(())
     }
 
@@ -1510,15 +1605,24 @@ impl BytecodeBuilder {
 
     // Utility methods
     fn emit_opcode(&mut self, opcode_bytes: Vec<u8>) {
-        self.code.extend(opcode_bytes);
+        // Only emit instructions if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.extend(opcode_bytes);
+        }
     }
     
     fn emit_byte(&mut self, byte: u8) {
-        self.code.push(byte);
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.push(byte);
+        }
     }
     
     fn emit_short(&mut self, value: i16) {
-        self.code.extend_from_slice(&value.to_be_bytes());
+        // Only emit if code is alive (javac-style)
+        if self.stack_state.is_alive() {
+            self.code.extend_from_slice(&value.to_be_bytes());
+        }
     }
     
     /// Add a label reference that will be resolved later
@@ -1535,7 +1639,6 @@ impl BytecodeBuilder {
             // Backward reference - resolve immediately
             let instruction_pc_i32 = instruction_pc as i32;
             let target_pc_i32 = target_pc as i32;
-            let offset_i32 = target_pc_i32 - (instruction_pc_i32 + 3);
             // Use javac's offset calculation method: target_pc - instruction_pc
             // This differs from the JVM specification formula: target_pc - (instruction_pc + 3)
             // javac's approach is simpler and avoids the need for the +3 adjustment
