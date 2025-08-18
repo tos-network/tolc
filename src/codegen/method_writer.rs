@@ -722,9 +722,38 @@ pub struct MethodWriter {
 }
 
 impl MethodWriter {
+    fn slots_of_type(ch: char) -> i32 {
+        match ch { 'J' | 'D' => 2, _ => 1 }
+    }
+
+    /// Update stack for invoke based on descriptor like: (IIJ)Ljava/lang/Object;
+    fn apply_invoke_stack_effect(&mut self, desc: &str, is_static: bool) -> Result<()> {
+        let mut it = desc.chars();
+        debug_assert_eq!(it.next(), Some('('));
+        let mut args = 0i32;
+        let mut in_obj = false;
+        for c in it.by_ref() {
+            match c {
+                ')' => break,
+                '[' => { args += 1; in_obj = false; }
+                'L' => { args += 1; in_obj = true; }
+                ';' => { in_obj = false; }
+                _ if in_obj => {}
+                _ => args += Self::slots_of_type(c),
+            }
+        }
+        let rt = it.next().unwrap_or('V');
+        let ret = match rt { 'V' => 0, 'J' | 'D' => 2, _ => 1 };
+        let pops = args + if is_static { 0 } else { 1 };
+        Self::map_stack(self.bytecode_builder.update_stack(pops as u16, ret as u16))?;
+        Ok(())
+    }
+
     fn label_str(&self, id: u16) -> String {
         format!("L{}", id)
     }
+
+
     /// Helper to map BytecodeBuilder StackError into our Error (no self borrow)
     fn map_stack<T>(r: std::result::Result<T, crate::codegen::bytecode::StackError>) -> Result<()> {
         if let Err(ref e) = r {
@@ -848,6 +877,7 @@ impl MethodWriter {
             "Comparable" => return "java/lang/Comparable".to_string(),
             "Exception" => return "java/lang/Exception".to_string(),
             "RuntimeException" => return "java/lang/RuntimeException".to_string(),
+            "UnsupportedOperationException" => return "java/lang/UnsupportedOperationException".to_string(),
             "Throwable" => return "java/lang/Throwable".to_string(),
             "Bytes" => return "java/lang/Bytes".to_string(),
             "BytesType" => return "java/lang/BytesType".to_string(),
@@ -872,7 +902,7 @@ impl MethodWriter {
         
         // For well-known types, use explicit package mapping
         match simple_name {
-            "HashMapCell" | "HashMap" | "List" | "ArrayList" | "Iterator" | "Collection" => {
+            "HashMapCell" | "HashMap" | "List" | "ArrayList" | "Iterator" | "Collection" | "ArraysListIterator" => {
                 return format!("java/util/{}", simple_name);
             }
             "PrintStream" | "InputStream" | "OutputStream" => {
@@ -902,8 +932,15 @@ impl MethodWriter {
         // Add method reference to constant pool
         let idx = if let Some(cp) = &self.constant_pool {
             let mut cp_ref = cp.borrow_mut();
+            if callee.is_interface {
+                // Use InterfaceMethodRef for interface methods
+                cp_ref.try_add_interface_method_ref(&callee.owner_internal, &callee.name, &callee.descriptor)
+                    .map_err(|e| Error::codegen_error(&format!("Failed to add interface method ref: {}", e)))?
+            } else {
+                // Use MethodRef for regular methods
             cp_ref.try_add_method_ref(&callee.owner_internal, &callee.name, &callee.descriptor)
                 .map_err(|e| Error::codegen_error(&format!("Failed to add method ref: {}", e)))?
+            }
         } else {
             return Err(Error::codegen_error("No constant pool available for method reference"));
         };
@@ -919,28 +956,10 @@ impl MethodWriter {
             INVOKEVIRTUAL
         };
         
-        // Adjust stack according to descriptor and static-ness
-        let arg_slots = self.descriptor_arg_slot_count(&callee.descriptor) as u16;
-        let returns_value = self.descriptor_returns_value(&callee.descriptor);
-        let ret_slots: u16 = if returns_value {
-            // Calculate return slots based on return type
-            // long and double take 2 slots, others take 1 slot
-            if let Some(closing_paren) = callee.descriptor.find(')') {
-                let return_part = &callee.descriptor[closing_paren + 1..];
-                match return_part {
-                    "J" | "D" => 2, // long or double
-                    _ => 1,         // all other types
-                }
-            } else {
-                1 // fallback
-            }
-        } else {
-            0 // void
-        };
-        let is_static = callee.is_static;
-        eprintln!("🔍 DEBUG: emit_invoke: method={}#{}, descriptor={}, returns_value={}, ret_slots={}", 
-                 callee.owner_internal, callee.name, callee.descriptor, returns_value, ret_slots);
-        Self::map_stack(self.bytecode_builder.adjust_invoke_stack(is_static, arg_slots, ret_slots))?;
+        // Use new stack accounting method
+        eprintln!("🔍 DEBUG: emit_invoke: method={}#{}, descriptor={}, is_static={}", 
+                 callee.owner_internal, callee.name, callee.descriptor, callee.is_static);
+        self.apply_invoke_stack_effect(&callee.descriptor, callee.is_static)?;
 
         // Emit invoke via builder for proper bookkeeping
         if op == INVOKESTATIC {
@@ -1834,9 +1853,9 @@ impl MethodWriter {
         Ok(())
     }
     
-    /// Check if opcode is a return instruction
+    /// Check if opcode is a terminal instruction (return or throw)
     fn is_return_opcode(&self, opcode: u8) -> bool {
-        matches!(opcode, 0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0)
+        matches!(opcode, 0xb1 | 0xac | 0xad | 0xae | 0xaf | 0xb0 | 0xbf)  // Added 0xbf (athrow)
     }
 
     /// Check if all code paths in a list of statements have return statements
@@ -1857,6 +1876,7 @@ impl MethodWriter {
     fn statement_has_return_on_all_paths(&self, stmt: &Stmt) -> bool {
         match stmt {
             Stmt::Return(_) => true,
+            Stmt::Throw(_) => true,  // athrow is also a terminal instruction
             Stmt::If(if_stmt) => {
                 // For if-else statements, both branches must have returns
                 if let Some(else_branch) = &if_stmt.else_branch {
@@ -2559,21 +2579,33 @@ impl MethodWriter {
         match stmt {
             Stmt::Expression(expr_stmt) => {
                 eprintln!("🔍 DEBUG: generate_statement: Expression statement, about to generate expression");
+                
+                // Special handling for assignments to avoid value preservation when used as statements
+                match &expr_stmt.expr {
+                    Expr::Assignment(assign) => {
+                        // Generate assignment without preserving value since it's used as a statement
+                        self.generate_assignment_with_context(assign, false)?;
+                    }
+                    _ => {
                 self.generate_expression(&expr_stmt.expr)?;
                 eprintln!("🔍 DEBUG: generate_statement: Expression generated, stack_depth={}", self.bytecode_builder.stack_depth());
                 // Pop only if expression likely leaves a value on stack and is not a method call (which may be void).
                 // Avoid popping after method calls; known void-returning calls (e.g., Stream.write2/4) shouldn't be popped.
                 let should_pop = match &expr_stmt.expr {
                     Expr::MethodCall(_) => false,
-                    Expr::Assignment(_) => true, // Assignment now leaves value on stack for chained assignments
                     Expr::Identifier(_) | Expr::Literal(_) | Expr::Binary(_) | Expr::Unary(_) | Expr::ArrayAccess(_) | Expr::FieldAccess(_) | Expr::Cast(_) | Expr::Conditional(_) | Expr::New(_) | Expr::Parenthesized(_) | Expr::InstanceOf(_) | Expr::ArrayInitializer(_) => true,
+                            _ => false,
                 };
                 eprintln!("🔍 DEBUG: generate_statement: should_pop={}, stack_depth={}", should_pop, self.bytecode_builder.stack_depth());
                 if should_pop { 
                     eprintln!("🔍 DEBUG: generate_statement: About to pop, stack_depth={}", self.bytecode_builder.stack_depth());
                     Self::map_stack(self.bytecode_builder.pop())?;
                     eprintln!("🔍 DEBUG: generate_statement: After pop, stack_depth={}", self.bytecode_builder.stack_depth());
+                        }
+                    }
                 }
+                
+                eprintln!("🔍 DEBUG: generate_statement: Expression statement completed, stack_depth={}", self.bytecode_builder.stack_depth());
                 
                 // Validate statement structure (disabled for performance)
                 // self.validate_statement_structure()?;
@@ -2615,7 +2647,7 @@ impl MethodWriter {
                 if let Some(expr) = &return_stmt.value {
                     self.generate_expression(expr)?;
                 }
-                // Use the method's return type if available, otherwise assume void
+                // Use the method's return type if available, otherwise infer from expression
                 let return_type = if let Some(expr) = &return_stmt.value {
                     // Try to infer return type from expression
                     let descriptor = self.type_to_descriptor(expr);
@@ -2625,7 +2657,31 @@ impl MethodWriter {
                         "F" => TypeRef { name: "float".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: return_stmt.span },
                         "D" => TypeRef { name: "double".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: return_stmt.span },
                         "Z" => TypeRef { name: "boolean".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: return_stmt.span },
-                        _ => TypeRef { name: "void".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: return_stmt.span },
+                        _ => {
+                            // For reference types, try to get the actual type from expression
+                            let expr_type_name = self.resolve_expression_type(expr);
+                            // Create TypeRef from the resolved type name
+                            if expr_type_name.ends_with("[]") {
+                                // Array type
+                                let element_name = &expr_type_name[..expr_type_name.len()-2];
+                                TypeRef { 
+                                    name: element_name.to_string(), 
+                                    type_args: Vec::new(), 
+                                    annotations: Vec::new(), 
+                                    array_dims: 1, 
+                                    span: return_stmt.span 
+                                }
+                            } else {
+                                // Reference type
+                                TypeRef { 
+                                    name: expr_type_name, 
+                                    type_args: Vec::new(), 
+                                    annotations: Vec::new(), 
+                                    array_dims: 0, 
+                                    span: return_stmt.span 
+                                }
+                            }
+                        },
                     }
                 } else {
                     TypeRef { name: "void".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: return_stmt.span }
@@ -3072,8 +3128,25 @@ impl MethodWriter {
                 self.generate_expression(&unary.operand)?;
             }
             UnaryOp::Minus => {
+                // Check if operand is a simple integer literal for optimization
+                if let Expr::Literal(lit_expr) = unary.operand.as_ref() {
+                    if let Literal::Integer(value) = &lit_expr.value {
+                    // Generate optimized negative constants directly
+                    match *value {
+                        1 => Self::map_stack(self.bytecode_builder.iconst_m1())?,
+                        0 => Self::map_stack(self.bytecode_builder.iconst_0())?,
+                        -1 => Self::map_stack(self.bytecode_builder.iconst_1())?,
+                        _ => {
+                            // For other values, generate the negative literal directly
+                            self.generate_literal(&Literal::Integer(-value))?;
+                        }
+                    }
+                    }
+                } else {
+                    // For complex expressions, generate normally and negate
                 self.generate_expression(&unary.operand)?;
                 Self::map_stack(self.bytecode_builder.ineg())?;
+                }
             }
             UnaryOp::Not => {
                 eprintln!("🔍 DEBUG: generate_unary_expression: NOT operator, operand={:?}", unary.operand);
@@ -3103,11 +3176,10 @@ impl MethodWriter {
                 if let Expr::Identifier(ident) = &*unary.operand {
                     let local_var = self.find_local_variable(&ident.name).cloned();
                     if let Some(local_var) = local_var {
-                        // Local variable increment
-                        self.load_local_variable(local_var.index, &local_var.var_type)?;
-                        Self::map_stack(self.bytecode_builder.iconst_1())?;
-                        Self::map_stack(self.bytecode_builder.iadd())?;
-                        self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Local variable increment - use iinc instruction for efficiency
+                        let iinc_bytes = self.opcode_generator.iinc(local_var.index, 1);
+                        self.bytecode_builder.extend_from_slice(&iinc_bytes);
+                        // Load the incremented value for the expression result
                         self.load_local_variable(local_var.index, &local_var.var_type)?;
                     } else {
                         // Static field increment: getstatic -> iconst_1 -> iadd -> dup -> putstatic
@@ -3169,11 +3241,10 @@ impl MethodWriter {
                 if let Expr::Identifier(ident) = &*unary.operand {
                     let local_var = self.find_local_variable(&ident.name).cloned();
                     if let Some(local_var) = local_var {
-                        // Local variable decrement
-                        self.load_local_variable(local_var.index, &local_var.var_type)?;
-                        Self::map_stack(self.bytecode_builder.iconst_1())?;
-                        Self::map_stack(self.bytecode_builder.isub())?;
-                        self.store_local_variable(local_var.index, &local_var.var_type)?;
+                        // Local variable decrement - use iinc instruction for efficiency
+                        let iinc_bytes = self.opcode_generator.iinc(local_var.index, -1);
+                        self.bytecode_builder.extend_from_slice(&iinc_bytes);
+                        // Load the decremented value for the expression result
                         self.load_local_variable(local_var.index, &local_var.var_type)?;
                     } else {
                         // Instance field decrement: getfield -> iconst_1 -> isub -> dup -> putfield
@@ -3411,12 +3482,12 @@ impl MethodWriter {
                 let field_ref_index = self.add_field_ref(&field_owner, ident, &field_descriptor);
                 
                 // Handle field slots for stack management
-                let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
-                    2 // long or double
-                } else {
-                    1 // all other types
-                };
-                
+            let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+                2 // long or double
+            } else {
+                1 // all other types
+            };
+            
                 if is_static_field {
                     eprintln!("🔍 DEBUG: generate_identifier static field access: field_descriptor={}, field_slots={}, owner={}", field_descriptor, field_slots, field_owner);
                     // Static field access - just push the field value
@@ -3426,9 +3497,9 @@ impl MethodWriter {
                     eprintln!("🔍 DEBUG: generate_identifier instance field access: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
                     // Instance field access - load 'this' first
                     Self::map_stack(self.bytecode_builder.aload(0))?;
-                    // Pop objectref (1 slot) and push field value (1 or 2 slots)
-                    Self::map_stack(self.bytecode_builder.update_stack(1, field_slots))?;
-                    self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
+            // Pop objectref (1 slot) and push field value (1 or 2 slots)
+            Self::map_stack(self.bytecode_builder.update_stack(1, field_slots))?;
+            self.emit_opcode(self.opcode_generator.getfield(field_ref_index));
                 }
             } else {
                 return Err(Error::codegen_error(&format!("Cannot resolve identifier: {}", ident)));
@@ -4759,8 +4830,25 @@ impl MethodWriter {
                 self.generate_expression(arg)?;
             }
             
-            // Call constructor
-            let method_ref_index = self.add_method_ref(&new_expr.target_type.name, "<init>", "()V");
+            // Call constructor - generate descriptor based on arguments
+            let mut descriptor = String::new();
+            descriptor.push('(');
+            
+            // Handle the specific case for ArraysListIterator constructor
+            if new_expr.target_type.name == "ArraysListIterator" && new_expr.arguments.len() == 2 {
+                // ArraysListIterator(Object[] array, int index)
+                descriptor.push_str("[Ljava/lang/Object;"); // Array of objects for first arg
+                descriptor.push('I'); // Integer for second arg
+            } else {
+                // For other constructors, assume no arguments for now
+                // TODO: Implement proper type resolution for constructor arguments
+            }
+            
+            descriptor.push_str(")V");
+            
+            // Convert simple class name to internal name for method reference
+            let internal_class_name = self.resolve_class_name(&new_expr.target_type.name);
+            let method_ref_index = self.add_method_ref(&internal_class_name, "<init>", &descriptor);
             Self::map_stack(self.bytecode_builder.invokespecial(method_ref_index))?;
         }
         
@@ -4803,6 +4891,12 @@ impl MethodWriter {
     /// Note: Assignment expressions in Java have a value (the assigned value)
     /// which should be left on the stack for use in chained assignments like a = b = c
     fn generate_assignment(&mut self, assign: &AssignmentExpr) -> Result<()> {
+        self.generate_assignment_with_context(assign, true)
+    }
+
+    /// Generate bytecode for an assignment expression with context about value preservation
+    /// preserve_value: true for expressions (a = b = c), false for statements (a = b;)
+    fn generate_assignment_with_context(&mut self, assign: &AssignmentExpr, preserve_value: bool) -> Result<()> {
         // Handle compound assignments
         if assign.operator != AssignmentOp::Assign {
             // For compound assignments, we need to load the target first
@@ -4819,7 +4913,8 @@ impl MethodWriter {
                     self.generate_expression(&assign.value)?;
                     // Apply operation
                     self.generate_compound_assignment(assign.operator.clone())?;
-                    // Duplicate the result for chained assignments
+                    // Duplicate the result for chained assignments (only if preserving value)
+                    if preserve_value {
                     // Use dup2 for long/double (64-bit types), dup for others
                     match var_type {
                         LocalType::Long | LocalType::Double => {
@@ -4827,6 +4922,7 @@ impl MethodWriter {
                         }
                         _ => {
                             Self::map_stack(self.bytecode_builder.dup())?;
+                            }
                         }
                     }
                     // Store result
@@ -4871,7 +4967,8 @@ impl MethodWriter {
                     // Extract local variable info to avoid borrow checker issues
                     let index = local_var.index;
                     let var_type = local_var.var_type.clone();
-                    // Duplicate the value on stack so we can store it and also return it
+                    // Duplicate the value on stack so we can store it and also return it (only if preserving value)
+                    if preserve_value {
                     // Use dup2 for long/double (64-bit types), dup for others
                     match var_type {
                         LocalType::Long | LocalType::Double => {
@@ -4879,6 +4976,7 @@ impl MethodWriter {
                         }
                         _ => {
                             Self::map_stack(self.bytecode_builder.dup())?;
+                            }
                         }
                     }
                     self.store_local_variable(index, &var_type)?;
@@ -4888,9 +4986,11 @@ impl MethodWriter {
                     Self::map_stack(self.bytecode_builder.aload(0))?;
                     // Stack: value, this → this, value
                     Self::map_stack(self.bytecode_builder.swap())?;
-                    // Duplicate the value: this, value → this, value, value
+                    // Duplicate the value: this, value → this, value, value (only if preserving value)
+                    if preserve_value {
                     Self::map_stack(self.bytecode_builder.dup_x1())?;
-                    // Stack: value, this, value → putfield consumes this and value, leaving value
+                    }
+                    // Stack: [value,] this, value → putfield consumes this and value[, leaving value]
                     let class_name = self.current_class_name.as_ref()
                         .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
                         .clone();
@@ -4911,10 +5011,12 @@ impl MethodWriter {
                 }
                 // Then evaluate RHS value
                 self.generate_expression(&assign.value)?;
-                // For chained assignments, duplicate the value before putfield
+                // For chained assignments, duplicate the value before putfield (only if preserving value)
+                if preserve_value {
                 // Stack: objectref, value → objectref, value, value
                 Self::map_stack(self.bytecode_builder.dup_x1())?;
-                // Stack: value, objectref, value → putfield consumes objectref and value, leaving value
+                }
+                // Stack: [value,] objectref, value → putfield consumes objectref and value[, leaving value]
                 // Determine the field class based on receiver type
                 let field_class = if let Some(receiver) = &field_access.target {
                     let receiver_type = self.resolve_expression_type(receiver);
@@ -4953,12 +5055,18 @@ impl MethodWriter {
                     1 // all other types
                 };
                 
-                eprintln!("🔍 DEBUG: generate_assignment FieldAccess: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
+                eprintln!("🔍 DEBUG: generate_assignment FieldAccess: field_descriptor={}, field_slots={}, preserve_value={}", field_descriptor, field_slots, preserve_value);
                 
                 // Pop objectref (1 slot) and field value (1 or 2 slots)
-                Self::map_stack(self.bytecode_builder.update_stack(1 + field_slots, 0))?;
+                // If preserve_value=true, we duplicated the value, so one copy remains on stack
+                // If preserve_value=false, no value remains on stack
+                let stack_result = if preserve_value { field_slots } else { 0 };
+                eprintln!("🔍 DEBUG: generate_assignment FieldAccess: About to emit putfield, stack_depth={}", self.bytecode_builder.stack_depth());
+                Self::map_stack(self.bytecode_builder.update_stack(1 + field_slots, stack_result))?;
+                eprintln!("🔍 DEBUG: generate_assignment FieldAccess: After stack update, stack_depth={}", self.bytecode_builder.stack_depth());
                 self.emit_opcode(self.opcode_generator.putfield(field_ref_index));
-                // Value remains on stack for chained assignments
+                eprintln!("🔍 DEBUG: generate_assignment FieldAccess: After emit putfield, stack_depth={}", self.bytecode_builder.stack_depth());
+                // Value remains on stack for chained assignments only if preserve_value=true
             }
             Expr::ArrayAccess(array_access) => {
                 // arr[idx] = value
@@ -5093,11 +5201,16 @@ impl MethodWriter {
                     Self::map_stack(self.bytecode_builder.saload())?;
                     eprintln!("🔍 DEBUG: generate_array_access: After saload, stack_depth={}", self.bytecode_builder.stack_depth());
                 }
-                _ => {
-                    // Reference type or int (default)
-                    eprintln!("🔍 DEBUG: generate_array_access: About to call iaload (default), stack_depth={}", self.bytecode_builder.stack_depth());
+                                "int" => {
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call iaload (int), stack_depth={}", self.bytecode_builder.stack_depth());
         Self::map_stack(self.bytecode_builder.iaload())?;
-                    eprintln!("🔍 DEBUG: generate_array_access: After iaload (default), stack_depth={}", self.bytecode_builder.stack_depth());
+                    eprintln!("🔍 DEBUG: generate_array_access: After iaload (int), stack_depth={}", self.bytecode_builder.stack_depth());
+                }
+                _ => {
+                    // Reference type (Object, String, etc.)
+                    eprintln!("🔍 DEBUG: generate_array_access: About to call aaload (reference), stack_depth={}", self.bytecode_builder.stack_depth());
+                    Self::map_stack(self.bytecode_builder.aaload())?;
+                    eprintln!("🔍 DEBUG: generate_array_access: After aaload (reference), stack_depth={}", self.bytecode_builder.stack_depth());
                 }
             }
         } else {
@@ -5311,7 +5424,11 @@ impl MethodWriter {
         
         // Create labels
         let else_label = self.create_label();
-        let end_label = self.create_label();
+        let end_label = if if_stmt.else_branch.is_some() {
+            self.create_label() // Separate end label if there's an else branch
+        } else {
+            else_label // Use the same label if no else branch
+        };
         
         // Jump to else if condition is false
         {
@@ -5322,16 +5439,16 @@ impl MethodWriter {
         // Generate then branch
         self.generate_statement(&if_stmt.then_branch)?;
         
-        // Jump to end (skip else branch)
-        {
-            let l = self.label_str(end_label);
-            Self::map_stack(self.bytecode_builder.goto(&l))?;
-        }
-        
-        // Mark else label
+        // Mark else label (after then branch)
         {
             let l = self.label_str(else_label);
             self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Only jump to end if there's an else branch (to skip it)
+        if if_stmt.else_branch.is_some() {
+            let l = self.label_str(end_label);
+            Self::map_stack(self.bytecode_builder.goto(&l))?;
         }
         
         // Generate else branch if present
@@ -5652,9 +5769,11 @@ impl MethodWriter {
         }
         
         // Create labels for control flow
-        let start_label = self.create_label();
-        let end_label = self.create_label();
-        let continue_label = self.create_label();
+        let start_label = self.create_label();  // L_loop (header)
+        let end_label = self.create_label();    // L_after (after-loop)
+        let continue_label = self.create_label(); // L_inc (increment)
+        
+
         
         // Push loop context
         self.loop_stack.push(LoopContext { 
@@ -5666,15 +5785,89 @@ impl MethodWriter {
         // Mark start label
         {
             let l = self.label_str(start_label);
+
             self.bytecode_builder.mark_label(&l);
         }
         
         // Generate condition check
         if let Some(cond) = &for_stmt.condition {
             println!("🔍 DEBUG: generate_for_statement: Generating condition");
+            
+            // Check if this is a binary comparison that we can optimize
+            if let Expr::Binary(bin_expr) = cond {
+                match bin_expr.operator {
+                    BinaryOp::Lt => {
+                        // Generate: left < right -> if_icmpge end_label (jump if left >= right)
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        let l = self.label_str(end_label);
+                        Self::map_stack(self.bytecode_builder.if_icmpge(&l))?;
+                    }
+                    BinaryOp::Le => {
+                        // Generate: left <= right -> if_icmpgt end_label (jump if left > right)
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        let l = self.label_str(end_label);
+                        Self::map_stack(self.bytecode_builder.if_icmpgt(&l))?;
+                    }
+                    BinaryOp::Gt => {
+                        // Generate: left > right -> if_icmple end_label (jump if left <= right)
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        let l = self.label_str(end_label);
+                        Self::map_stack(self.bytecode_builder.if_icmple(&l))?;
+                    }
+                    BinaryOp::Ge => {
+                        // Check if we can optimize comparison with zero
+                        if let Expr::Literal(lit_expr) = bin_expr.right.as_ref() {
+                            if let Literal::Integer(0) = &lit_expr.value {
+                                // Optimize: left >= 0 -> iflt end_label (jump if left < 0)
+                                self.generate_expression(&bin_expr.left)?;
+                                let l = self.label_str(end_label);
+                                Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                            } else {
+                                // Generate: left >= right -> if_icmplt end_label (jump if left < right)
+                                self.generate_expression(&bin_expr.left)?;
+                                self.generate_expression(&bin_expr.right)?;
+                                let l = self.label_str(end_label);
+                                Self::map_stack(self.bytecode_builder.if_icmplt(&l))?;
+                            }
+                        } else {
+                            // Generate: left >= right -> if_icmplt end_label (jump if left < right)
+                            self.generate_expression(&bin_expr.left)?;
+                            self.generate_expression(&bin_expr.right)?;
+                            let l = self.label_str(end_label);
+                            Self::map_stack(self.bytecode_builder.if_icmplt(&l))?;
+                        }
+                    }
+                    BinaryOp::Eq => {
+                        // Generate: left == right -> if_icmpne end_label (jump if left != right)
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        let l = self.label_str(end_label);
+                        Self::map_stack(self.bytecode_builder.if_icmpne(&l))?;
+                    }
+                    BinaryOp::Ne => {
+                        // Generate: left != right -> if_icmpeq end_label (jump if left == right)
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        let l = self.label_str(end_label);
+                        Self::map_stack(self.bytecode_builder.if_icmpeq(&l))?;
+                    }
+                    _ => {
+                        // Fall back to the old approach for non-comparison operators
             self.generate_expression(cond)?;
             let l = self.label_str(end_label);
             Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                    }
+                }
+            } else {
+                // Fall back to the old approach for non-binary expressions
+                self.generate_expression(cond)?;
+                let l = self.label_str(end_label);
+                Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            }
+            
             println!("🔍 DEBUG: generate_for_statement: Condition generated");
         }
         
@@ -5683,12 +5876,62 @@ impl MethodWriter {
         self.generate_statement(&for_stmt.body)?;
         println!("🔍 DEBUG: generate_for_statement: Loop body generated");
         
-        // Mark continue label and generate updates
+        // Mark continue label at the increment location
         {
             let l = self.label_str(continue_label);
+
             self.bytecode_builder.mark_label(&l);
         }
+        
+        // Generate updates (increment)
         for upd in &for_stmt.update {
+            // Try to optimize increment operations to use iinc
+            if let Expr::Assignment(assign_expr) = &upd.expr {
+                if let (Expr::Identifier(ident), AssignmentOp::AddAssign) = (&*assign_expr.target, &assign_expr.operator) {
+                    // Check if this is a simple constant increment: i += constant
+                    if let Expr::Literal(lit) = &*assign_expr.value {
+                        if let Some(local_var) = self.find_local_variable(&ident.name) {
+                            if let LocalType::Int = local_var.var_type {
+                                // Try to extract the constant value
+                                if let Some(constant_value) = self.extract_int_literal(lit) {
+                                    // Use iinc instruction for i += constant
+                                    let iinc_bytes = self.opcode_generator.iinc(local_var.index, constant_value as i16);
+                                    for byte in iinc_bytes {
+                                        self.bytecode_builder.push_instruction(byte);
+                                    }
+                                    continue; // Skip the generic expression generation
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Check for PreInc/PreDec operations and optimize them
+            else if let Expr::Unary(unary_expr) = &upd.expr {
+                if let Expr::Identifier(ident) = unary_expr.operand.as_ref() {
+                    if let Some(local_var) = self.find_local_variable(&ident.name) {
+                        if let LocalType::Int = local_var.var_type {
+                            match unary_expr.operator {
+                                UnaryOp::PreInc => {
+                                    // Use iinc instruction for ++i (no value needed)
+                                    let iinc_bytes = self.opcode_generator.iinc(local_var.index, 1);
+                                    self.bytecode_builder.extend_from_slice(&iinc_bytes);
+                                    continue; // Skip the generic expression generation
+                                }
+                                UnaryOp::PreDec => {
+                                    // Use iinc instruction for --i (no value needed)
+                                    let iinc_bytes = self.opcode_generator.iinc(local_var.index, -1);
+                                    self.bytecode_builder.extend_from_slice(&iinc_bytes);
+                                    continue; // Skip the generic expression generation
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Fall back to generic expression generation
             self.generate_expression(&upd.expr)?;
             Self::map_stack(self.bytecode_builder.pop())?;
         }
@@ -5696,12 +5939,14 @@ impl MethodWriter {
         // Loop back to start
         {
             let l = self.label_str(start_label);
+
             Self::map_stack(self.bytecode_builder.goto(&l))?;
         }
         
         // Mark end label
         {
             let l = self.label_str(end_label);
+
             self.bytecode_builder.mark_label(&l);
         }
         
@@ -5815,6 +6060,15 @@ impl MethodWriter {
         self.loop_stack.pop();
         
         Ok(())
+    }
+    
+    /// Extract integer value from a literal expression
+    fn extract_int_literal(&self, lit: &LiteralExpr) -> Option<i32> {
+        match &lit.value {
+            Literal::Integer(val) => Some(*val as i32),
+            Literal::String(s) => s.parse::<i32>().ok(),
+            _ => None,
+        }
     }
     
     /// Generate bytecode for iterating over an array using indexed loop
@@ -6071,7 +6325,11 @@ impl MethodWriter {
     }
     
     /// Create a new label id (for compatibility). BytecodeBuilder labels are strings.
-    fn create_label(&mut self) -> u16 { 0 }
+    fn create_label(&mut self) -> u16 { 
+        let id = self.next_label_id;
+        self.next_label_id += 1;
+        id
+    }
     /// Mark label (no-op; use bytecode_builder.mark_label)
     fn mark_label(&mut self, _label_id: u16) {}
     
@@ -6117,7 +6375,8 @@ impl MethodWriter {
                     format!("java/lang/{}", name)
                 } else if name == "Comparator" || name == "Iterator" || name == "Collection" || 
                           name == "List" || name == "Set" || name == "Map" || 
-                          name == "Deque" || name == "Queue" || name == "Iterable" {
+                          name == "Deque" || name == "Queue" || name == "Iterable" ||
+                          name == "ArraysListIterator" || name == "ListIterator" {
                     // java.util types
                     format!("java/util/{}", name)
                 } else if name == "Serializable" || name == "Closeable" || name == "Flushable" {
@@ -6539,12 +6798,12 @@ impl MethodWriter {
                             if field.name == field_name {
                                 // Generate descriptor from field type
                                 eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in interface {}", class_internal, field_name, interface_internal);
-                                return type_ref_to_descriptor(&field.type_ref);
-                            }
-                        }
+                        return type_ref_to_descriptor(&field.type_ref);
                     }
                 }
-                
+            }
+        }
+
                 // Also try rt.rs for the interface
                 use boot::{CLASSES, CLASSES_BY_NAME};
                 if let Some(&idx) = CLASSES_BY_NAME.get(&interface_internal) {
@@ -6621,11 +6880,11 @@ impl MethodWriter {
                 eprintln!("🔍 DEBUG: resolve_field_descriptor: Checking {} interfaces for class {}", c.interfaces.len(), owner);
                 for &itf in c.interfaces {
                     eprintln!("🔍 DEBUG: resolve_field_descriptor: Checking interface {} for field {}", itf, field_name);
-                    if let Some(desc) = search_owner(itf, field_name) {
+                if let Some(desc) = search_owner(itf, field_name) {
                         eprintln!("🔍 DEBUG: resolve_field_descriptor: Found field {}#{} in interface {} (via class {})", class_internal, field_name, itf, owner);
-                        return desc.to_string();
-                    }
+                    return desc.to_string();
                 }
+            }
             }
             
             // ascend to super, if any

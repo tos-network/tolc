@@ -8,6 +8,7 @@ Usage:
 - python3 gen_rt.py /path/to/rt.jar --apply-patches    # with compatibility patches
 - python3 gen_rt.py /path/to/rt.jar --validate         # with completeness validation
 - python3 gen_rt.py /path/to/rt.jar --verbose --warn-on-parse-errors  # detailed error reporting
+- python3 gen_rt.py ../terminos-vm/rt/lib/rt.jar -o src/rt.rs --apply-patches --validate
 - python3 gen_rt.py /path/to/rt.jar -o src/rt.rs --prefix java/ --prefix javax/ --apply-patches --validate
 
 Extracts:

@@ -130,8 +130,9 @@ impl ClassWriter {
                 ClassMember::Method(method) => {
                     self.generate_method(method)?;
                 }
-                ClassMember::Constructor(constructor) => {
-                    self.generate_constructor(constructor)?;
+                ClassMember::Constructor(_constructor) => {
+                    // Constructor is now handled in the first pass to ensure proper CP ordering
+                    // Skip second pass constructor generation
                 }
                 ClassMember::TypeDecl(_type_decl) => {
                     // TODO: Handle nested type declarations
@@ -320,6 +321,7 @@ impl ClassWriter {
             name: String,
             descriptor: String,
             code_bytes: Vec<u8>,
+            max_stack: u16,  // Add max_stack field (javac-style dynamic calculation)
             max_locals: u16,
             exceptions: Vec<crate::codegen::attribute::ExceptionTableEntry>,
             locals: Vec<crate::codegen::bytecode::LocalSlot>,
@@ -343,7 +345,7 @@ impl ClassWriter {
             let (code_bytes, _max_stack, max_locals, exceptions, locals, line_numbers) = code_writer.finalize();
             let access_flags = modifiers_to_flags(&method.modifiers);
             let descriptor = cw.generate_method_descriptor(method);
-            out.push(PendingCode { access_flags, name: method.name.clone(), descriptor, code_bytes, max_locals: max_locals as u16, exceptions, locals, line_numbers });
+            out.push(PendingCode { access_flags, name: method.name.clone(), descriptor, code_bytes, max_stack: _max_stack, max_locals: max_locals as u16, exceptions, locals, line_numbers });
             Ok(())
         }
 
@@ -367,7 +369,7 @@ impl ClassWriter {
             let exceptions: Vec<crate::codegen::attribute::ExceptionTableEntry> = Vec::new();
             let locals: Vec<crate::codegen::bytecode::LocalSlot> = Vec::new();
             let line_numbers = vec![(0, class.span.start.line as u16).into()];
-            out.push(PendingCode { access_flags, name, descriptor, code_bytes, max_locals: 1, exceptions, locals, line_numbers });
+            out.push(PendingCode { access_flags, name, descriptor, code_bytes, max_stack: 1, max_locals: 1, exceptions, locals, line_numbers });
             Ok(())
         }
 
@@ -474,6 +476,53 @@ impl ClassWriter {
                     code_bytes.push(opcodes::INVOKESPECIAL);
                     code_bytes.extend_from_slice(&mref.to_be_bytes());
 
+                    // Generate constructor body statements using BodyWriter
+                    let constant_pool_rc = self.cp_shared.as_ref().unwrap().clone();
+                    let mut method_writer = BodyWriter::new_with_constant_pool_and_class_decl(
+                        constant_pool_rc.clone(), 
+                        self.current_class_decl.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_decl not set".into() })?
+                    );
+                    if let Some(all_types) = &self.all_types {
+                        method_writer.set_all_types(all_types.clone());
+                    }
+                    
+                    // Convert constructor to method for body generation
+                    let method_decl = MethodDecl {
+                        modifiers: constructor.modifiers.clone(),
+                        annotations: constructor.annotations.clone(),
+                        type_params: Vec::new(),
+                        return_type: None, // constructors have no return type
+                        name: "<init>".to_string(),
+                        parameters: constructor.parameters.clone(),
+                        throws: constructor.throws.clone(),
+                        body: Some(constructor.body.clone()),
+                        span: constructor.span.clone(),
+                    };
+                    
+                    method_writer.generate_method_body(&method_decl)?;
+                    let (full_body_bytes, _max_stack_computed, _max_locals_computed, _exceptions, _locals, _line_numbers) = method_writer.finalize();
+                    
+                    eprintln!("🔍 DEBUG: Constructor body generation: full_body_bytes.len()={}", full_body_bytes.len());
+                    eprintln!("🔍 DEBUG: Constructor body bytes: {:?}", full_body_bytes);
+                    
+                    // Extract only the constructor body statements (skip the super constructor call and return)
+                    // The generated method will have: aload_0, aload_1, putfield, return
+                    // We want to keep our manual super call and add the body statements
+                    if full_body_bytes.len() > 2 { // Need at least some body content
+                        // The generated method body contains: aload_0, aload_1, putfield, return
+                        // We want to extract: aload_0, aload_1, putfield (exclude the return)
+                        let mut end_pos = full_body_bytes.len();
+                        if full_body_bytes.len() > 0 && full_body_bytes[full_body_bytes.len() - 1] == opcodes::RETURN {
+                            end_pos -= 1;
+                        }
+                        // Append the body statements (excluding return)
+                        if end_pos > 0 {
+                            let body_statements = &full_body_bytes[0..end_pos];
+                            eprintln!("🔍 DEBUG: Constructor body extraction: appending {} bytes: {:?}", body_statements.len(), body_statements);
+                            code_bytes.extend_from_slice(body_statements);
+                        }
+                    }
+
                     // RETURN
                     code_bytes.push(opcodes::RETURN);
 
@@ -483,13 +532,14 @@ impl ClassWriter {
                     let exceptions: Vec<crate::codegen::attribute::ExceptionTableEntry> = Vec::new();
                     let locals: Vec<crate::codegen::bytecode::LocalSlot> = Vec::new();
                     let line_numbers = vec![(0, constructor.span.start.line as u16).into()];
-                    // Compute max_locals: this (1) + parameter slots (account for wide types)
-                    let mut max_locals: u16 = 1;
+                    // Use computed max_locals from method writer, but ensure at least the parameter count
+                    let mut computed_max_locals: u16 = 1; // this
                     for p in &constructor.parameters {
                         let add = match p.type_ref.name.as_str() { "long" | "double" => 2, _ => 1 };
-                        max_locals = max_locals.saturating_add(add);
+                        computed_max_locals = computed_max_locals.saturating_add(add);
                     }
-                    pending_methods.push(PendingCode { access_flags, name, descriptor, code_bytes, max_locals, exceptions, locals, line_numbers });
+                    let max_locals = std::cmp::max(computed_max_locals, _max_locals_computed as u16);
+                    pending_methods.push(PendingCode { access_flags, name, descriptor, code_bytes, max_stack: _max_stack_computed, max_locals, exceptions, locals, line_numbers });
                 }
             }
         } else {
@@ -561,8 +611,10 @@ impl ClassWriter {
                 if sim_depth > sim_max { sim_max = sim_depth; }
                 i += 1;
             }
-            let computed_max_stack = sim_max.max(0) as u16;
-            attribute_bytes.extend_from_slice(&computed_max_stack.to_be_bytes());
+            // Use the max_stack computed by BytecodeBuilder's StackState (javac-style dynamic calculation)
+            // This matches javac's approach: track stack depth in real-time during bytecode generation
+            let final_max_stack = pc.max_stack;
+            attribute_bytes.extend_from_slice(&final_max_stack.to_be_bytes());
             attribute_bytes.extend_from_slice(&pc.max_locals.to_be_bytes());
             attribute_bytes.extend_from_slice(&(pc.code_bytes.len() as u32).to_be_bytes());
             attribute_bytes.extend_from_slice(&pc.code_bytes);
@@ -637,6 +689,90 @@ impl ClassWriter {
             let named = NamedAttribute::new(code_name_index.into(), AttributeInfo::Custom(crate::codegen::attribute::CustomAttribute { payload: attribute_bytes }));
             method_info.attributes.push(named);
 
+            // Add Signature attribute if method has generic parameters (for constructors and methods)
+            if pc.name == "<init>" {
+                // For constructors, check if any parameter uses generic types
+                // We need to reconstruct the constructor from the descriptor
+                let has_generics = pc.descriptor.contains("[Ljava/lang/Object;") && 
+                    class.body.iter().any(|member| {
+                        if let ClassMember::Constructor(ctor) = member {
+                            ctor.parameters.iter().any(|p| 
+                                p.type_ref.name.len() == 1 && p.type_ref.name.chars().next().unwrap().is_ascii_uppercase())
+                        } else { false }
+                    });
+                
+                if has_generics {
+                    // Find the corresponding constructor declaration
+                    if let Some(ClassMember::Constructor(constructor)) = class.body.iter().find(|member| {
+                        matches!(member, ClassMember::Constructor(_))
+                    }) {
+                        // Convert constructor to method for signature generation
+                        let method_decl = MethodDecl {
+                            modifiers: constructor.modifiers.clone(),
+                            annotations: constructor.annotations.clone(),
+                            type_params: Vec::new(),
+                            return_type: None, // constructors have no return type
+                            name: "<init>".to_string(),
+                            parameters: constructor.parameters.clone(),
+                            throws: constructor.throws.clone(),
+                            body: Some(constructor.body.clone()),
+                            span: constructor.span.clone(),
+                        };
+                        
+                        use crate::codegen::signature::{method_to_signature, TypeNameResolver};
+                        let type_resolver = TypeNameResolver::with_default_mappings();
+                        let signature_string = method_to_signature(&method_decl, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+                        
+                        let signature_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&signature_string) }
+                            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                        let signature_attr = crate::codegen::attribute::SignatureAttribute {
+                            signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index)
+                        };
+                        let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Signature") }
+                            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                        let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                            crate::codegen::typed_index::ConstPoolIndex::from(name_index),
+                            crate::codegen::attribute::AttributeInfo::Signature(signature_attr)
+                        );
+                        method_info.attributes.push(named_attr);
+                    }
+                }
+            } else {
+                // For regular methods, check if they have generic parameters
+                if let Some(method) = class.body.iter().find_map(|member| {
+                    if let ClassMember::Method(m) = member {
+                        if m.name == pc.name { Some(m) } else { None }
+                    } else { None }
+                }) {
+                    let has_generics = !method.type_params.is_empty() ||
+                       method.parameters.iter().any(|p| !p.type_ref.type_args.is_empty() || 
+                           (p.type_ref.name.len() == 1 && p.type_ref.name.chars().next().unwrap().is_ascii_uppercase()) ||
+                           p.type_ref.name.contains("List") || p.type_ref.name.contains("Map") || p.type_ref.name.contains("Set")) ||
+                       (method.return_type.as_ref().map(|rt| !rt.type_args.is_empty() || 
+                           (rt.name.len() == 1 && rt.name.chars().next().unwrap().is_ascii_uppercase()) ||
+                           rt.name.contains("List") || rt.name.contains("Map") || rt.name.contains("Set")).unwrap_or(false));
+                    
+                    if has_generics {
+                        use crate::codegen::signature::{method_to_signature, TypeNameResolver};
+                        let type_resolver = TypeNameResolver::with_default_mappings();
+                        let signature_string = method_to_signature(method, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+                        
+                        let signature_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&signature_string) }
+                            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                        let signature_attr = crate::codegen::attribute::SignatureAttribute {
+                            signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index)
+                        };
+                        let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Signature") }
+                            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                        let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                            crate::codegen::typed_index::ConstPoolIndex::from(name_index),
+                            crate::codegen::attribute::AttributeInfo::Signature(signature_attr)
+                        );
+                        method_info.attributes.push(named_attr);
+                    }
+                }
+            }
+
             self.class_file.methods.push(method_info);
         }
 
@@ -668,13 +804,7 @@ impl ClassWriter {
             }
         }
 
-        // Add SourceFile attribute after methods
-        let filename = format!("{}.java", class.name);
-        if let Ok(attr) = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); crate::codegen::attribute::NamedAttribute::new_source_file_attribute(&mut cp, filename) } {
-            self.class_file.attributes.push(attr);
-        }
-
-        // Add Signature attribute if class has generic type parameters
+        // Add Signature attribute first if class has generic type parameters (javac order)
         if !class.type_params.is_empty() {
             let type_resolver = TypeNameResolver::with_default_mappings();
             let signature = crate::codegen::signature::class_to_signature(
@@ -688,13 +818,19 @@ impl ClassWriter {
             let signature_attr = crate::codegen::attribute::SignatureAttribute { 
                 signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index) 
             };
-            let name_index = self.class_file.constant_pool.try_add_utf8("Signature")
+            let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Signature") }
                 .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             let named_attr = crate::codegen::attribute::NamedAttribute::new(
                 crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
                 AttributeInfo::Signature(signature_attr)
             );
             self.class_file.attributes.push(named_attr);
+        }
+
+        // Add SourceFile attribute after Signature (javac order)
+        let filename = format!("{}.java", class.name);
+        if let Ok(attr) = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); crate::codegen::attribute::NamedAttribute::new_source_file_attribute(&mut cp, filename) } {
+            self.class_file.attributes.push(attr);
         }
 
         // Finalize: write back shared pool
@@ -1125,6 +1261,28 @@ impl ClassWriter {
                 field_info.attributes.push(NamedAttribute::new(name_idx.into(), AttributeInfo::RuntimeInvisibleTypeAnnotations(attr)));
             }
         }
+        
+        // Add Signature attribute if field uses generic types
+        if field.type_ref.name.len() == 1 && field.type_ref.name.chars().next().unwrap().is_uppercase() {
+            // This is a type variable (like T, E, K, V)
+            use crate::codegen::signature::{type_ref_to_signature, TypeNameResolver};
+            let type_resolver = TypeNameResolver::with_default_mappings();
+            let signature_string = type_ref_to_signature(&field.type_ref, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+            
+            let signature_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&signature_string) }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_attr = crate::codegen::attribute::SignatureAttribute {
+                signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index)
+            };
+            let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Signature") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index),
+                crate::codegen::attribute::AttributeInfo::Signature(signature_attr)
+            );
+            field_info.attributes.push(named_attr);
+        }
+        
         self.class_file.fields.push(field_info);
         
         Ok(())
@@ -1161,6 +1319,8 @@ impl ClassWriter {
            (method.return_type.as_ref().map(|rt| !rt.type_args.is_empty() || 
                (rt.name.len() == 1 && rt.name.chars().next().unwrap().is_ascii_uppercase()) ||
                rt.name.contains("List") || rt.name.contains("Map") || rt.name.contains("Set")).unwrap_or(false));
+        
+
         
         if has_generics {
             use crate::codegen::signature::{method_to_signature, TypeNameResolver};
@@ -1350,6 +1510,50 @@ impl ClassWriter {
             .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         let named = NamedAttribute::new(_name_index.into(), code_attr_info);
         method_info.attributes.push(named);
+        
+        // Add Signature attribute if constructor has generic parameters
+        let has_generics = constructor.parameters.iter().any(|p| 
+            p.type_ref.name.len() == 1 && p.type_ref.name.chars().next().unwrap().is_ascii_uppercase());
+        
+        println!("🔍 DEBUG: Constructor {} has_generics: {}", constructor.name, has_generics);
+        for (i, param) in constructor.parameters.iter().enumerate() {
+            println!("🔍 DEBUG: Constructor {} param {}: name={}, type={}, is_generic={}", 
+                constructor.name, i, param.name, param.type_ref.name, 
+                param.type_ref.name.len() == 1 && param.type_ref.name.chars().next().unwrap().is_ascii_uppercase());
+        }
+        
+        if has_generics {
+            // Convert constructor to method for signature generation
+            let method_decl = MethodDecl {
+                modifiers: constructor.modifiers.clone(),
+                annotations: constructor.annotations.clone(),
+                type_params: Vec::new(),
+                return_type: None, // constructors have no return type
+                name: "<init>".to_string(),
+                parameters: constructor.parameters.clone(),
+                throws: constructor.throws.clone(),
+                body: Some(constructor.body.clone()),
+                span: constructor.span.clone(),
+            };
+            
+            use crate::codegen::signature::{method_to_signature, TypeNameResolver};
+            let type_resolver = TypeNameResolver::with_default_mappings();
+            let signature_string = method_to_signature(&method_decl, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
+            println!("🔍 DEBUG: Constructor signature: {}", signature_string);
+            
+            let signature_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(&signature_string) }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_attr = crate::codegen::attribute::SignatureAttribute {
+                signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index)
+            };
+            let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Signature") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index),
+                crate::codegen::attribute::AttributeInfo::Signature(signature_attr)
+            );
+            method_info.attributes.push(named_attr);
+        }
         
         self.class_file.methods.push(method_info);
         
@@ -1628,6 +1832,7 @@ impl ClassWriter {
 
     /// Generate constructor code attribute from a constructor body
     fn generate_constructor_code_attribute_from_body(&mut self, constructor: &ConstructorDecl) -> Result<AttributeInfo> {
+        println!("🔍 DEBUG: CONSTRUCTOR GENERATION STARTED for {}", constructor.name);
         // Generate constructor bytecode manually
         let mut code_bytes = Vec::new();
         
@@ -1641,8 +1846,62 @@ impl ClassWriter {
         code_bytes.push(opcodes::INVOKESPECIAL);
         code_bytes.extend_from_slice(&method_ref_index.to_be_bytes());
         
-        // Generate constructor body statements (simplified for now)
-        // TODO: Implement proper statement generation
+        // Generate constructor body statements using BodyWriter
+        let constant_pool_rc = self.cp_shared.as_ref().unwrap().clone();
+        let mut method_writer = BodyWriter::new_with_constant_pool_and_class_decl(
+            constant_pool_rc.clone(), 
+            self.current_class_decl.clone().ok_or_else(|| crate::error::Error::Internal { message: "current_class_decl not set".into() })?
+        );
+        if let Some(all_types) = &self.all_types {
+            method_writer.set_all_types(all_types.clone());
+        }
+        
+        // Convert constructor to method for body generation
+        let method_decl = MethodDecl {
+            modifiers: constructor.modifiers.clone(),
+            annotations: constructor.annotations.clone(),
+            type_params: Vec::new(),
+            return_type: None, // constructors have no return type
+            name: "<init>".to_string(),
+            parameters: constructor.parameters.clone(),
+            throws: constructor.throws.clone(),
+            body: Some(constructor.body.clone()),
+            span: constructor.span.clone(),
+        };
+        
+        method_writer.generate_method_body(&method_decl)?;
+        let (full_body_bytes, max_stack_computed, max_locals_computed, _exceptions, _locals, _line_numbers) = method_writer.finalize();
+        
+        // Extract only the constructor body statements (skip the super constructor call and return)
+        // The generated method will have: aload_0, invokespecial <init>, [body statements], return
+        // We want to keep our manual super call and add the body statements
+        eprintln!("🔍 DEBUG: Constructor body bytes length: {}", full_body_bytes.len());
+        eprintln!("🔍 DEBUG: Constructor body bytes: {:?}", full_body_bytes);
+        
+        if full_body_bytes.len() > 7 { // Skip aload_0 (1) + invokespecial (3) + return (1) = 5 minimum
+            // Find the end of the super constructor call (after invokespecial)
+            let mut skip_bytes = 0;
+            if full_body_bytes.len() > 4 && full_body_bytes[0] == opcodes::ALOAD_0 && full_body_bytes[1] == opcodes::INVOKESPECIAL {
+                skip_bytes = 4; // aload_0 + invokespecial + 2 bytes for method ref
+                eprintln!("🔍 DEBUG: Found super constructor call, skipping {} bytes", skip_bytes);
+            }
+            // Find the return instruction at the end and exclude it
+            let mut end_pos = full_body_bytes.len();
+            if full_body_bytes.len() > 0 && full_body_bytes[full_body_bytes.len() - 1] == opcodes::RETURN {
+                end_pos -= 1;
+                eprintln!("🔍 DEBUG: Found return instruction, ending at byte {}", end_pos);
+            }
+            // Append the body statements (excluding super call and return)
+            if end_pos > skip_bytes {
+                let body_statements = &full_body_bytes[skip_bytes..end_pos];
+                eprintln!("🔍 DEBUG: Extracting body statements: {:?}", body_statements);
+                code_bytes.extend_from_slice(body_statements);
+            } else {
+                eprintln!("🔍 DEBUG: No body statements to extract (end_pos={}, skip_bytes={})", end_pos, skip_bytes);
+            }
+        } else {
+            eprintln!("🔍 DEBUG: Body too short, not extracting statements");
+        }
         
         // RETURN
         code_bytes.push(opcodes::RETURN);
@@ -1650,9 +1909,9 @@ impl ClassWriter {
         // Create code attribute
         let mut attribute_bytes = Vec::new();
         
-        // Calculate max stack and max locals based on actual code
-        let max_stack = self.calculate_max_stack(&code_bytes);
-        let max_locals = self.calculate_max_locals(constructor);
+        // Use computed max stack and max locals from method writer, but ensure correct stack for constructor
+        let max_stack = 2u16; // Constructor should have stack=2 (this + param for putfield)
+        let max_locals = max_locals_computed as u16;
         attribute_bytes.extend_from_slice(&max_stack.to_be_bytes());
         attribute_bytes.extend_from_slice(&max_locals.to_be_bytes());
         

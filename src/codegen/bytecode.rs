@@ -287,6 +287,8 @@ pub struct BytecodeBuilder {
     stack_state: StackState,
     /// Labels for control flow
     labels: Vec<(String, u16)>,
+    /// Marked labels (for backward reference resolution)
+    marked_labels: std::collections::HashMap<String, u16>,
     /// Exception table entries
     exception_table: Vec<ExceptionTableEntry>,
     /// Line number table
@@ -302,6 +304,7 @@ impl BytecodeBuilder {
             code: Vec::new(),
             stack_state: StackState::new(),
             labels: Vec::new(),
+            marked_labels: std::collections::HashMap::new(),
             exception_table: Vec::new(),
             line_numbers: Vec::new(),
             opcode_generator: OpcodeGenerator::new(),
@@ -394,6 +397,12 @@ impl BytecodeBuilder {
     pub fn mark_label(&mut self, label: &str) {
         let current_pc_u16 = self.code.len() as u16;
         let current_pc = current_pc_u16 as i32;
+
+        
+
+        
+        // Store this label as marked for backward reference resolution
+        self.marked_labels.insert(label.to_string(), current_pc_u16);
         
         // Update all references to this label
         let mut resolved_indices = Vec::new();
@@ -405,7 +414,12 @@ impl BytecodeBuilder {
                 // instruction_pc points to the opcode (start of the branch instruction)
                 // +3 because branch instruction is 3 bytes: opcode + 2-byte offset
                 let offset_i32 = current_pc - (instruction_pc_i32 + 3);
-                let offset_i16 = offset_i32 as i16;
+                // Use javac's offset calculation method: target_pc - instruction_pc
+                // This differs from the JVM specification formula: target_pc - (instruction_pc + 3)
+                // javac's approach is simpler and avoids the need for the +3 adjustment
+                let corrected_offset_i32 = current_pc - instruction_pc_i32;
+                let offset_i16 = corrected_offset_i32 as i16;
+
                 // Update the offset at instruction_pc + 1 (position where offset bytes start)
                 let offset_bytes = offset_i16.to_be_bytes();
                 let start = (*ref_pc + 1) as usize;
@@ -420,6 +434,8 @@ impl BytecodeBuilder {
         for &index in resolved_indices.iter().rev() {
             self.labels.remove(index);
         }
+        
+
     }
     
     /// Push raw bytes
@@ -1511,9 +1527,31 @@ impl BytecodeBuilder {
         // Currently, add_label_reference is called immediately after emitting the opcode,
         // so the instruction pc is (current len - 1)
         let instruction_pc = (self.code.len() as u16).saturating_sub(1);
-        self.labels.push((label.to_string(), instruction_pc));
-        // Emit placeholder signed 16-bit offset (to be backpatched in mark_label)
-        self.emit_short(0);
+
+
+        
+        // Check if this label has already been marked (backward reference)
+        if let Some(&target_pc) = self.marked_labels.get(label) {
+            // Backward reference - resolve immediately
+            let instruction_pc_i32 = instruction_pc as i32;
+            let target_pc_i32 = target_pc as i32;
+            let offset_i32 = target_pc_i32 - (instruction_pc_i32 + 3);
+            // Use javac's offset calculation method: target_pc - instruction_pc
+            // This differs from the JVM specification formula: target_pc - (instruction_pc + 3)
+            // javac's approach is simpler and avoids the need for the +3 adjustment
+            let corrected_offset_i32 = target_pc_i32 - instruction_pc_i32;
+            let offset_i16 = corrected_offset_i32 as i16;
+
+            // Write the offset directly
+            let offset_bytes = offset_i16.to_be_bytes();
+            self.code.push(offset_bytes[0]);
+            self.code.push(offset_bytes[1]);
+        } else {
+            // Forward reference - add to pending list
+            self.labels.push((label.to_string(), instruction_pc));
+            // Emit placeholder signed 16-bit offset (to be backpatched in mark_label)
+            self.emit_short(0);
+        }
     }
 
 
