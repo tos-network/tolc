@@ -3036,23 +3036,114 @@ impl MethodWriter {
                 Self::map_stack(self.bytecode_builder.iconst_0())?; // Push false for now
             }
             BinaryOp::Eq => {
-                // For now, use a simple approach: push 0 (false)
-                // TODO: Implement proper comparison result generation
+                // Check if this is a null comparison
+                if self.is_null_literal(&binary.right) {
+                    // left == null -> use ifnull
+                    // Generate: if left is null, push 1, else push 0
+                    let true_label = self.create_label();
+                    let end_label = self.create_label();
+                    
+                    // ifnull true_label
+                    let true_label_str = self.label_str(true_label);
+                    Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
+                    
+                    // Push false (0) and jump to end
+                    Self::map_stack(self.bytecode_builder.iconst_0())?;
+                    let end_label_str = self.label_str(end_label);
+                    Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                    
+                    // Mark true label and push true (1)
+                    self.bytecode_builder.mark_label(&true_label_str);
+                    Self::map_stack(self.bytecode_builder.iconst_1())?;
+                    
+                    // Mark end label
+                    self.bytecode_builder.mark_label(&end_label_str);
+                } else if self.is_null_literal(&binary.left) {
+                    // null == right -> use ifnull on right operand
+                    // Pop left operand (null), right is already on stack
+                    Self::map_stack(self.bytecode_builder.pop())?; // Pop null
+                    
+                    let true_label = self.create_label();
+                    let end_label = self.create_label();
+                    
+                    // ifnull true_label
+                    let true_label_str = self.label_str(true_label);
+                    Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
+                    
+                    // Push false (0) and jump to end
+                    Self::map_stack(self.bytecode_builder.iconst_0())?;
+                    let end_label_str = self.label_str(end_label);
+                    Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                    
+                    // Mark true label and push true (1)
+                    self.bytecode_builder.mark_label(&true_label_str);
+                    Self::map_stack(self.bytecode_builder.iconst_1())?;
+                    
+                    // Mark end label
+                    self.bytecode_builder.mark_label(&end_label_str);
+                } else {
+                    // Regular equality comparison
+                    // TODO: Implement proper object/primitive equality
+                    // For now, use simple comparison
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop right operand
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop left operand
                 Self::map_stack(self.bytecode_builder.iconst_0())?; // Push false for now
+                }
             }
             BinaryOp::Ne => {
-                eprintln!("🔍 DEBUG: Binary expression: Executing Ne branch");
-                // For now, use a simple approach: push 0 (false)
-                // TODO: Implement proper comparison result generation
-                eprintln!("🔍 DEBUG: Binary expression: About to pop right operand, stack_depth={}", self.bytecode_builder.stack_depth());
+                // Check if this is a null comparison
+                if self.is_null_literal(&binary.right) {
+                    // left != null -> use ifnonnull
+                    // Generate: if left is not null, push 1, else push 0
+                    let true_label = self.create_label();
+                    let end_label = self.create_label();
+                    
+                    // ifnonnull true_label
+                    let true_label_str = self.label_str(true_label);
+                    Self::map_stack(self.bytecode_builder.ifnonnull(&true_label_str))?;
+                    
+                    // Push false (0) and jump to end
+                    Self::map_stack(self.bytecode_builder.iconst_0())?;
+                    let end_label_str = self.label_str(end_label);
+                    Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                    
+                    // Mark true label and push true (1)
+                    self.bytecode_builder.mark_label(&true_label_str);
+                    Self::map_stack(self.bytecode_builder.iconst_1())?;
+                    
+                    // Mark end label
+                    self.bytecode_builder.mark_label(&end_label_str);
+                } else if self.is_null_literal(&binary.left) {
+                    // null != right -> use ifnonnull on right operand
+                    // Pop left operand (null), right is already on stack
+                    Self::map_stack(self.bytecode_builder.pop())?; // Pop null
+                    
+                    let true_label = self.create_label();
+                    let end_label = self.create_label();
+                    
+                    // ifnonnull true_label
+                    let true_label_str = self.label_str(true_label);
+                    Self::map_stack(self.bytecode_builder.ifnonnull(&true_label_str))?;
+                    
+                    // Push false (0) and jump to end
+                    Self::map_stack(self.bytecode_builder.iconst_0())?;
+                    let end_label_str = self.label_str(end_label);
+                    Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                    
+                    // Mark true label and push true (1)
+                    self.bytecode_builder.mark_label(&true_label_str);
+                    Self::map_stack(self.bytecode_builder.iconst_1())?;
+                    
+                    // Mark end label
+                    self.bytecode_builder.mark_label(&end_label_str);
+                } else {
+                    // Regular inequality comparison
+                    // TODO: Implement proper object/primitive inequality
+                    // For now, use simple comparison
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop right operand
-                eprintln!("🔍 DEBUG: Binary expression: About to pop left operand, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.pop())?; // Pop left operand
-                eprintln!("🔍 DEBUG: Binary expression: About to push iconst_0, stack_depth={}", self.bytecode_builder.stack_depth());
                 Self::map_stack(self.bytecode_builder.iconst_0())?; // Push false for now
-                eprintln!("🔍 DEBUG: Binary expression: Ne branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
+                }
             }
             BinaryOp::And => { 
                 eprintln!("🔍 DEBUG: Binary expression: Executing And branch, stack_depth={}", self.bytecode_builder.stack_depth());
@@ -4810,6 +4901,16 @@ impl MethodWriter {
         Ok(())
     }
 
+    /// Check if an expression is a null literal
+    fn is_null_literal(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(lit_expr) => {
+                matches!(lit_expr.value, Literal::Null)
+            }
+            _ => false
+        }
+    }
+
     /// Generate bytecode for new expression
     fn generate_new_expression(&mut self, new_expr: &NewExpr) -> Result<()> {
         // Check if it's an array creation
@@ -4834,14 +4935,24 @@ impl MethodWriter {
             let mut descriptor = String::new();
             descriptor.push('(');
             
-            // Handle the specific case for ArraysListIterator constructor
+            // Handle specific constructor cases
             if new_expr.target_type.name == "ArraysListIterator" && new_expr.arguments.len() == 2 {
                 // ArraysListIterator(Object[] array, int index)
                 descriptor.push_str("[Ljava/lang/Object;"); // Array of objects for first arg
                 descriptor.push('I'); // Integer for second arg
+            } else if new_expr.target_type.name == "UnsupportedOperationException" && new_expr.arguments.len() == 1 {
+                // UnsupportedOperationException(String message)
+                descriptor.push_str("Ljava/lang/String;"); // String argument
+            } else if new_expr.target_type.name == "NoSuchElementException" && new_expr.arguments.len() == 0 {
+                // NoSuchElementException() - no arguments
+            } else if new_expr.arguments.is_empty() {
+                // Default constructor with no arguments
             } else {
-                // For other constructors, assume no arguments for now
-                // TODO: Implement proper type resolution for constructor arguments
+                // For other constructors, try to infer argument types
+                for arg in &new_expr.arguments {
+                    let arg_descriptor = self.type_to_descriptor_with_generics(arg);
+                    descriptor.push_str(&arg_descriptor);
+                }
             }
             
             descriptor.push_str(")V");

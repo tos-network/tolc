@@ -833,9 +833,91 @@ impl ClassWriter {
             self.class_file.attributes.push(attr);
         }
 
+        // Generate bridge methods for generic interface implementations
+        self.generate_bridge_methods(class)?;
+
         // Finalize: write back shared pool
         if let Some(cp) = &self.cp_shared { self.class_file.constant_pool = cp.borrow().clone(); }
         self.cp_shared = None;
+        
+        Ok(())
+    }
+
+    /// Generate bridge methods for generic interface implementations
+    fn generate_bridge_methods(&mut self, class: &ClassDecl) -> Result<()> {
+        // Check if this class implements Iterator interface
+        for interface in &class.implements {
+            if interface.name == "Iterator" {
+                // Generate bridge method for Iterator.next()
+                self.generate_iterator_next_bridge(class)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate bridge method for Iterator.next(): Object next() -> Entry next()
+    fn generate_iterator_next_bridge(&mut self, class: &ClassDecl) -> Result<()> {
+        // Find the original next() method
+        let next_method = class.body.iter().find_map(|member| {
+            if let ClassMember::Method(method) = member {
+                if method.name == "next" && method.parameters.is_empty() {
+                    Some(method)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
+        if let Some(original_method) = next_method {
+            // Generate bridge method: public synthetic bridge Object next()
+            let bridge_access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_BRIDGE | access_flags::ACC_SYNTHETIC;
+            
+            // Method name and descriptor
+            let name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("next") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let bridge_descriptor = "()Ljava/lang/Object;";
+            let descriptor_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8(bridge_descriptor) }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            
+            // Generate bridge method body: aload_0, invokevirtual next()Entry, areturn
+            let mut code_bytes = Vec::new();
+            code_bytes.push(0x2a); // aload_0
+            
+            // invokevirtual this.next()Entry
+            code_bytes.push(0xb6); // invokevirtual
+            
+            // Add method reference to original next() method
+            let original_descriptor = self.generate_method_descriptor(original_method);
+            let class_name = self.current_class_name.as_ref().unwrap();
+            let method_ref_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); 
+                cp.try_add_method_ref(class_name, "next", &original_descriptor) }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            code_bytes.extend_from_slice(&method_ref_index.to_be_bytes());
+            
+            code_bytes.push(0xb0); // areturn
+            
+            // Create method info
+            let mut method_info = MethodInfo::new(bridge_access_flags, name_index, descriptor_index);
+            
+            // Add Code attribute
+            let code_attr = crate::codegen::attribute::CodeAttribute {
+                max_stack: 1,
+                max_locals: 1,
+                code: code_bytes,
+                exception_table: Vec::new(),
+                attributes: Vec::new(),
+            };
+            let code_attr_info = AttributeInfo::Code(code_attr);
+            let code_name_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_utf8("Code") }
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let named_attr = NamedAttribute::new(code_name_index.into(), code_attr_info);
+            method_info.attributes.push(named_attr);
+            
+            // Add to class file
+            self.class_file.methods.push(method_info);
+        }
         
         Ok(())
     }
