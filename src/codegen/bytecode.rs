@@ -7,6 +7,21 @@ use super::opcode_generator::OpcodeGenerator;
 use super::opcodes;
 use std::collections::HashMap;
 
+/// Control flow types for enhanced alive state tracking (javac-style)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlFlowType {
+    /// Terminal instructions (return, throw, etc.)
+    Terminal,
+    /// Jump instructions (goto, etc.)
+    Jump,
+    /// Conditional branch instructions (if*, etc.)
+    Conditional,
+    /// Label definitions (jump targets)
+    Label,
+    /// Exception handler entry points
+    ExceptionHandler,
+}
+
 /// Type-safe constant pool index
 /// 
 /// This provides compile-time type safety for constant pool references,
@@ -78,6 +93,9 @@ pub struct StackState {
     pub frame: StackFrame,
     /// Code generation enabled? (javac-style alive tracking)
     pub alive: bool,
+    /// Is it forbidden to compactify code, because something is pointing to current location?
+    /// (javac-style fixedPc mechanism)
+    pub fixed_pc: bool,
 }
 
 impl StackState {
@@ -89,6 +107,7 @@ impl StackState {
             max_stack: 0,
             frame: StackFrame::new(),
             alive: true,
+            fixed_pc: false,
         }
     }
     
@@ -175,6 +194,24 @@ impl StackState {
     /// Mark code as alive (reachable) - for label resolution
     pub fn mark_alive(&mut self) {
         self.alive = true;
+    }
+    
+    /// Set fixed PC state (javac-style fixedPc mechanism)
+    /// When true, prevents code compaction at current location
+    pub fn set_fixed_pc(&mut self, fixed: bool) {
+        self.fixed_pc = fixed;
+    }
+    
+    /// Check if PC is fixed (cannot be compacted)
+    pub fn is_fixed_pc(&self) -> bool {
+        self.fixed_pc
+    }
+    
+    /// Mark code as dead after terminal instructions (javac-style)
+    pub fn mark_dead_after_terminal(&mut self) {
+        self.alive = false;
+        // Reset fixed_pc when code becomes unreachable
+        self.fixed_pc = false;
     }
 }
 
@@ -426,7 +463,72 @@ impl BytecodeBuilder {
     /// Check if code generation is currently enabled (javac-style)
     pub fn is_alive(&self) -> bool {
         // javac-style: alive OR has pending jumps (forward references)
+        // This allows code generation to continue when there are unresolved forward jumps
         self.stack_state.is_alive() || !self.pending_jumps.is_empty()
+    }
+    
+    /// Check if code is reachable through normal control flow (javac-style)
+    pub fn is_reachable(&self) -> bool {
+        self.stack_state.is_alive()
+    }
+    
+    /// Check if we should emit instructions (javac-style comprehensive check)
+    pub fn should_emit(&self) -> bool {
+        // Emit instructions if:
+        // 1. Code is alive (reachable through normal flow), OR
+        // 2. There are pending jumps that might reach this location
+        self.is_alive()
+    }
+    
+    /// Enhanced alive state management with unreachable code detection (javac-style)
+    pub fn check_unreachable_code(&self, instruction_name: &str) -> Result<(), StackError> {
+        if !self.is_alive() {
+            eprintln!("Warning: Unreachable code detected after {} instruction", instruction_name);
+            // In javac, this would be a compile error in some contexts
+            // For now, we'll just warn but allow compilation to continue
+        }
+        Ok(())
+    }
+    
+    /// Mark code as definitely unreachable (javac-style)
+    pub fn mark_unreachable(&mut self, reason: &str) {
+        if self.is_alive() {
+            eprintln!("🔍 DEBUG: Marking code unreachable due to: {}", reason);
+            self.mark_dead_after_terminal();
+        }
+    }
+    
+    /// Check if the current instruction would create unreachable code (javac-style)
+    pub fn would_create_unreachable(&self, next_instruction: &str) -> bool {
+        !self.is_alive() && !matches!(next_instruction, "label" | "exception_handler" | "line_number")
+    }
+    
+    /// Enhanced alive state tracking for control flow (javac-style)
+    pub fn track_control_flow(&mut self, flow_type: ControlFlowType) -> Result<(), StackError> {
+        match flow_type {
+            ControlFlowType::Terminal => {
+                self.mark_dead_after_terminal();
+            },
+            ControlFlowType::Jump => {
+                // Jumps don't necessarily kill the current path in javac
+                // The target might jump back, so we keep alive state
+            },
+            ControlFlowType::Conditional => {
+                // Conditional branches keep the current path alive
+                // Only the taken branch might become dead
+            },
+            ControlFlowType::Label => {
+                // Labels can make dead code alive again
+                self.stack_state.alive = true;
+                self.set_fixed_pc(true); // Labels are fixed points
+            },
+            ControlFlowType::ExceptionHandler => {
+                // Exception handlers are always reachable
+                self.stack_state.alive = true;
+                self.set_fixed_pc(true);
+            }
+        }
+        Ok(())
     }
     
     /// Mark code as dead (unreachable) - javac-style
@@ -437,6 +539,21 @@ impl BytecodeBuilder {
     /// Mark code as alive (reachable) - for label resolution
     pub fn mark_alive(&mut self) {
         self.stack_state.mark_alive();
+    }
+    
+    /// Set fixed PC state (javac-style fixedPc mechanism)
+    pub fn set_fixed_pc(&mut self, fixed: bool) {
+        self.stack_state.set_fixed_pc(fixed);
+    }
+    
+    /// Check if PC is fixed (cannot be compacted)
+    pub fn is_fixed_pc(&self) -> bool {
+        self.stack_state.is_fixed_pc()
+    }
+    
+    /// Mark code as dead after terminal instructions (javac-style)
+    pub fn mark_dead_after_terminal(&mut self) {
+        self.stack_state.mark_dead_after_terminal();
     }
 
     /// Adjust stack for an invoke instruction given call-site metadata
@@ -497,45 +614,49 @@ impl BytecodeBuilder {
         // Mark code as alive when a label is resolved (javac-style)
         // This allows code generation to continue after jumps to this label
         self.mark_alive();
+        
+        // Set fixed PC at label location (javac-style fixedPc mechanism)
+        // This prevents code compaction at jump targets
+        self.set_fixed_pc(true);
 
     }
     
     /// Push raw bytes
     pub fn push(&mut self, byte: u8) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.push(byte);
         }
     }
     
     /// Extend with bytes
     pub fn extend_from_slice(&mut self, bytes: &[u8]) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.extend_from_slice(bytes);
         }
     }
     
     /// Push instruction opcode
     pub fn push_instruction(&mut self, opcode: u8) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.push(opcode);
         }
     }
     
     /// Push byte value
     pub fn push_byte(&mut self, value: u8) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.push(value);
         }
     }
     
     /// Push short value (big-endian)
     pub fn push_short(&mut self, value: i16) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.extend_from_slice(&value.to_be_bytes());
         }
     }
@@ -1175,12 +1296,12 @@ impl BytecodeBuilder {
     }
 
     pub fn goto(&mut self, label: &str) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             // Emit only the opcode, add_label_reference will handle the offset
             self.code.push(crate::codegen::opcodes::GOTO);
             self.add_label_reference(label);
-            self.mark_dead(); // Mark subsequent code as unreachable (javac-style)
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable (javac-style)
         }
         Ok(())
     }
@@ -1237,60 +1358,60 @@ impl BytecodeBuilder {
 
     // Returns - Use OpcodeGenerator
     pub fn ireturn(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.stack_state.pop(1)?;
             self.emit_opcode(self.opcode_generator.ireturn());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
 
     pub fn lreturn(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.stack_state.pop(2)?;
             self.emit_opcode(self.opcode_generator.lreturn());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
 
     pub fn freturn(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.stack_state.pop(1)?;
             self.emit_opcode(self.opcode_generator.freturn());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
 
     pub fn dreturn(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.stack_state.pop(2)?;
             self.emit_opcode(self.opcode_generator.dreturn());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
 
     pub fn areturn(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.stack_state.pop(1)?;
             self.emit_opcode(self.opcode_generator.areturn());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
 
     pub fn return_(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.emit_opcode(self.opcode_generator.return_void());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
@@ -1520,11 +1641,11 @@ impl BytecodeBuilder {
 
     // Exception handling and synchronization - Use OpcodeGenerator
     pub fn athrow(&mut self) -> Result<(), StackError> {
-        // Only process if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only process if code should be emitted (javac-style)
+        if self.should_emit() {
             self.stack_state.pop(1)?; // Pop exception object
             self.emit_opcode(self.opcode_generator.athrow());
-            self.mark_dead(); // Mark subsequent code as unreachable
+            self.mark_dead_after_terminal(); // Mark subsequent code as unreachable
         }
         Ok(())
     }
@@ -1626,22 +1747,22 @@ impl BytecodeBuilder {
 
     // Utility methods
     fn emit_opcode(&mut self, opcode_bytes: Vec<u8>) {
-        // Only emit instructions if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit instructions if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.extend(opcode_bytes);
         }
     }
     
     fn emit_byte(&mut self, byte: u8) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.push(byte);
         }
     }
     
     fn emit_short(&mut self, value: i16) {
-        // Only emit if code is alive (javac-style)
-        if self.stack_state.is_alive() {
+        // Only emit if code should be emitted (javac-style)
+        if self.should_emit() {
             self.code.extend_from_slice(&value.to_be_bytes());
         }
     }

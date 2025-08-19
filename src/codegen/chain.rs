@@ -17,6 +17,16 @@ pub struct StackState {
     pub max_depth: u16,
 }
 
+impl StackState {
+    /// Create a new StackState
+    pub fn new() -> Self {
+        Self {
+            depth: 0,
+            max_depth: 0,
+        }
+    }
+}
+
 impl Chain {
     /// Create a new chain node
     pub fn new(pc: usize, next: Option<Box<Chain>>, stack_state: StackState) -> Self {

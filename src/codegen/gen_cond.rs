@@ -54,6 +54,18 @@ impl GenCond {
                     _ => Self::gen_expression_cond(inner_expr, mark_branches),
                 }
             }
+            // Handle method calls that return boolean
+            Expr::MethodCall(method_call) => {
+                Self::gen_method_call_cond(method_call, mark_branches)
+            }
+            // Handle field access that might be boolean
+            Expr::FieldAccess(field_access) => {
+                Self::gen_field_access_cond(field_access, mark_branches)
+            }
+            // Handle identifiers (variables)
+            Expr::Identifier(identifier) => {
+                Self::gen_identifier_cond(identifier, mark_branches)
+            }
             // Default case: treat as boolean expression
             _ => Self::gen_expression_cond(inner_expr, mark_branches),
         }
@@ -185,6 +197,51 @@ impl GenCond {
         Ok(CondItem::new(opcode, None, None))
     }
     
+    /// Generate conditional code for method calls (javac-style)
+    fn gen_method_call_cond(method_call: &MethodCallExpr, mark_branches: bool) -> Result<CondItem> {
+        // For method calls, we need to evaluate the method and test the result
+        // This is similar to javac's handling of method calls in boolean context
+        
+        // Check if this is a known boolean method (like equals, isEmpty, etc.)
+        let is_boolean_method = Self::is_boolean_method(&method_call.name);
+        
+        if is_boolean_method {
+            // For boolean methods, use direct comparison
+            Ok(CondItem::new(opcodes::IFNE, None, None))
+        } else {
+            // For other methods, treat as general expression
+            Self::gen_expression_cond(&Expr::MethodCall(method_call.clone()), mark_branches)
+        }
+    }
+    
+    /// Generate conditional code for field access (javac-style)
+    fn gen_field_access_cond(field_access: &FieldAccessExpr, mark_branches: bool) -> Result<CondItem> {
+        // For field access, check if it's a boolean field
+        let is_boolean_field = Self::is_boolean_field(&field_access.name);
+        
+        if is_boolean_field {
+            // For boolean fields, use direct comparison
+            Ok(CondItem::new(opcodes::IFNE, None, None))
+        } else {
+            // For other fields, treat as general expression
+            Self::gen_expression_cond(&Expr::FieldAccess(field_access.clone()), mark_branches)
+        }
+    }
+    
+    /// Generate conditional code for identifiers (javac-style)
+    fn gen_identifier_cond(identifier: &IdentifierExpr, mark_branches: bool) -> Result<CondItem> {
+        // For identifiers, check if it's a boolean variable
+        let is_boolean_var = Self::is_boolean_identifier(&identifier.name);
+        
+        if is_boolean_var {
+            // For boolean variables, use direct comparison
+            Ok(CondItem::new(opcodes::IFNE, None, None))
+        } else {
+            // For other identifiers, treat as general expression
+            Self::gen_expression_cond(&Expr::Identifier(identifier.clone()), mark_branches)
+        }
+    }
+    
     /// Generate conditional code for general expressions
     fn gen_expression_cond(_expr: &Expr, _mark_branches: bool) -> Result<CondItem> {
         // For general expressions, generate as boolean test
@@ -192,11 +249,108 @@ impl GenCond {
         Ok(CondItem::new(opcodes::IFNE, None, None))
     }
     
+    /// Check if a method is known to return boolean (javac-style type checking)
+    fn is_boolean_method(method_name: &str) -> bool {
+        matches!(method_name, 
+            "equals" | "isEmpty" | "contains" | "startsWith" | "endsWith" | 
+            "hasNext" | "isNull" | "isPresent" | "matches" | "canRead" | 
+            "canWrite" | "exists" | "isDirectory" | "isFile"
+        )
+    }
+    
+    /// Check if a field is known to be boolean (javac-style type checking)
+    fn is_boolean_field(field_name: &str) -> bool {
+        // Common boolean field patterns
+        field_name.starts_with("is") || 
+        field_name.starts_with("has") || 
+        field_name.starts_with("can") ||
+        matches!(field_name, "enabled" | "visible" | "active" | "valid")
+    }
+    
+    /// Check if an identifier is likely boolean (javac-style type inference)
+    fn is_boolean_identifier(name: &str) -> bool {
+        // Common boolean variable patterns
+        name.starts_with("is") || 
+        name.starts_with("has") || 
+        name.starts_with("can") ||
+        matches!(name, "flag" | "enabled" | "visible" | "active" | "valid" | "found")
+    }
+    
     /// Skip parentheses around expressions (javac TreeInfo.skipParens equivalent)
     fn skip_parentheses(expr: &Expr) -> &Expr {
         match expr {
             Expr::Parenthesized(inner) => Self::skip_parentheses(inner),
             _ => expr,
+        }
+    }
+    
+    /// Generate conditional code for instanceof expressions (javac-style)
+    fn gen_instanceof_cond(instanceof: &InstanceOfExpr, mark_branches: bool) -> Result<CondItem> {
+        // Generate code to load the object
+        let mut cond = Self::gen_expression_cond(&instanceof.expr, mark_branches)?;
+        
+        // instanceof generates INSTANCEOF instruction followed by IFNE
+        cond.opcode = opcodes::INSTANCEOF;
+        
+        // Create a new CondItem for the instanceof check
+        let mut instanceof_cond = CondItem::new(opcodes::IFNE, None, None);
+        
+        if mark_branches {
+            instanceof_cond.tree = Some(Expr::InstanceOf(instanceof.clone()));
+        }
+        
+        Ok(instanceof_cond)
+    }
+    
+    /// Enhanced short-circuit evaluation for complex boolean expressions (javac-style)
+    fn gen_enhanced_short_circuit(binary: &BinaryExpr, mark_branches: bool) -> Result<CondItem> {
+        match binary.operator {
+            BinaryOp::And => {
+                // Enhanced AND with constant folding
+                let left_cond = Self::gen_cond(&binary.left, true)?;
+                
+                if left_cond.is_false() {
+                    // Left is false, entire AND is false (short-circuit)
+                    let mut result = CondItem::new(opcodes::NOP, None, None);
+                    if mark_branches {
+                        result.tree = Some(Expr::Binary(binary.clone()));
+                    }
+                    return Ok(result);
+                }
+                
+                if left_cond.is_true() {
+                    // Left is true, result depends on right
+                    return Self::gen_cond(&binary.right, mark_branches);
+                }
+                
+                // Both sides need evaluation with short-circuit
+                Self::gen_and_cond(binary, mark_branches)
+            },
+            BinaryOp::Or => {
+                // Enhanced OR with constant folding
+                let left_cond = Self::gen_cond(&binary.left, true)?;
+                
+                if left_cond.is_true() {
+                    // Left is true, entire OR is true (short-circuit)
+                    let mut result = CondItem::new(opcodes::GOTO, None, None);
+                    if mark_branches {
+                        result.tree = Some(Expr::Binary(binary.clone()));
+                    }
+                    return Ok(result);
+                }
+                
+                if left_cond.is_false() {
+                    // Left is false, result depends on right
+                    return Self::gen_cond(&binary.right, mark_branches);
+                }
+                
+                // Both sides need evaluation with short-circuit
+                Self::gen_or_cond(binary, mark_branches)
+            },
+            _ => {
+                // Not a logical operator, use regular comparison
+                Self::gen_comparison_cond(binary, mark_branches)
+            }
         }
     }
     

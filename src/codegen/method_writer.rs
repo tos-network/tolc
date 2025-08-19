@@ -25,6 +25,7 @@ use crate::codegen::loop_optimizer::LoopOptimizer;
 use crate::codegen::advanced_optimizer::AdvancedCodeGenerator;
 use crate::codegen::finalizer_optimizer::ExceptionHandlingOptimizer;
 use crate::codegen::instruction_optimizer::InstructionOptimizer;
+use crate::codegen::type_erasure::{TypeErasureProcessor, ErasureResult};
 use crate::error::{Result, Error};
 
 // Include the generated runtime metadata
@@ -783,6 +784,8 @@ pub struct MethodWriter {
     string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer,
     /// javac-style item system for representing addressable entities
     item_factory: crate::codegen::item_system::ItemFactory,
+    /// Type erasure processor for generic type handling
+    type_erasure: TypeErasureProcessor,
     /// Enhanced Stack Map Frame Emitter for advanced frame generation
     stack_map_emitter: Option<crate::codegen::enhanced_stack_map_emitter::EnhancedStackMapEmitter>,
 }
@@ -1453,6 +1456,7 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            type_erasure: TypeErasureProcessor::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
 
@@ -1493,6 +1497,7 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            type_erasure: TypeErasureProcessor::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
 
@@ -1533,6 +1538,7 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            type_erasure: TypeErasureProcessor::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
 
@@ -1576,6 +1582,7 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            type_erasure: TypeErasureProcessor::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
 
@@ -2177,6 +2184,17 @@ impl MethodWriter {
         Ok(())
     }
     
+    /// Erase generic type using the type erasure processor
+    fn erase_generic_type(&mut self, type_ref: &TypeRef) -> Result<String> {
+        // Create a basic type environment (in a full implementation, this would be
+        // populated with the current class and method type parameters)
+        let env = crate::review::generics::TypeEnv::default();
+        // Removed GlobalMemberIndex dependency as it's private
+        
+        let erasure_result = self.type_erasure.erase_type(type_ref, &env)?;
+        Ok(erasure_result.erased_type)
+    }
+
     /// Get the bound type for a generic type parameter
     /// For example, for "T extends Enum<T>", this returns "java.lang.Enum"
     fn get_generic_type_bound(&self, type_param_name: &str) -> Option<String> {
@@ -2257,16 +2275,17 @@ impl MethodWriter {
                 "double" => LocalType::Double,
                 "void" => LocalType::Int, // void is represented as int in some contexts
                 _ => {
-                    // Check if this is a generic type parameter
-                    // Generic type parameters are typically single uppercase letters or short names
-                    // In Java, generic type parameters are erased to their bound or Object at runtime
-                    if self.is_generic_type_parameter(&type_ref.name) {
-                        // Look for the type parameter in current class to find its bounds
+                    // Use type erasure for all reference types (including generics)
+                    // This handles both generic type parameters and parameterized types
+                    if self.is_generic_type_parameter(&type_ref.name) || !type_ref.type_args.is_empty() {
+                        // This is a generic type that needs erasure
+                        // Note: We can't call erase_generic_type here because it requires &mut self
+                        // In a full implementation, we would refactor to allow mutable access
                         if let Some(bound_type) = self.get_generic_type_bound(&type_ref.name) {
                             eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to bound '{}'", type_ref.name, bound_type);
                             LocalType::Reference(bound_type)
                         } else {
-                            eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to Object (no bound found)", type_ref.name);
+                            eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type '{}' to Object (erasure)", type_ref.name);
                             LocalType::Reference("java.lang.Object".to_string())
                         }
                     } else {
@@ -3449,7 +3468,14 @@ impl MethodWriter {
                 let should_pop = match &expr_stmt.expr {
                     Expr::MethodCall(method_call) => {
                         // For method calls, check if they return non-void values
-                        self.should_pop_method_call_result(method_call)
+                        // Use VoidItem to represent void method results (javac-style)
+                        let returns_void = !self.should_pop_method_call_result(method_call);
+                        if returns_void {
+                            // Create VoidItem to represent the void result
+                            let _void_item = crate::codegen::item_system::ItemFactory::make_void_item();
+                            // VoidItem has width 0, so no stack adjustment needed
+                        }
+                        !returns_void
                     },
                     Expr::Unary(unary) => {
                         // PostInc/PostDec as statements don't need pop since we optimized them
@@ -4456,6 +4482,29 @@ impl MethodWriter {
     
     /// Generate bytecode for an identifier expression (javac-style optimized)
     fn generate_identifier(&mut self, ident: &str) -> Result<()> {
+        // Handle 'this' and 'super' using SelfItem (javac-style)
+        if ident == "this" {
+            let this_item = crate::codegen::item_system::ItemFactory::make_this_item();
+            let bytecode = this_item.load()?;
+            for &byte in &bytecode {
+                self.bytecode_builder.push_byte(byte);
+            }
+            // Update stack for 'this' reference (always 1 slot for object reference)
+            Self::map_stack(self.bytecode_builder.update_stack(0, 1))?;
+            return Ok(());
+        }
+        
+        if ident == "super" {
+            let super_item = crate::codegen::item_system::ItemFactory::make_super_item();
+            let bytecode = super_item.load()?;
+            for &byte in &bytecode {
+                self.bytecode_builder.push_byte(byte);
+            }
+            // Update stack for 'super' reference (always 1 slot for object reference)
+            Self::map_stack(self.bytecode_builder.update_stack(0, 1))?;
+            return Ok(());
+        }
+        
         // Look up local variable using javac-style Item management
         if let Some(local_var) = self.find_local_variable(ident) {
             // Convert LocalType to TypeRef for Item system
@@ -8973,12 +9022,27 @@ impl MethodWriter {
     
     /// Generate bytecode for a return statement using InstructionOptimizer
     fn generate_return(&mut self, return_type: &TypeRef) -> Result<()> {
-        // Use InstructionOptimizer for optimized return instructions
-        let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_return_instruction(&return_type.name);
-        
-        // Emit the optimized bytecode
-        for &byte in &optimized_bytecode {
-            self.bytecode_builder.push_byte(byte);
+        // Handle void returns using VoidItem (javac-style)
+        if return_type.name == "void" {
+            let void_item = crate::codegen::item_system::ItemFactory::make_void_item();
+            let bytecode = void_item.load()?; // VoidItem.load() returns empty bytecode
+            for &byte in &bytecode {
+                self.bytecode_builder.push_byte(byte);
+            }
+            
+            // Generate void return instruction
+            let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_return_instruction("void");
+            for &byte in &optimized_bytecode {
+                self.bytecode_builder.push_byte(byte);
+            }
+        } else {
+            // Use InstructionOptimizer for non-void return instructions
+            let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_return_instruction(&return_type.name);
+            
+            // Emit the optimized bytecode
+            for &byte in &optimized_bytecode {
+                self.bytecode_builder.push_byte(byte);
+            }
         }
         
         // Return instructions clear the stack and terminate the method

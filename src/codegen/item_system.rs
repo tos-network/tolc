@@ -31,6 +31,135 @@ pub enum Item {
     Conditional(ConditionalItem),
     /// Assignment item (javac AssignItem)
     Assignment(AssignmentItem),
+    /// Self item (this/super) (javac SelfItem)
+    SelfRef(SelfItem),
+    /// Void item (javac voidItem)
+    Void(VoidItem),
+    /// Chain item for chained method calls (javac ChainItem)
+    Chain(ChainItem),
+    /// Select item for field/method selection (javac SelectItem)
+    Select(SelectItem),
+    /// Apply item for method application (javac ApplyItem)
+    Apply(ApplyItem),
+}
+
+impl Item {
+    /// Load this item onto the stack (javac Item.load())
+    pub fn load(&self) -> Result<Vec<u8>> {
+        match self {
+            Item::Local(item) => item.load(),
+            Item::Stack(item) => item.load(),
+            Item::Member(item) => item.load(),
+            Item::Static(item) => item.load(),
+            Item::Indexed(item) => item.load(),
+            Item::Immediate(item) => item.load(),
+            Item::Conditional(item) => item.load(),
+            Item::Assignment(item) => item.load(),
+            Item::SelfRef(item) => item.load(),
+            Item::Void(item) => item.load(),
+            Item::Chain(item) => item.load(),
+            Item::Select(item) => item.load(),
+            Item::Apply(item) => item.load(),
+        }
+    }
+    
+    /// Store top of stack into this item (javac Item.store())
+    pub fn store(&self) -> Result<Vec<u8>> {
+        match self {
+            Item::Local(item) => item.store(),
+            Item::Member(item) => item.store(),
+            Item::Static(item) => item.store(),
+            Item::Indexed(item) => item.store(),
+            Item::Assignment(item) => item.store(),
+            Item::Chain(item) => item.store(),
+            Item::Select(item) => item.store(),
+            Item::Apply(item) => item.store(),
+            _ => Err(crate::error::Error::codegen_error(&format!("Store operation not supported for {:?}", self))),
+        }
+    }
+    
+    /// Duplicate this item on stack (javac Item.duplicate())
+    pub fn duplicate(&self) -> Result<Vec<u8>> {
+        match self {
+            Item::Stack(item) => item.duplicate(),
+            Item::Indexed(_) => Ok(vec![opcodes::DUP2]), // Array index needs dup2
+            Item::Assignment(item) => item.duplicate(),
+            _ => Err(crate::error::Error::codegen_error(&format!("Duplicate operation not supported for {:?}", self))),
+        }
+    }
+    
+    /// Drop this item from stack (javac Item.drop())
+    pub fn drop(&self) -> Result<Vec<u8>> {
+        match self {
+            Item::Stack(item) => item.drop(),
+            Item::Indexed(_) => Ok(vec![opcodes::POP2]), // Array index needs pop2
+            _ => Err(crate::error::Error::codegen_error(&format!("Drop operation not supported for {:?}", self))),
+        }
+    }
+    
+    /// Get the width of this item (javac Item.width())
+    pub fn width(&self) -> u8 {
+        match self {
+            Item::Local(item) => item.width(),
+            Item::Stack(item) => item.width(),
+            Item::Member(_) => 1, // Object references are 1 slot
+            Item::Static(_) => 1, // Static references are 1 slot  
+            Item::Indexed(_) => 1, // Array elements are 1 slot
+            Item::Immediate(item) => item.width(),
+            Item::Conditional(_) => 1, // Conditional items have width 1
+            Item::Assignment(_) => 1, // Assignment result is 1 slot
+            Item::SelfRef(item) => item.width(),
+            Item::Void(item) => item.width(),
+            Item::Chain(item) => item.width(),
+            Item::Select(item) => item.width(),
+            Item::Apply(item) => item.width(),
+        }
+    }
+    
+    /// Convert to conditional item (javac Item.mkCond())
+    pub fn mk_cond(&self) -> Result<Item> {
+        // Convert any item to a conditional item by comparing with zero
+        match self {
+            Item::Conditional(_) => Ok(self.clone()),
+            _ => {
+                // Generate comparison with zero
+                let true_jumps = crate::codegen::chain::Chain::new(0, None, crate::codegen::chain::StackState::new());
+                let false_jumps = crate::codegen::chain::Chain::new(0, None, crate::codegen::chain::StackState::new());
+                Ok(Item::Conditional(ConditionalItem::new(
+                    opcodes::IFNE, // Jump if not equal to zero
+                    true_jumps,
+                    false_jumps,
+                )))
+            }
+        }
+    }
+    
+    /// Convert to assignment item (javac Item.mkAssign())
+    pub fn mk_assign(&self, needs_dup: bool) -> Item {
+        Item::Assignment(AssignmentItem {
+            target: Box::new(self.clone()),
+            needs_dup,
+        })
+    }
+    
+    /// Get type code of this item
+    pub fn type_code(&self) -> TypeCode {
+        match self {
+            Item::Local(item) => item.type_code,
+            Item::Stack(item) => item.type_code,
+            Item::Member(_) => TypeCode::Object, // Member access returns object
+            Item::Static(_) => TypeCode::Object, // Static access returns object
+            Item::Indexed(item) => item.element_type_code, // Array element type
+            Item::Immediate(item) => item.type_code,
+            Item::Conditional(_) => TypeCode::Int, // Conditional items are boolean (int)
+            Item::Assignment(_) => TypeCode::Object, // Assignment result type
+            Item::SelfRef(item) => item.type_code,
+            Item::Void(item) => item.type_code,
+            Item::Chain(item) => item.type_code,
+            Item::Select(item) => item.type_code,
+            Item::Apply(item) => item.type_code,
+        }
+    }
 }
 
 /// Local variable item with iinc optimization support
@@ -114,6 +243,23 @@ pub struct ConditionalItem {
     pub false_jumps: Option<Chain>,
 }
 
+impl ConditionalItem {
+    /// Create a new ConditionalItem
+    pub fn new(opcode: u8, true_jumps: Chain, false_jumps: Chain) -> Self {
+        Self {
+            opcode,
+            true_jumps: Some(true_jumps),
+            false_jumps: Some(false_jumps),
+        }
+    }
+    
+    /// Load conditional item (placeholder)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        // Conditional items don't directly load values
+        Ok(vec![])
+    }
+}
+
 /// Assignment item for assignment expressions
 #[derive(Debug, Clone)]
 pub struct AssignmentItem {
@@ -121,6 +267,32 @@ pub struct AssignmentItem {
     pub target: Box<Item>,
     /// Whether this assignment needs duplication
     pub needs_dup: bool,
+}
+
+impl AssignmentItem {
+    /// Load assignment item (javac AssignItem.load)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        // Load target, duplicate if needed, then store
+        let mut bytecode = self.target.load()?;
+        if self.needs_dup {
+            bytecode.extend_from_slice(&self.target.duplicate()?);
+        }
+        bytecode.extend_from_slice(&self.target.store()?);
+        Ok(bytecode)
+    }
+    
+    /// Store to assignment item (not supported)
+    pub fn store(&self) -> Result<Vec<u8>> {
+        Err(crate::error::Error::codegen_error("Cannot store to assignment item"))
+    }
+    
+    /// Duplicate assignment item
+    pub fn duplicate(&self) -> Result<Vec<u8>> {
+        // Load and duplicate the result
+        let mut bytecode = self.load()?;
+        bytecode.extend_from_slice(&vec![opcodes::DUP]);
+        Ok(bytecode)
+    }
 }
 
 /// Type codes for JVM types (javac-style)
@@ -149,93 +321,6 @@ pub enum ConstantValue {
     Null,
 }
 
-impl Item {
-    /// Load this item onto the operand stack (javac Item.load equivalent)
-    pub fn load(&self) -> Result<Vec<u8>> {
-        match self {
-            Item::Local(local) => local.load(),
-            Item::Stack(stack) => stack.load(),
-            Item::Member(member) => member.load(),
-            Item::Static(static_item) => static_item.load(),
-            Item::Indexed(indexed) => indexed.load(),
-            Item::Immediate(immediate) => immediate.load(),
-            Item::Conditional(conditional) => conditional.load(),
-            Item::Assignment(assignment) => assignment.load(),
-        }
-    }
-    
-    /// Store a value from stack into this item (javac Item.store equivalent)
-    pub fn store(&self) -> Result<Vec<u8>> {
-        match self {
-            Item::Local(local) => local.store(),
-            Item::Member(member) => member.store(),
-            Item::Static(static_item) => static_item.store(),
-            Item::Indexed(indexed) => indexed.store(),
-            _ => Err(crate::error::Error::from(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput, 
-                "Cannot store into this item type"
-            ))),
-        }
-    }
-    
-    /// Duplicate this item on the stack (javac Item.duplicate equivalent)
-    pub fn duplicate(&self) -> Result<Vec<u8>> {
-        match self {
-            Item::Local(local) => local.duplicate(),
-            Item::Stack(stack) => stack.duplicate(),
-            Item::Immediate(immediate) => immediate.duplicate(),
-            _ => {
-                // For complex items, load twice
-                let mut bytecode = self.load()?;
-                bytecode.extend_from_slice(&self.load()?);
-                Ok(bytecode)
-            }
-        }
-    }
-    
-    /// Drop this item from the stack (javac Item.drop equivalent)
-    pub fn drop(&self) -> Result<Vec<u8>> {
-        match self {
-            Item::Stack(stack) => stack.drop(),
-            _ => Ok(vec![opcodes::POP]), // Default drop behavior
-        }
-    }
-    
-    /// Get the width of this item on the stack (javac Item.width equivalent)
-    pub fn width(&self) -> u8 {
-        match self {
-            Item::Local(local) => local.width(),
-            Item::Stack(stack) => stack.width(),
-            Item::Immediate(immediate) => immediate.width(),
-            _ => 1, // Default width
-        }
-    }
-    
-    /// Get the type code of this item
-    pub fn type_code(&self) -> TypeCode {
-        match self {
-            Item::Local(local) => local.type_code,
-            Item::Stack(stack) => stack.type_code,
-            Item::Immediate(immediate) => immediate.type_code,
-            _ => TypeCode::Object, // Default type
-        }
-    }
-    
-    /// Convert this item to a conditional item (javac Item.mkCond equivalent)
-    pub fn make_conditional(&self) -> Result<Item> {
-        match self {
-            Item::Conditional(cond) => Ok(Item::Conditional(cond.clone())),
-            _ => {
-                // Convert to conditional by testing against zero
-                Ok(Item::Conditional(ConditionalItem {
-                    opcode: opcodes::IFNE,
-                    true_jumps: None,
-                    false_jumps: None,
-                }))
-            }
-        }
-    }
-}
 
 impl LocalItem {
     /// Create a new local item
@@ -627,37 +712,6 @@ impl IndexedItem {
     }
 }
 
-impl ConditionalItem {
-    /// Load conditional as boolean value
-    pub fn load(&self) -> Result<Vec<u8>> {
-        let mut bytecode = Vec::new();
-        
-        // Pattern: condition_check, ifeq false_label, iconst_1, goto end_label, false_label: iconst_0, end_label:
-        bytecode.push(self.opcode);
-        bytecode.extend_from_slice(&[0, 7]); // Jump to false_label
-        bytecode.push(opcodes::ICONST_1);
-        bytecode.push(opcodes::GOTO);
-        bytecode.extend_from_slice(&[0, 4]); // Jump to end_label
-        bytecode.push(opcodes::ICONST_0);
-        
-        Ok(bytecode)
-    }
-}
-
-impl AssignmentItem {
-    /// Load assignment result
-    pub fn load(&self) -> Result<Vec<u8>> {
-        if self.needs_dup {
-            // Duplicate the assigned value
-            let mut bytecode = self.target.load()?;
-            bytecode.extend_from_slice(&self.target.duplicate()?);
-            Ok(bytecode)
-        } else {
-            self.target.load()
-        }
-    }
-}
-
 /// Item factory for creating different types of items (javac Items equivalent)
 pub struct ItemFactory;
 
@@ -692,6 +746,276 @@ impl ItemFactory {
             target: Box::new(target),
             needs_dup,
         })
+    }
+    
+    /// Create 'this' item (javac makeThisItem)
+    pub fn make_this_item() -> Item {
+        Item::SelfRef(SelfItem::new(false))
+    }
+    
+    /// Create 'super' item (javac makeSuperItem)
+    pub fn make_super_item() -> Item {
+        Item::SelfRef(SelfItem::new(true))
+    }
+    
+    /// Create void item (javac makeVoidItem)
+    pub fn make_void_item() -> Item {
+        Item::Void(VoidItem::new())
+    }
+    
+
+}
+
+/// Self item representing 'this' or 'super' (javac SelfItem)
+#[derive(Debug, Clone)]
+pub struct SelfItem {
+    /// Whether this represents 'super' (true) or 'this' (false)
+    pub is_super: bool,
+    /// Type code (always OBJECT)
+    pub type_code: TypeCode,
+}
+
+impl SelfItem {
+    /// Create a new SelfItem
+    pub fn new(is_super: bool) -> Self {
+        Self {
+            is_super,
+            type_code: TypeCode::Object,
+        }
+    }
+    
+    /// Load 'this' or 'super' onto stack (javac-style)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        // Always load from local variable 0 (this/super)
+        Ok(vec![opcodes::ALOAD_0])
+    }
+    
+    /// Get width (always 1 for object references)
+    pub fn width(&self) -> u8 {
+        1
+    }
+}
+
+/// Void item representing void type (javac voidItem)
+#[derive(Debug, Clone)]
+pub struct VoidItem {
+    /// Type code (always VOID)
+    pub type_code: TypeCode,
+}
+
+impl VoidItem {
+    /// Create a new VoidItem
+    pub fn new() -> Self {
+        Self {
+            type_code: TypeCode::Void,
+        }
+    }
+    
+    /// Load void (no-op, javac-style)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        // Void items don't generate any bytecode
+        Ok(vec![])
+    }
+    
+    /// Get width (always 0 for void)
+    pub fn width(&self) -> u8 {
+        0
+    }
+}
+
+
+
+/// Chain item for chained method calls (javac ChainItem)
+#[derive(Debug, Clone)]
+pub struct ChainItem {
+    /// Base item being chained
+    pub base_item: Box<Item>,
+    /// Chain of method calls
+    pub chain: Vec<String>,
+    /// Result type of the chain
+    pub type_code: TypeCode,
+}
+
+impl ChainItem {
+    /// Create a new ChainItem
+    pub fn new(base_item: Item, chain: Vec<String>, type_code: TypeCode) -> Self {
+        Self {
+            base_item: Box::new(base_item),
+            chain,
+            type_code,
+        }
+    }
+    
+    /// Load the chained result (javac-style)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        let mut bytecode = self.base_item.load()?;
+        
+        // Generate method calls for the chain
+        for _method_name in &self.chain {
+            // This is a simplified implementation
+            // In a full implementation, we'd need method resolution
+            bytecode.extend_from_slice(&[opcodes::INVOKEVIRTUAL]);
+            // Add method reference (placeholder)
+            bytecode.extend_from_slice(&[0, 1]); // Placeholder method ref
+        }
+        
+        Ok(bytecode)
+    }
+    
+    /// Store is not supported for chain items
+    pub fn store(&self) -> Result<Vec<u8>> {
+        Err(crate::error::Error::codegen_error("Store operation not supported for ChainItem"))
+    }
+    
+    /// Get width based on result type
+    pub fn width(&self) -> u8 {
+        match self.type_code {
+            TypeCode::Long | TypeCode::Double => 2,
+            TypeCode::Void => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// Select item for field/method selection (javac SelectItem)
+#[derive(Debug, Clone)]
+pub struct SelectItem {
+    /// Selected member name
+    pub member_name: String,
+    /// Owner type
+    pub owner_type: String,
+    /// Member type
+    pub member_type: String,
+    /// Whether this is a static member
+    pub is_static: bool,
+    /// Type code for the member
+    pub type_code: TypeCode,
+}
+
+impl SelectItem {
+    /// Create a new SelectItem
+    pub fn new(member_name: String, owner_type: String, member_type: String, is_static: bool, type_code: TypeCode) -> Self {
+        Self {
+            member_name,
+            owner_type,
+            member_type,
+            is_static,
+            type_code,
+        }
+    }
+    
+    /// Load the selected member (javac-style)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        let mut bytecode = Vec::new();
+        
+        if self.is_static {
+            // Static field access
+            bytecode.push(opcodes::GETSTATIC);
+        } else {
+            // Instance field access (assumes receiver is on stack)
+            bytecode.push(opcodes::GETFIELD);
+        }
+        
+        // Add field reference (placeholder)
+        bytecode.extend_from_slice(&[0, 1]); // Placeholder field ref
+        
+        Ok(bytecode)
+    }
+    
+    /// Store into the selected member (javac-style)
+    pub fn store(&self) -> Result<Vec<u8>> {
+        let mut bytecode = Vec::new();
+        
+        if self.is_static {
+            // Static field store
+            bytecode.push(opcodes::PUTSTATIC);
+        } else {
+            // Instance field store
+            bytecode.push(opcodes::PUTFIELD);
+        }
+        
+        // Add field reference (placeholder)
+        bytecode.extend_from_slice(&[0, 1]); // Placeholder field ref
+        
+        Ok(bytecode)
+    }
+    
+    /// Get width based on member type
+    pub fn width(&self) -> u8 {
+        match self.type_code {
+            TypeCode::Long | TypeCode::Double => 2,
+            TypeCode::Void => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// Apply item for method application (javac ApplyItem)
+#[derive(Debug, Clone)]
+pub struct ApplyItem {
+    /// Method name
+    pub method_name: String,
+    /// Method descriptor
+    pub method_descriptor: String,
+    /// Owner type
+    pub owner_type: String,
+    /// Whether this is a static method
+    pub is_static: bool,
+    /// Whether this is an interface method
+    pub is_interface: bool,
+    /// Return type code
+    pub type_code: TypeCode,
+}
+
+impl ApplyItem {
+    /// Create a new ApplyItem
+    pub fn new(method_name: String, method_descriptor: String, owner_type: String, is_static: bool, is_interface: bool, type_code: TypeCode) -> Self {
+        Self {
+            method_name,
+            method_descriptor,
+            owner_type,
+            is_static,
+            is_interface,
+            type_code,
+        }
+    }
+    
+    /// Load (invoke) the method (javac-style)
+    pub fn load(&self) -> Result<Vec<u8>> {
+        let mut bytecode = Vec::new();
+        
+        if self.is_static {
+            bytecode.push(opcodes::INVOKESTATIC);
+        } else if self.is_interface {
+            bytecode.push(opcodes::INVOKEINTERFACE);
+        } else {
+            bytecode.push(opcodes::INVOKEVIRTUAL);
+        }
+        
+        // Add method reference (placeholder)
+        bytecode.extend_from_slice(&[0, 1]); // Placeholder method ref
+        
+        if self.is_interface {
+            // Interface methods need argument count
+            bytecode.push(1); // Placeholder arg count
+            bytecode.push(0); // Reserved
+        }
+        
+        Ok(bytecode)
+    }
+    
+    /// Store is not supported for method application
+    pub fn store(&self) -> Result<Vec<u8>> {
+        Err(crate::error::Error::codegen_error("Store operation not supported for ApplyItem"))
+    }
+    
+    /// Get width based on return type
+    pub fn width(&self) -> u8 {
+        match self.type_code {
+            TypeCode::Long | TypeCode::Double => 2,
+            TypeCode::Void => 0,
+            _ => 1,
+        }
     }
 }
 
