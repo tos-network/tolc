@@ -7826,22 +7826,119 @@ impl MethodWriter {
                 }
                 Expr::ArrayAccess(array_access) => {
                     // Handle compound assignment to array element: arr[idx] op= value
+                    
+                    // Determine array element type for type-aware operations
+                    let array_type = self.resolve_expression_type(&array_access.array);
+                    let element_type = if array_type.ends_with("[]") {
+                        &array_type[..array_type.len()-2]
+                    } else {
+                        "int" // fallback
+                    };
+                    eprintln!("🔍 DEBUG: Compound array assignment: Array type={}, Element type={}", array_type, element_type);
+                    
                     // Load array and index
                     self.generate_expression(&array_access.array)?;
                     self.generate_expression(&array_access.index)?;
                     // Duplicate array and index for later store: arr, idx -> arr, idx, arr, idx
                     Self::map_stack(self.bytecode_builder.dup2())?;
-                    // Load current array element: arr, idx, arr, idx -> arr, idx, current_value
-                    Self::map_stack(self.bytecode_builder.iaload())?;
+                    
+                    // Load current array element using type-aware instruction
+                    match element_type {
+                        "long" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using laload for long array");
+                            Self::map_stack(self.bytecode_builder.laload())?;
+                        }
+                        "double" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using daload for double array");
+                            Self::map_stack(self.bytecode_builder.daload())?;
+                        }
+                        "float" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using faload for float array");
+                            Self::map_stack(self.bytecode_builder.faload())?;
+                        }
+                        "byte" | "boolean" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using baload for byte/boolean array");
+                            Self::map_stack(self.bytecode_builder.baload())?;
+                        }
+                        "char" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using caload for char array");
+                            Self::map_stack(self.bytecode_builder.caload())?;
+                        }
+                        "short" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using saload for short array");
+                            Self::map_stack(self.bytecode_builder.saload())?;
+                        }
+                        _ => {
+                            // int or object reference
+                            if element_type == "int" {
+                                eprintln!("🔍 DEBUG: Compound assignment: Using iaload for int array");
+                                Self::map_stack(self.bytecode_builder.iaload())?;
+                            } else {
+                                eprintln!("🔍 DEBUG: Compound assignment: Using aaload for object array");
+                                Self::map_stack(self.bytecode_builder.aaload())?;
+                            }
+                        }
+                    }
+                    
                     // Generate right operand: arr, idx, current_value -> arr, idx, current_value, rhs_value
                     self.generate_expression(&assign.value)?;
                     // Apply operation: arr, idx, current_value, rhs_value -> arr, idx, result
                     self.generate_compound_assignment(assign.operator.clone())?;
-                    // Duplicate result for return value: arr, idx, result -> arr, idx, result, result
-                    Self::map_stack(self.bytecode_builder.dup_x2())?;
-                    // Store result: result, arr, idx, result -> result (empty)
-                    Self::map_stack(self.bytecode_builder.iastore())?;
-                    // Result value remains on stack for chained assignments
+                    
+                    // Duplicate result for return value (only if preserve_value is true)
+                    if preserve_value {
+                        match element_type {
+                            "long" | "double" => {
+                                // For wide types, use dup2_x2
+                                eprintln!("🔍 DEBUG: Compound assignment: Using dup2_x2 for wide type");
+                                Self::map_stack(self.bytecode_builder.dup2_x2())?;
+                            }
+                            _ => {
+                                // For narrow types, use dup_x2
+                                eprintln!("🔍 DEBUG: Compound assignment: Using dup_x2 for narrow type");
+                                Self::map_stack(self.bytecode_builder.dup_x2())?;
+                            }
+                        }
+                    }
+                    
+                    // Store result using type-aware instruction
+                    match element_type {
+                        "long" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using lastore for long array");
+                            Self::map_stack(self.bytecode_builder.lastore())?;
+                        }
+                        "double" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using dastore for double array");
+                            Self::map_stack(self.bytecode_builder.dastore())?;
+                        }
+                        "float" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using fastore for float array");
+                            Self::map_stack(self.bytecode_builder.fastore())?;
+                        }
+                        "byte" | "boolean" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using bastore for byte/boolean array");
+                            Self::map_stack(self.bytecode_builder.bastore())?;
+                        }
+                        "char" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using castore for char array");
+                            Self::map_stack(self.bytecode_builder.castore())?;
+                        }
+                        "short" => {
+                            eprintln!("🔍 DEBUG: Compound assignment: Using sastore for short array");
+                            Self::map_stack(self.bytecode_builder.sastore())?;
+                        }
+                        _ => {
+                            // int or object reference
+                            if element_type == "int" {
+                                eprintln!("🔍 DEBUG: Compound assignment: Using iastore for int array");
+                                Self::map_stack(self.bytecode_builder.iastore())?;
+                            } else {
+                                eprintln!("🔍 DEBUG: Compound assignment: Using aastore for object array");
+                                Self::map_stack(self.bytecode_builder.aastore())?;
+                            }
+                        }
+                    }
+                    // Result value remains on stack for chained assignments (only if preserve_value=true)
                     return Ok(());
                 }
                 _ => {
@@ -7975,23 +8072,88 @@ impl MethodWriter {
             Expr::ArrayAccess(array_access) => {
                 // arr[idx] = value
                 eprintln!("🔍 DEBUG: Array assignment: Starting, stack_depth={}", self.bytecode_builder.stack_depth());
+                
+                // Determine array element type for type-aware operations
+                let array_type = self.resolve_expression_type(&array_access.array);
+                let element_type = if array_type.ends_with("[]") {
+                    &array_type[..array_type.len()-2]
+                } else {
+                    "int" // fallback
+                };
+                eprintln!("🔍 DEBUG: Array assignment: Array type={}, Element type={}", array_type, element_type);
+                
                 // Evaluate array and index first
                 self.generate_expression(&array_access.array)?;
                 eprintln!("🔍 DEBUG: Array assignment: After array, stack_depth={}", self.bytecode_builder.stack_depth());
                 self.generate_expression(&array_access.index)?;
                 eprintln!("🔍 DEBUG: Array assignment: After index, stack_depth={}", self.bytecode_builder.stack_depth());
+                
                 // Then evaluate RHS value
                 self.generate_expression(&assign.value)?;
                 eprintln!("🔍 DEBUG: Array assignment: After value, stack_depth={}", self.bytecode_builder.stack_depth());
-                // For chained assignments, duplicate the value before iastore
-                // Stack: arrayref, index, value → arrayref, index, value, value
-                eprintln!("🔍 DEBUG: Array assignment: About to call dup_x2");
-                Self::map_stack(self.bytecode_builder.dup_x2())?;
-                eprintln!("🔍 DEBUG: Array assignment: After dup_x2, stack_depth={}", self.bytecode_builder.stack_depth());
-                // Stack: value, arrayref, index, value → iastore consumes arrayref, index and value, leaving value
-                Self::map_stack(self.bytecode_builder.iastore())?;
-                eprintln!("🔍 DEBUG: Array assignment: After iastore, stack_depth={}", self.bytecode_builder.stack_depth());
-                // Value remains on stack for chained assignments
+                
+                // Handle type conversion if needed (e.g., int literal to long array)
+                let value_type = self.resolve_expression_type(&assign.value);
+                if element_type == "long" && value_type == "int" {
+                    eprintln!("🔍 DEBUG: Array assignment: Converting int to long with i2l");
+                    Self::map_stack(self.bytecode_builder.i2l())?;
+                }
+                
+                // For chained assignments, duplicate the value before store (only if preserve_value is true)
+                if preserve_value {
+                    match element_type {
+                        "long" | "double" => {
+                            // For wide types, use dup2_x2
+                            eprintln!("🔍 DEBUG: Array assignment: About to call dup2_x2 for wide type");
+                            Self::map_stack(self.bytecode_builder.dup2_x2())?;
+                        }
+                        _ => {
+                            // For narrow types, use dup_x2
+                            eprintln!("🔍 DEBUG: Array assignment: About to call dup_x2 for narrow type");
+                            Self::map_stack(self.bytecode_builder.dup_x2())?;
+                        }
+                    }
+                }
+                
+                // Use type-aware array store instruction
+                match element_type {
+                    "long" => {
+                        eprintln!("🔍 DEBUG: Array assignment: Using lastore for long array");
+                        Self::map_stack(self.bytecode_builder.lastore())?;
+                    }
+                    "double" => {
+                        eprintln!("🔍 DEBUG: Array assignment: Using dastore for double array");
+                        Self::map_stack(self.bytecode_builder.dastore())?;
+                    }
+                    "float" => {
+                        eprintln!("🔍 DEBUG: Array assignment: Using fastore for float array");
+                        Self::map_stack(self.bytecode_builder.fastore())?;
+                    }
+                    "byte" | "boolean" => {
+                        eprintln!("🔍 DEBUG: Array assignment: Using bastore for byte/boolean array");
+                        Self::map_stack(self.bytecode_builder.bastore())?;
+                    }
+                    "char" => {
+                        eprintln!("🔍 DEBUG: Array assignment: Using castore for char array");
+                        Self::map_stack(self.bytecode_builder.castore())?;
+                    }
+                    "short" => {
+                        eprintln!("🔍 DEBUG: Array assignment: Using sastore for short array");
+                        Self::map_stack(self.bytecode_builder.sastore())?;
+                    }
+                    _ => {
+                        // int or object reference
+                        if element_type == "int" {
+                            eprintln!("🔍 DEBUG: Array assignment: Using iastore for int array");
+                            Self::map_stack(self.bytecode_builder.iastore())?;
+                        } else {
+                            eprintln!("🔍 DEBUG: Array assignment: Using aastore for object array");
+                            Self::map_stack(self.bytecode_builder.aastore())?;
+                        }
+                    }
+                }
+                eprintln!("🔍 DEBUG: Array assignment: After array store, stack_depth={}", self.bytecode_builder.stack_depth());
+                // Value remains on stack for chained assignments only if preserve_value=true
             }
             other => {
                 return Err(Error::codegen_error(format!("Unsupported assignment target: {:?}", other)));
@@ -8001,8 +8163,201 @@ impl MethodWriter {
         Ok(())
     }
 
-    /// Generate bytecode for compound assignment operations
+    /// Generate bytecode for compound assignment operations (type-aware with explicit type)
+    fn generate_compound_assignment_typed(&mut self, op: AssignmentOp, operand_type: &str) -> Result<()> {
+        match op {
+            AssignmentOp::AddAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.ladd());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?; // 2 longs -> 1 long
+                    }
+                    "float" => {
+                        self.emit_opcode(self.opcode_generator.fadd());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                    "double" => {
+                        self.emit_opcode(self.opcode_generator.dadd());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.iadd());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::SubAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.lsub());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    "float" => {
+                        self.emit_opcode(self.opcode_generator.fsub());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                    "double" => {
+                        self.emit_opcode(self.opcode_generator.dsub());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.isub());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::MulAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.lmul());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    "float" => {
+                        self.emit_opcode(self.opcode_generator.fmul());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                    "double" => {
+                        self.emit_opcode(self.opcode_generator.dmul());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.imul());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::DivAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.ldiv());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    "float" => {
+                        self.emit_opcode(self.opcode_generator.fdiv());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                    "double" => {
+                        self.emit_opcode(self.opcode_generator.ddiv());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.idiv());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::ModAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.lrem());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    "float" => {
+                        self.emit_opcode(self.opcode_generator.frem());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                    "double" => {
+                        self.emit_opcode(self.opcode_generator.drem());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.irem());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::AndAssign => {
+                match operand_type {
+                    "long" => {
+                        eprintln!("🔍 DEBUG: AndAssign: Using land for long operands");
+                        self.emit_opcode(self.opcode_generator.land());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?; // 2 longs -> 1 long
+                    }
+                    _ => {
+                        eprintln!("🔍 DEBUG: AndAssign: Using iand for int operands");
+                        self.emit_opcode(self.opcode_generator.iand());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?; // 2 ints -> 1 int
+                    }
+                }
+            },
+            AssignmentOp::OrAssign => {
+                match operand_type {
+                    "long" => {
+                        eprintln!("🔍 DEBUG: OrAssign: Using lor for long operands");
+                        self.emit_opcode(self.opcode_generator.lor());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        eprintln!("🔍 DEBUG: OrAssign: Using ior for int operands");
+                        self.emit_opcode(self.opcode_generator.ior());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::XorAssign => {
+                match operand_type {
+                    "long" => {
+                        eprintln!("🔍 DEBUG: XorAssign: Using lxor for long operands");
+                        self.emit_opcode(self.opcode_generator.lxor());
+                        Self::map_stack(self.bytecode_builder.update_stack(4, 2))?;
+                    }
+                    _ => {
+                        eprintln!("🔍 DEBUG: XorAssign: Using ixor for int operands");
+                        self.emit_opcode(self.opcode_generator.ixor());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::LShiftAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.lshl());
+                        Self::map_stack(self.bytecode_builder.update_stack(3, 2))?; // long + int -> long
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.ishl());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::RShiftAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.lshr());
+                        Self::map_stack(self.bytecode_builder.update_stack(3, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.ishr());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::URShiftAssign => {
+                match operand_type {
+                    "long" => {
+                        self.emit_opcode(self.opcode_generator.lushr());
+                        Self::map_stack(self.bytecode_builder.update_stack(3, 2))?;
+                    }
+                    _ => {
+                        self.emit_opcode(self.opcode_generator.iushr());
+                        Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                    }
+                }
+            },
+            AssignmentOp::Assign => {
+                // Should not happen here
+                return Err(Error::codegen_error("Unexpected Assign operator in compound assignment".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate bytecode for compound assignment operations (type-aware)
     fn generate_compound_assignment(&mut self, op: AssignmentOp) -> Result<()> {
+        // Note: This method is called in the context where operands are already on stack
+        // We need to determine the operand type from the stack or context
+        // For now, we'll use a simple heuristic based on stack depth and common patterns
+        
         match op {
             AssignmentOp::AddAssign => {
                 self.emit_opcode(self.opcode_generator.iadd());
