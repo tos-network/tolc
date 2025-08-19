@@ -461,10 +461,33 @@ impl BytecodeBuilder {
     }
     
     /// Check if code generation is currently enabled (javac-style)
+    /// This implements javac's isAlive() logic: alive || pendingJumps != null
     pub fn is_alive(&self) -> bool {
         // javac-style: alive OR has pending jumps (forward references)
         // This allows code generation to continue when there are unresolved forward jumps
         self.stack_state.is_alive() || !self.pending_jumps.is_empty()
+    }
+    
+    /// Enhanced alive check with pending jumps manager integration
+    pub fn is_alive_with_pending_jumps(&self, pending_jumps_manager: Option<&crate::codegen::pending_jumps::PendingJumpsManager>) -> bool {
+        // Basic alive state
+        if self.stack_state.is_alive() {
+            return true;
+        }
+        
+        // Check local pending jumps
+        if !self.pending_jumps.is_empty() {
+            return true;
+        }
+        
+        // Check external pending jumps manager (javac-style)
+        if let Some(manager) = pending_jumps_manager {
+            if manager.has_pending_jumps() {
+                return true;
+            }
+        }
+        
+        false
     }
     
     /// Check if code is reachable through normal control flow (javac-style)

@@ -3262,7 +3262,9 @@ fn infer_literal_primitive_or_string(expr: &Expr) -> Option<&'static str> {
         crate::ast::Literal::Boolean(_) => Some("boolean"),
         crate::ast::Literal::String(_) => Some("String"),
         crate::ast::Literal::Char(_) => Some("char"),
-        crate::ast::Literal::Null => Some("null"),
+        crate::ast::Literal::Long(_) => Some("long"),
+        crate::ast::Literal::Double(_) => Some("double"),
+        Literal::Null => Some("null"),
     }} else { None }
 }
 

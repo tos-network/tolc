@@ -327,6 +327,29 @@ impl FieldAccessOptimizer {
             Literal::Null => {
                 bytecode_builder.aconst_null()?;
             }
+            Literal::Long(value) => {
+                // Long constants - use lconst or ldc2_w
+                match *value {
+                    0 => bytecode_builder.lconst_0()?,
+                    1 => bytecode_builder.lconst_1()?,
+                    _ => {
+                        // Use ldc2_w for other long values
+                        // This would need constant pool integration
+                        return Err("Long constants not fully implemented".into());
+                    }
+                }
+            },
+            Literal::Double(value) => {
+                // Double constants - use dconst or ldc2_w
+                if *value == 0.0 {
+                    bytecode_builder.dconst_0()?;
+                } else if *value == 1.0 {
+                    bytecode_builder.dconst_1()?;
+                } else {
+                    // Use ldc2_w for other double values
+                    return Err("Double constants not fully implemented".into());
+                }
+            },
             Literal::Char(value) => {
                 let char_value = *value as i32;
                 match char_value {
@@ -441,6 +464,19 @@ impl FieldAccessPattern {
                     Literal::Float(v) => if *v == 0.0 || *v == 1.0 || *v == 2.0 { 1 } else { 3 },
                     Literal::Boolean(_) => 1, // iconst_0/iconst_1
                     Literal::String(_) => 3, // ldc
+                    Literal::Long(value) => {
+                        match *value {
+                            0..=1 => 1, // lconst_0, lconst_1
+                            _ => 3, // ldc2_w
+                        }
+                    },
+                    Literal::Double(value) => {
+                        if *value == 0.0 || *value == 1.0 {
+                            1 // dconst_0, dconst_1
+                        } else {
+                            3 // ldc2_w
+                        }
+                    },
                     Literal::Null => 1, // aconst_null
                     Literal::Char(v) => {
                         let char_value = *v as i32;

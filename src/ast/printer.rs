@@ -732,6 +732,17 @@ impl AstVisitor for AstPrinter {
                 self.output.push(*c);
                 self.output.push('\'');
             }
+            Literal::Long(l) => {
+                self.output.push_str(&l.to_string());
+                self.output.push('L');
+            },
+            Literal::Double(d) => {
+                self.output.push_str(&d.to_string());
+                if !d.to_string().contains('.') && !d.to_string().contains('e') && !d.to_string().contains('E') {
+                    self.output.push_str(".0");
+                }
+                self.output.push('D');
+            },
             Literal::Null => self.output.push_str("null"),
         }
     }

@@ -558,12 +558,14 @@ pub struct LiteralExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    Integer(i64),
-    Float(f64),
-    Boolean(bool),
-    String(String),
-    Char(char),
-    Null,
+    Integer(i64),    // Java int (can hold 32-bit values, compatible with existing code)
+    Long(i64),       // Java long (64-bit, explicit long literals)
+    Float(f64),      // Java float (can hold 32-bit values, compatible with existing code)
+    Double(f64),     // Java double (64-bit, explicit double literals)
+    Boolean(bool),   // Java boolean
+    String(String),  // Java String
+    Char(char),      // Java char
+    Null,           // Java null
 }
 
 #[derive(Debug, Clone, PartialEq)]

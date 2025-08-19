@@ -2488,17 +2488,33 @@ impl Parser {
             let span = Span::new(location.clone(), location);
             return Ok(Expr::Literal(LiteralExpr { value: Literal::Char(ch), span }));
         }
-        if self.check(&Token::HexInteger) || self.check(&Token::BinaryInteger) || self.check(&Token::OctalInteger) || self.check(&Token::DecimalInteger) || self.check(&Token::LongLiteral) {
+        if self.check(&Token::LongLiteral) {
             let token = self.advance();
             let raw = token.lexeme().replace('_', "");
             let v = if raw.starts_with("0x") || raw.starts_with("0X") {
                 i64::from_str_radix(raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0)
             } else if raw.starts_with("0b") || raw.starts_with("0B") {
+                i64::from_str_radix(raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches("0b").trim_start_matches("0B"), 2).unwrap_or(0)
+            } else if raw.starts_with('0') && raw.len() > 1 {
+                i64::from_str_radix(raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches('0'), 8).unwrap_or(0)
+            } else {
+                raw.trim_end_matches(|c| c=='l'||c=='L').parse::<i64>().unwrap_or(0)
+            };
+            let location = token.location();
+            let span = Span::new(location.clone(), location);
+            return Ok(Expr::Literal(LiteralExpr { value: Literal::Long(v), span }));
+        }
+        if self.check(&Token::HexInteger) || self.check(&Token::BinaryInteger) || self.check(&Token::OctalInteger) || self.check(&Token::DecimalInteger) {
+            let token = self.advance();
+            let raw = token.lexeme().replace('_', "");
+            let v = if raw.starts_with("0x") || raw.starts_with("0X") {
+                i64::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0)
+            } else if raw.starts_with("0b") || raw.starts_with("0B") {
                 i64::from_str_radix(raw.trim_start_matches("0b").trim_start_matches("0B"), 2).unwrap_or(0)
             } else if raw.starts_with('0') && raw.len() > 1 {
                 i64::from_str_radix(raw.trim_start_matches('0'), 8).unwrap_or(0)
             } else {
-                raw.trim_end_matches(|c| c=='l'||c=='L').parse::<i64>().unwrap_or(0)
+                raw.parse::<i64>().unwrap_or(0)
             };
             let location = token.location();
             let span = Span::new(location.clone(), location);
@@ -2507,10 +2523,17 @@ impl Parser {
         if self.check(&Token::TypedFloat) || self.check(&Token::FloatLiteral) || self.check(&Token::ScientificFloat) {
             let token = self.advance();
             let raw = token.lexeme().replace('_', "");
+            let is_double = raw.ends_with('d') || raw.ends_with('D') || 
+                           (!raw.ends_with('f') && !raw.ends_with('F') && 
+                            (raw.contains('.') || raw.contains('e') || raw.contains('E')));
             let v = raw.trim_end_matches(|c| c=='f' || c=='F' || c=='d' || c=='D').parse::<f64>().unwrap_or(0.0);
             let location = token.location();
             let span = Span::new(location.clone(), location);
-            return Ok(Expr::Literal(LiteralExpr { value: Literal::Float(v), span }));
+            if is_double {
+                return Ok(Expr::Literal(LiteralExpr { value: Literal::Double(v), span }));
+            } else {
+                return Ok(Expr::Literal(LiteralExpr { value: Literal::Float(v), span }));
+            }
         }
         
         // Parse boolean literals

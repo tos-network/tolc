@@ -26,6 +26,11 @@ use crate::codegen::advanced_optimizer::AdvancedCodeGenerator;
 use crate::codegen::finalizer_optimizer::ExceptionHandlingOptimizer;
 use crate::codegen::instruction_optimizer::InstructionOptimizer;
 use crate::codegen::type_erasure::TypeErasureProcessor;
+use crate::codegen::fatcode_manager::FatcodeManager;
+use crate::codegen::pending_jumps::PendingJumpsManager;
+use crate::codegen::fixed_pc_manager::FixedPcManager;
+use crate::codegen::jsr_ret_optimizer::JsrRetOptimizer;
+use crate::codegen::enhanced_string_optimizer::EnhancedStringOptimizer;
 use crate::error::{Result, Error};
 
 // Include the generated runtime metadata
@@ -786,6 +791,21 @@ pub struct MethodWriter {
     item_factory: crate::codegen::item_system::ItemFactory,
     /// Type erasure processor for generic type handling
     type_erasure: TypeErasureProcessor,
+    
+    /// JavaC-style fatcode manager for handling 32K+ jumps
+    fatcode_manager: FatcodeManager,
+    
+    /// JavaC-style pending jumps manager for jump optimization
+    pending_jumps_manager: PendingJumpsManager,
+    
+    /// JavaC-style fixed PC manager for preventing code compaction at jump targets
+    fixed_pc_manager: FixedPcManager,
+    
+    /// JavaC-style JSR/RET optimizer for subroutine calls and finally blocks
+    jsr_ret_optimizer: JsrRetOptimizer,
+    
+    /// Enhanced string optimizer for StringBuilder/StringBuffer operations
+    enhanced_string_optimizer: EnhancedStringOptimizer,
     /// Enhanced Stack Map Frame Emitter for advanced frame generation
     stack_map_emitter: Option<crate::codegen::enhanced_stack_map_emitter::EnhancedStackMapEmitter>,
 }
@@ -1457,6 +1477,11 @@ impl MethodWriter {
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
             type_erasure: TypeErasureProcessor::new(),
+            fatcode_manager: FatcodeManager::new(),
+            pending_jumps_manager: PendingJumpsManager::new(),
+            fixed_pc_manager: FixedPcManager::new(),
+            jsr_ret_optimizer: JsrRetOptimizer::new(),
+            enhanced_string_optimizer: EnhancedStringOptimizer::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
         }
@@ -1496,6 +1521,11 @@ impl MethodWriter {
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
             type_erasure: TypeErasureProcessor::new(),
+            fatcode_manager: FatcodeManager::new(),
+            pending_jumps_manager: PendingJumpsManager::new(),
+            fixed_pc_manager: FixedPcManager::new(),
+            jsr_ret_optimizer: JsrRetOptimizer::new(),
+            enhanced_string_optimizer: EnhancedStringOptimizer::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
         }
@@ -1535,6 +1565,11 @@ impl MethodWriter {
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
             type_erasure: TypeErasureProcessor::new(),
+            fatcode_manager: FatcodeManager::new(),
+            pending_jumps_manager: PendingJumpsManager::new(),
+            fixed_pc_manager: FixedPcManager::new(),
+            jsr_ret_optimizer: JsrRetOptimizer::new(),
+            enhanced_string_optimizer: EnhancedStringOptimizer::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
 
@@ -1579,6 +1614,11 @@ impl MethodWriter {
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
             type_erasure: TypeErasureProcessor::new(),
+            fatcode_manager: FatcodeManager::new(),
+            pending_jumps_manager: PendingJumpsManager::new(),
+            fixed_pc_manager: FixedPcManager::new(),
+            jsr_ret_optimizer: JsrRetOptimizer::new(),
+            enhanced_string_optimizer: EnhancedStringOptimizer::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
 
@@ -2364,6 +2404,128 @@ impl MethodWriter {
         
         // For non-generic types, return as-is
         type_name.to_string()
+    }
+
+    /// Check if fatcode mode is needed and switch if necessary
+    pub fn check_and_enable_fatcode(&mut self) -> Result<bool> {
+        let current_pc = self.bytecode_builder.current_pc() as u32;
+        
+        if self.fatcode_manager.check_fatcode_needed(current_pc) {
+            eprintln!("🔍 DEBUG: MethodWriter: Switching to fatcode mode at PC {}", current_pc);
+            self.fatcode_manager.enable_fatcode();
+            return Ok(true);
+        }
+        
+        Ok(false)
+    }
+    
+    /// Register a jump for fatcode tracking
+    pub fn register_jump(&mut self, jump_type: crate::codegen::fatcode_manager::JumpType) -> Result<u32> {
+        let current_pc = self.bytecode_builder.current_pc() as u32;
+        let jump_id = self.fatcode_manager.register_jump(current_pc, jump_type);
+        Ok(jump_id)
+    }
+    
+    /// Resolve a jump target
+    pub fn resolve_jump(&mut self, jump_id: u32, target_pc: u32) -> Result<()> {
+        self.fatcode_manager.resolve_jump(jump_id, target_pc)
+            .map_err(|e| Error::codegen_error(e))?;
+        Ok(())
+    }
+    
+    /// Create a pending jump chain
+    pub fn create_pending_jump_chain(&mut self) -> u32 {
+        self.pending_jumps_manager.create_chain()
+    }
+    
+    /// Add a jump to a pending chain
+    pub fn add_jump_to_pending_chain(&mut self, chain_id: u32, opcode: crate::codegen::opcode_enum::Opcode, instruction_size: u32) -> Result<()> {
+        let current_pc = self.bytecode_builder.current_pc() as u32;
+        self.pending_jumps_manager.add_jump_to_chain(chain_id, current_pc, opcode, instruction_size)
+            .map_err(|e| Error::codegen_error(e))?;
+        Ok(())
+    }
+    
+    /// Resolve a pending jump chain
+    pub fn resolve_pending_jump_chain(&mut self, chain_id: u32, target_pc: u32) -> Result<Vec<(u32, i32)>> {
+        self.pending_jumps_manager.resolve_chain(chain_id, target_pc)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Mark current PC as fixed (cannot be moved during compaction)
+    pub fn mark_current_pc_fixed(&mut self, reason: crate::codegen::fixed_pc_manager::FixedPcReason) {
+        let current_pc = self.bytecode_builder.current_pc() as u32;
+        self.fixed_pc_manager.mark_fixed(current_pc, reason);
+    }
+    
+    /// Mark a jump target as fixed
+    pub fn mark_jump_target_fixed(&mut self, target_pc: u32, source_pc: u32, jump_type: &str) {
+        self.fixed_pc_manager.mark_jump_target(target_pc, source_pc, jump_type);
+    }
+    
+    /// Enhanced alive state check using all managers
+    pub fn is_code_alive(&self) -> bool {
+        // Use enhanced alive check with pending jumps integration
+        self.bytecode_builder.is_alive_with_pending_jumps(Some(&self.pending_jumps_manager))
+    }
+    
+    /// Check if we should emit an instruction (javac-style comprehensive check)
+    pub fn should_emit_instruction(&self) -> bool {
+        self.is_code_alive()
+    }
+    
+    /// Analyze and optimize a try-finally statement
+    pub fn optimize_try_finally(&mut self, try_stmt: &crate::ast::TryStmt) -> Result<crate::codegen::jsr_ret_optimizer::FinallyOptimization> {
+        self.jsr_ret_optimizer.analyze_try_finally(try_stmt)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Generate JSR instruction for subroutine call
+    pub fn generate_jsr_call(&mut self, subroutine_id: &str, target_pc: u32) -> Result<Vec<u8>> {
+        self.jsr_ret_optimizer.generate_jsr_call(subroutine_id, target_pc)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Generate RET instruction for subroutine return
+    pub fn generate_ret_instruction(&mut self, local_var_index: u16) -> Result<Vec<u8>> {
+        self.jsr_ret_optimizer.generate_ret_instruction(local_var_index)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Create a subroutine for finally block optimization
+    pub fn create_finally_subroutine(&mut self, subroutine_id: &str) -> Result<()> {
+        let current_pc = self.bytecode_builder.current_pc() as u32;
+        self.jsr_ret_optimizer.create_subroutine(subroutine_id, current_pc)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Finalize a subroutine
+    pub fn finalize_subroutine(&mut self, subroutine_id: &str) -> Result<()> {
+        let current_pc = self.bytecode_builder.current_pc() as u32;
+        self.jsr_ret_optimizer.finalize_subroutine(subroutine_id, current_pc)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Analyze and optimize string concatenation
+    pub fn optimize_string_concatenation(&mut self, binary_expr: &crate::ast::BinaryExpr) -> Result<crate::codegen::enhanced_string_optimizer::StringConcatenationOptimization> {
+        self.enhanced_string_optimizer.analyze_string_concatenation(binary_expr)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Generate optimized bytecode for string concatenation
+    pub fn generate_optimized_string_concat(&mut self, optimization: &crate::codegen::enhanced_string_optimizer::StringConcatenationOptimization) -> Result<Vec<u8>> {
+        self.enhanced_string_optimizer.generate_optimized_concatenation(optimization)
+            .map_err(|e| Error::codegen_error(e))
+    }
+    
+    /// Check if JSR limit has been reached
+    pub fn is_jsr_limit_reached(&self) -> bool {
+        self.jsr_ret_optimizer.is_jsr_limit_reached()
+    }
+    
+    /// Set JSR/RET vs inlining preference
+    pub fn set_prefer_inlining(&mut self, prefer: bool) {
+        self.jsr_ret_optimizer.set_prefer_inlining(prefer);
     }
 
     /// Use the full TypeErasureProcessor for complete type erasure
@@ -4490,8 +4652,29 @@ impl MethodWriter {
                     return Err(Error::codegen_error("No constant pool available for string literal"));
                 }
             }
+            Literal::Long(value) => {
+                // Long constants use ldc2_w
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_long(*value) };
+                    Self::map_stack(self.bytecode_builder.ldc2_w(idx))?;
+                    return Ok(());
+                } else {
+                    return Err(Error::codegen_error("No constant pool available for long literal"));
+                }
+            }
+            Literal::Double(value) => {
+                // Double constants use ldc2_w
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_double(*value) };
+                    Self::map_stack(self.bytecode_builder.ldc2_w(idx))?;
+                    return Ok(());
+                } else {
+                    return Err(Error::codegen_error("No constant pool available for double literal"));
+                }
+            }
             Literal::Char(value) => ConstantOptimizer::optimize_int(*value as i32),
-            Literal::Null => {
+
+                    Literal::Null => {
                 // null reference
                 Self::map_stack(self.bytecode_builder.aconst_null())?;
                 return Ok(());
@@ -6089,11 +6272,13 @@ impl MethodWriter {
             Expr::Literal(lit) => {
                 match &lit.value {
                     crate::ast::Literal::Integer(_) => "I".to_string(),
+                    crate::ast::Literal::Long(_) => "J".to_string(), // Java long type descriptor
                     crate::ast::Literal::Float(_) => "F".to_string(),
+                    crate::ast::Literal::Double(_) => "D".to_string(), // Java double type descriptor
                     crate::ast::Literal::Boolean(_) => "Z".to_string(),
                     crate::ast::Literal::String(_) => "Ljava/lang/String;".to_string(),
                     crate::ast::Literal::Char(_) => "C".to_string(),
-                    crate::ast::Literal::Null => "Ljava/lang/Object;".to_string(),
+                    Literal::Null => "Ljava/lang/Object;".to_string(),
                 }
             }
             Expr::Cast(cast) => {
@@ -6133,11 +6318,13 @@ impl MethodWriter {
             Expr::Literal(lit) => {
                 match &lit.value {
                     crate::ast::Literal::Integer(_) => "int".to_string(),
+                    crate::ast::Literal::Long(_) => "long".to_string(),
                     crate::ast::Literal::Float(_) => "float".to_string(),
+                    crate::ast::Literal::Double(_) => "double".to_string(),
                     crate::ast::Literal::Boolean(_) => "boolean".to_string(),
                     crate::ast::Literal::String(_) => "java.lang.String".to_string(),
                     crate::ast::Literal::Char(_) => "char".to_string(),
-                    crate::ast::Literal::Null => "java.lang.Object".to_string(),
+                    Literal::Null => "java.lang.Object".to_string(),
                 }
             }
             Expr::Identifier(ident) => {
@@ -6429,9 +6616,11 @@ impl MethodWriter {
     /// Convert expression type to JVM descriptor with proper generic handling
     fn type_to_descriptor_with_generics(&self, expr: &Expr) -> String {
         match expr {
-            Expr::Literal(lit) => match lit.value {
+                        Expr::Literal(lit) => match lit.value {
                 Literal::Integer(_) => "I".to_string(),
+                Literal::Long(_) => "J".to_string(),
                 Literal::Float(_) => "F".to_string(),
+                Literal::Double(_) => "D".to_string(),
                 Literal::Boolean(_) => "Z".to_string(),
                 Literal::String(_) => "Ljava/lang/String;".to_string(),
                 Literal::Char(_) => "C".to_string(),
@@ -6564,9 +6753,11 @@ impl MethodWriter {
     /// Convert expression type to JVM descriptor
     fn type_to_descriptor(&self, expr: &Expr) -> String {
         match expr {
-            Expr::Literal(lit) => match lit.value {
+                        Expr::Literal(lit) => match lit.value {
                 Literal::Integer(_) => "I".to_string(),
+                Literal::Long(_) => "J".to_string(),
                 Literal::Float(_) => "F".to_string(),
+                Literal::Double(_) => "D".to_string(),
                 Literal::Boolean(_) => "Z".to_string(),
                 Literal::String(_) => "Ljava/lang/String;".to_string(),
                 Literal::Char(_) => "C".to_string(),
@@ -7991,7 +8182,21 @@ impl MethodWriter {
                         array_dims: 0,
                         span: lit.span.clone(),
                     },
-                    crate::ast::Literal::Null => crate::ast::TypeRef {
+                    crate::ast::Literal::Long(_) => crate::ast::TypeRef {
+                        name: "long".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    crate::ast::Literal::Double(_) => crate::ast::TypeRef {
+                        name: "double".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    Literal::Null => crate::ast::TypeRef {
                         name: "java.lang.Object".to_string(),
                         type_args: vec![],
                         annotations: vec![],

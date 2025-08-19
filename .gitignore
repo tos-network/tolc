@@ -9,6 +9,7 @@ release/
 **/*.rs.bk
 tests/com/
 *.log
+*.bak
 
 
 ## Test/bench artifacts

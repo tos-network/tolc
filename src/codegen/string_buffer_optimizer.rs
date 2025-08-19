@@ -165,6 +165,8 @@ impl StringBufferOptimizer {
                     Literal::String(s) => s.len() as u32,
                     Literal::Integer(_) => 10, // Average integer length
                     Literal::Boolean(_) => 5, // "true" or "false"
+                    Literal::Long(_) => 19, // Maximum long length: -9223372036854775808
+                    Literal::Double(_) => 24, // Average double length with precision
                     Literal::Null => 4, // "null"
                     _ => 8, // Default estimate
                 }
