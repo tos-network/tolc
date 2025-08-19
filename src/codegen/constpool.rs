@@ -451,6 +451,139 @@ impl ConstantPool {
         self.constants.len() as u16  // Indices start at 1
     }
 
+    /// Get the index mapping that would be used during serialization
+    pub fn get_index_mapping(&self) -> HashMap<u16, u16> {
+        self.build_index_mapping()
+    }
+    
+    /// Simple serialization for regular classes (no reordering)
+    pub fn to_bytes_simple(&self) -> Vec<u8> {
+        let mut cp = self.clone();
+        
+        // Resolve all pending entries first
+        let initial_len = cp.constants.len();
+        for idx in 1..=initial_len {
+            cp.resolve_index(idx as u16);
+        }
+        
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&((cp.constants.len() + 1) as u16).to_be_bytes());
+        
+        // Serialize constants in their original order
+        for constant in &cp.constants {
+            let constant_bytes = constant.to_bytes();
+            bytes.extend_from_slice(&constant_bytes);
+        }
+        
+        bytes
+    }
+    
+    fn build_index_mapping(&self) -> HashMap<u16, u16> {
+        // Extract the mapping logic from to_bytes to avoid duplication
+        let mut cp = self.clone();
+        let mut initial_len = cp.constants.len();
+        
+        for idx in 0..initial_len {
+            if let Some(p) = cp.pending.get(idx).cloned().unwrap_or(None) {
+                eprintln!("🔍 DEBUG: build_index_mapping - Processing pending at idx {}: {:?}", idx, p);
+                match p {
+                    Pending::MethodRef { class, name, descriptor } => {
+                        let _ = cp.try_add_class(&class);
+                        let _ = cp.try_add_name_and_type(&name, &descriptor);
+                    }
+                    Pending::FieldRef { class, name, descriptor } => {
+                        let _ = cp.try_add_class(&class);
+                        let _ = cp.try_add_name_and_type(&name, &descriptor);
+                    }
+                    Pending::String(val) => { let _ = cp.try_add_utf8(&val); }
+                    Pending::Class(_) | Pending::NameAndType { .. } => {}
+                }
+            }
+        }
+        initial_len = cp.constants.len();
+        
+        // Build A list: top-level refs by first-touch order (same as to_bytes)
+        let mut a_top: Vec<u16> = Vec::new();
+        for (idx, _) in cp.constants.iter().enumerate() {
+            let i = (idx + 1) as u16;
+            if let Some(p) = cp.pending.get(idx).cloned().unwrap_or(None) {
+                match p {
+                    Pending::MethodRef { .. } | Pending::FieldRef { .. } | Pending::String(_) => {
+                        a_top.push(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        // Build B list: NameAndType entries for A in A's order (same as to_bytes)
+        let mut b_nt: Vec<u16> = Vec::new();
+        let mut seen_nt: HashSet<u16> = HashSet::new();
+        for x in &a_top {
+            let pos = (*x - 1) as usize;
+            let nt_old = match cp.pending.get(pos).cloned().unwrap_or(None) {
+                Some(Pending::MethodRef { name, descriptor, .. }) => {
+                    cp.name_and_type_key_map.get(&(name, descriptor)).cloned()
+                }
+                Some(Pending::FieldRef { name, descriptor, .. }) => {
+                    cp.name_and_type_key_map.get(&(name, descriptor)).cloned()
+                }
+                _ => None,
+            };
+            if let Some(nt) = nt_old { if nt != 0 && seen_nt.insert(nt) { b_nt.push(nt); } }
+        }
+        
+        // Build C list: remaining constants in first-touch order excluding A and B (same as to_bytes)
+        let in_a: HashSet<u16> = a_top.iter().cloned().collect();
+        let in_b: HashSet<u16> = b_nt.iter().cloned().collect();
+        
+        // Identify debug Utf8 names to move last (same as to_bytes)
+        let is_debug_utf8 = |s: &str| s == "Code" || s == "LineNumberTable" || s == "LocalVariableTable" || s == "SourceFile";
+        let mut c_rest: Vec<u16> = Vec::new();
+        let mut c_debug_utf8: Vec<u16> = Vec::new();
+        for i in 1..=initial_len as u16 {
+            if in_a.contains(&i) || in_b.contains(&i) { continue; }
+            let pos = (i - 1) as usize;
+            // Skip NameAndType covered elsewhere
+            let is_nt = matches!(cp.constants.get(pos), Some(Constant::NameAndType(_, _))) || matches!(cp.pending.get(pos).cloned().unwrap_or(None), Some(Pending::NameAndType { .. }));
+            if is_nt { continue; }
+            // Debug Utf8 last
+            let is_utf8_debug = match cp.constants.get(pos) {
+                Some(Constant::Utf8(ref s)) if is_debug_utf8(s) => true,
+                _ => false,
+            };
+            if is_utf8_debug { c_debug_utf8.push(i); } else { c_rest.push(i); }
+        }
+        
+        // Final order: ensure Utf8 entries for names appear before their Class entries (same as to_bytes)
+        let mut final_order: Vec<u16> = Vec::new();
+        for x in &a_top { final_order.push(*x); }
+        for x in &b_nt { final_order.push(*x); }
+        
+        // Partition c_rest: Utf8 first, then others, preserving original order (same as to_bytes)
+        let mut c_utf8_first: Vec<u16> = Vec::new();
+        let mut c_non_utf8: Vec<u16> = Vec::new();
+        for i in &c_rest {
+            let pos = (*i - 1) as usize;
+            match cp.constants.get(pos) {
+                Some(Constant::Utf8(_)) => c_utf8_first.push(*i),
+                _ => c_non_utf8.push(*i),
+            }
+        }
+        for x in &c_utf8_first { final_order.push(*x); }
+        for x in &c_non_utf8 { final_order.push(*x); }
+        for x in &c_debug_utf8 { final_order.push(*x); }
+        
+        // Create mapping from old index to new index
+        let mut new_index: HashMap<u16, u16> = HashMap::new();
+        for (new_pos, old_idx) in final_order.iter().enumerate() {
+            let new_idx = (new_pos + 1) as u16;
+            new_index.insert(*old_idx, new_idx);
+        }
+        
+        new_index
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         // Three-phase emit: A = top-level refs (MethodRef, FieldRef, String) by first-touch
         // B = their NameAndType in A order; C = remaining (Class/Utf8/others),

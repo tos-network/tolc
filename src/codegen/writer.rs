@@ -31,43 +31,65 @@ impl ClassfileWritable for ClassFile {
         buffer.write_all(&self.minor_version.to_be_bytes())?;
         buffer.write_all(&self.major_version.to_be_bytes())?;
         
-        // Write constant pool
-        self.constant_pool.write_to_classfile(buffer)?;
+        // Get index mapping before serializing constant pool
+        // Only use complex reordering for interfaces, regular classes use identity mapping
+        let is_interface = (self.access_flags & 0x0200) != 0; // ACC_INTERFACE = 0x0200
+        let index_mapping = if is_interface {
+            self.constant_pool.get_index_mapping()
+        } else {
+            // For regular classes, use identity mapping (no reordering)
+            let mut identity_map = std::collections::HashMap::new();
+            for i in 1..=self.constant_pool.constants.len() {
+                identity_map.insert(i as u16, i as u16);
+            }
+            identity_map
+        };
+        // Write constant pool using appropriate method
+        let cp_bytes = if is_interface {
+            self.constant_pool.to_bytes() // Complex reordering for interfaces
+        } else {
+            self.constant_pool.to_bytes_simple() // Simple serialization for regular classes
+        };
+        buffer.write_all(&cp_bytes)?;
         
         // Write access flags
         buffer.write_all(&self.access_flags.to_be_bytes())?;
         
-        // Write class indices
-        buffer.write_all(&self.this_class.to_be_bytes())?;
-        buffer.write_all(&self.super_class.to_be_bytes())?;
+        // Write class indices (apply mapping)
+        let mapped_this_class = *index_mapping.get(&self.this_class).unwrap_or(&self.this_class);
+        let mapped_super_class = *index_mapping.get(&self.super_class).unwrap_or(&self.super_class);
+        buffer.write_all(&mapped_this_class.to_be_bytes())?;
+        buffer.write_all(&mapped_super_class.to_be_bytes())?;
         
-        // Write interfaces count and data
+        // Write interfaces count and data (apply mapping)
         buffer.write_all(&(self.interfaces.len() as u16).to_be_bytes())?;
         for interface in &self.interfaces {
-            buffer.write_all(&interface.to_be_bytes())?;
+            let mapped_interface = *index_mapping.get(interface).unwrap_or(interface);
+            buffer.write_all(&mapped_interface.to_be_bytes())?;
         }
         
-        // Write fields count and data
+        // Write fields count and data (apply mapping)
         buffer.write_all(&(self.fields.len() as u16).to_be_bytes())?;
         for field in &self.fields {
-            let bytes = field.to_bytes(&self.constant_pool);
+            let bytes = field.to_bytes_with_mapping(&self.constant_pool, &index_mapping);
             buffer.write_all(&bytes)?;
         }
         
-        // Write methods count and data
+        // Write methods count and data (apply mapping)
         buffer.write_all(&(self.methods.len() as u16).to_be_bytes())?;
         for method in &self.methods {
-            let bytes = method.to_bytes(&self.constant_pool);
+            let bytes = method.to_bytes_with_mapping(&self.constant_pool, &index_mapping);
             buffer.write_all(&bytes)?;
         }
         
-        // Write attributes count and data
+        // Write attributes count and data (apply mapping)
         buffer.write_all(&(self.attributes.len() as u16).to_be_bytes())?;
         for attribute in &self.attributes {
-            // name_index
-            buffer.write_all(&attribute.name.as_u16().to_be_bytes())?;
-            // payload
-            let payload = attribute.info.to_bytes(&self.constant_pool);
+            // Apply mapping to name_index
+            let mapped_name_index = *index_mapping.get(&attribute.name.as_u16()).unwrap_or(&attribute.name.as_u16());
+            buffer.write_all(&mapped_name_index.to_be_bytes())?;
+            // payload with mapping
+            let payload = attribute.info.to_bytes_with_mapping(&self.constant_pool, &index_mapping);
             buffer.write_all(&(payload.len() as u32).to_be_bytes())?;
             buffer.write_all(&payload)?;
         }

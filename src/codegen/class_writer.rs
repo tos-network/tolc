@@ -164,8 +164,10 @@ impl ClassWriter {
         let internal_name = if let Some(pkg) = &self.package_name {
             if pkg.is_empty() { interface.name.clone() } else { format!("{}/{}", pkg.replace('.', "/"), interface.name) }
         } else { interface.name.clone() };
-        let this_class_index = self.class_file.constant_pool.try_add_class(&internal_name)
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let this_class_index = {
+            let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            cp.try_add_class(&internal_name)
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         self.class_file.this_class = this_class_index;
         
         // Set current_class_name for method generation
@@ -179,14 +181,18 @@ impl ClassWriter {
         self.class_file.access_flags = access_flags;
         
         // Set superclass to java.lang.Object (interfaces implicitly extend Object)
-        let super_class_index = self.class_file.constant_pool.try_add_class("java/lang/Object")
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let super_class_index = {
+            let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            cp.try_add_class("java/lang/Object")
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         self.class_file.super_class = super_class_index;
         
         // Add extended interfaces
         for extended_interface in &interface.extends {
-            let interface_index = self.class_file.constant_pool.try_add_class(&extended_interface.name)
-                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let interface_index = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                cp.try_add_class(&extended_interface.name)
+            }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             self.class_file.interfaces.push(interface_index);
         }
         
@@ -212,13 +218,17 @@ impl ClassWriter {
             use crate::codegen::signature::{interface_to_signature, TypeNameResolver};
             let type_resolver = TypeNameResolver::with_default_mappings();
             let signature_string = interface_to_signature(interface, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
-            let signature_index = self.class_file.constant_pool.try_add_utf8(&signature_string)
-                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_index = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                cp.try_add_utf8(&signature_string)
+            }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             let signature_attr = crate::codegen::attribute::SignatureAttribute { 
                 signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index) 
             };
-            let name_index = self.class_file.constant_pool.try_add_utf8("Signature")
-                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let name_index = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                cp.try_add_utf8("Signature")
+            }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             let named_attr = crate::codegen::attribute::NamedAttribute::new(
                 crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
                 AttributeInfo::Signature(signature_attr)
@@ -228,13 +238,17 @@ impl ClassWriter {
 
         // Add SourceFile attribute
         let source_file_name = format!("{}.java", interface.name);
-        let source_file_index = self.class_file.constant_pool.try_add_utf8(&source_file_name)
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let source_file_index = {
+            let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            cp.try_add_utf8(&source_file_name)
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         let source_file_attr = crate::codegen::attribute::SourceFileAttribute { 
             filename: crate::codegen::typed_index::ConstPoolIndex::from(source_file_index) 
         };
-        let name_index = self.class_file.constant_pool.try_add_utf8("SourceFile")
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let name_index = {
+            let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            cp.try_add_utf8("SourceFile")
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         let named_attr = crate::codegen::attribute::NamedAttribute::new(
             crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
             AttributeInfo::SourceFile(source_file_attr)
@@ -243,7 +257,11 @@ impl ClassWriter {
         
         // Finalize: write back shared pool
         if let Some(cp) = &self.cp_shared { 
-            self.class_file.constant_pool = cp.borrow().clone(); 
+            let shared_cp = cp.borrow();
+            eprintln!("🔍 DEBUG: generate_interface - Finalizing: shared_cp has {} constants", shared_cp.constants.len());
+            eprintln!("🔍 DEBUG: generate_interface - Before copy: class_file.constant_pool has {} constants", self.class_file.constant_pool.constants.len());
+            self.class_file.constant_pool = shared_cp.clone(); 
+            eprintln!("🔍 DEBUG: generate_interface - After copy: class_file.constant_pool has {} constants", self.class_file.constant_pool.constants.len());
         }
         self.cp_shared = None;
         
@@ -1169,10 +1187,14 @@ impl ClassWriter {
     
     /// Generate bytecode for an interface method (implicitly public and abstract)
     fn generate_interface_method(&mut self, method: &MethodDecl) -> Result<()> {
-        let name_index = self.class_file.constant_pool.try_add_utf8(&method.name)
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
-        let descriptor_index = self.class_file.constant_pool.try_add_utf8(&self.generate_method_descriptor(method))
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let name_index = {
+            let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            cp.try_add_utf8(&method.name)
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+        let descriptor_index = {
+            let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+            cp.try_add_utf8(&self.generate_method_descriptor(method))
+        }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
         
         // Interface methods are implicitly public and abstract
         let access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_ABSTRACT;
@@ -1191,13 +1213,17 @@ impl ClassWriter {
             use crate::codegen::signature::{method_to_signature, TypeNameResolver};
             let type_resolver = TypeNameResolver::with_default_mappings();
             let signature_string = method_to_signature(method, self.package_name.as_deref(), self.current_class_name.as_deref(), &type_resolver);
-            let signature_index = self.class_file.constant_pool.try_add_utf8(&signature_string)
-                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let signature_index = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                cp.try_add_utf8(&signature_string)
+            }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             let signature_attr = crate::codegen::attribute::SignatureAttribute { 
                 signature: crate::codegen::typed_index::ConstPoolIndex::from(signature_index) 
             };
-            let name_index = self.class_file.constant_pool.try_add_utf8("Signature")
-                .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+            let name_index = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                cp.try_add_utf8("Signature")
+            }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
             let named_attr = crate::codegen::attribute::NamedAttribute::new(
                 crate::codegen::typed_index::ConstPoolIndex::from(name_index), 
                 AttributeInfo::Signature(signature_attr)
@@ -1227,15 +1253,20 @@ impl ClassWriter {
                     }
                 };
                 
-                let exception_index = self.class_file.constant_pool.try_add_class(&internal_name)
-                    .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
+                let exception_index = {
+                    let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                    cp.try_add_class(&internal_name)
+                }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
                 exception_indexes.push(exception_index.into());
             }
             
-            let exceptions_attr = crate::codegen::attribute::NamedAttribute::new_exceptions_attribute(
-                &mut self.class_file.constant_pool, 
-                exception_indexes
-            ).map_err(|e| crate::error::Error::CodeGen { message: format!("const pool:Exception: {}", e) })?;
+            let exceptions_attr = {
+                let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut();
+                crate::codegen::attribute::NamedAttribute::new_exceptions_attribute(
+                    &mut cp, 
+                    exception_indexes
+                )
+            }.map_err(|e| crate::error::Error::CodeGen { message: format!("const pool:Exception: {}", e) })?;
             method_info.attributes.push(exceptions_attr);
         }
         

@@ -197,6 +197,20 @@ impl NamedAttribute {
         
         bytes
     }
+    
+    pub fn to_bytes_with_mapping(&self, const_pool: &ConstantPool, index_mapping: &std::collections::HashMap<u16, u16>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        
+        // Apply index mapping to name index
+        let mapped_name_index = *index_mapping.get(&self.name.as_u16()).unwrap_or(&self.name.as_u16());
+        bytes.extend_from_slice(&mapped_name_index.to_be_bytes());
+        
+        let info_bytes = self.info.to_bytes_with_mapping(const_pool, index_mapping);
+        bytes.extend_from_slice(&(info_bytes.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&info_bytes);
+        
+        bytes
+    }
 }
 
 /// Trait for converting objects into NamedAttribute
@@ -802,6 +816,30 @@ impl AttributeInfo {
             Self::Custom(v) => v.write_to_classfile(&mut buffer),
         }
         buffer
+    }
+    
+    pub fn to_bytes_with_mapping(&self, const_pool: &ConstantPool, index_mapping: &std::collections::HashMap<u16, u16>) -> Vec<u8> {
+        // For now, we'll implement mapping for the most common attributes
+        // and fall back to the original method for others
+        match self {
+            Self::Signature(v) => {
+                let mut buffer = Vec::new();
+                // Apply mapping to signature index
+                let mapped_signature_index = *index_mapping.get(&v.signature.as_u16()).unwrap_or(&v.signature.as_u16());
+                buffer.extend_from_slice(&mapped_signature_index.to_be_bytes());
+                buffer
+            }
+            Self::SourceFile(v) => {
+                let mut buffer = Vec::new();
+                // Apply mapping to filename index
+                let mapped_filename_index = *index_mapping.get(&v.filename.as_u16()).unwrap_or(&v.filename.as_u16());
+                buffer.extend_from_slice(&mapped_filename_index.to_be_bytes());
+                buffer
+            }
+            // For other attributes, fall back to original method
+            // TODO: Add mapping support for other attribute types as needed
+            _ => self.to_bytes(const_pool)
+        }
     }
 
     // Back-compat constructor used by class_writer helpers
