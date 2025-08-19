@@ -1359,6 +1359,12 @@ impl ClassWriter {
                 };
                 // Evaluate compile-time constant expression if possible
                 let folded = Self::eval_compile_time_constant(init).or_else(|| match init { Expr::Literal(l) => Some(l.value.clone()), _ => None });
+                
+                // Debug: Check MASK field specifically
+                // if field.name == "MASK" {
+                //     eprintln!("🔍 DEBUG: MASK field init expression: {:?}", init);
+                //     eprintln!("🔍 DEBUG: MASK field folded result: {:?}", folded);
+                // }
 
                 if let Some(val) = folded {
                     match &val {
@@ -1386,6 +1392,15 @@ impl ClassWriter {
                             add_const_attr(self, "Boolean", idx, &mut field_info)?;
                         }
 
+                        // TODO: Long and Double ConstantValue support causes class file corruption
+                        // Literal::Long(l) => {
+                        //     let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_long(*l) };
+                        //     add_const_attr(self, "Long", idx, &mut field_info)?;
+                        // }
+                        // Literal::Double(d) => {
+                        //     let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_double(*d) };
+                        //     add_const_attr(self, "Double", idx, &mut field_info)?;
+                        // }
                         Literal::String(s) => {
                             let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_string(s) };
                             add_const_attr(self, "String", idx, &mut field_info)?;

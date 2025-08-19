@@ -2507,18 +2507,40 @@ impl Parser {
         if self.check(&Token::HexInteger) || self.check(&Token::BinaryInteger) || self.check(&Token::OctalInteger) || self.check(&Token::DecimalInteger) {
             let token = self.advance();
             let raw = token.lexeme().replace('_', "");
+            
+            // Check if this is a long literal (ends with L or l)
+            let is_long = raw.ends_with('L') || raw.ends_with('l');
+            
             let v = if raw.starts_with("0x") || raw.starts_with("0X") {
-                i64::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0)
+                let hex_part = raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches("0x").trim_start_matches("0X");
+                
+                // Handle special case for 0xFFFFFFFFFFFFFFFFL which should be -1L in Java
+                if hex_part.to_uppercase() == "FFFFFFFFFFFFFFFF" {
+                    -1i64
+                } else {
+                    // Try parsing as unsigned first, then convert to signed
+                    match u64::from_str_radix(hex_part, 16) {
+                        Ok(unsigned_val) => unsigned_val as i64,
+                        Err(_) => 0
+                    }
+                }
             } else if raw.starts_with("0b") || raw.starts_with("0B") {
-                i64::from_str_radix(raw.trim_start_matches("0b").trim_start_matches("0B"), 2).unwrap_or(0)
+                i64::from_str_radix(raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches("0b").trim_start_matches("0B"), 2).unwrap_or(0)
             } else if raw.starts_with('0') && raw.len() > 1 {
-                i64::from_str_radix(raw.trim_start_matches('0'), 8).unwrap_or(0)
+                i64::from_str_radix(raw.trim_end_matches(|c| c=='l'||c=='L').trim_start_matches('0'), 8).unwrap_or(0)
             } else {
-                raw.parse::<i64>().unwrap_or(0)
+                raw.trim_end_matches(|c| c=='l'||c=='L').parse::<i64>().unwrap_or(0)
             };
+            
             let location = token.location();
             let span = Span::new(location.clone(), location);
-            return Ok(Expr::Literal(LiteralExpr { value: Literal::Integer(v), span }));
+            
+            // Return Long literal if it has L suffix, otherwise Integer
+            if is_long {
+                return Ok(Expr::Literal(LiteralExpr { value: Literal::Long(v), span }));
+            } else {
+                return Ok(Expr::Literal(LiteralExpr { value: Literal::Integer(v), span }));
+            }
         }
         if self.check(&Token::TypedFloat) || self.check(&Token::FloatLiteral) || self.check(&Token::ScientificFloat) {
             let token = self.advance();

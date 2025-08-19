@@ -9943,13 +9943,25 @@ impl MethodWriter {
         self.bytecode_builder.locals().iter().find(|v| v.name == name)
     }
     
-    /// Allocate a new local variable
+    /// Allocate a new local variable (with variable reuse optimization)
     fn allocate_local_variable(&mut self, name: &str, var_type: &TypeRef) -> u16 {
+        // Check if we can reuse an existing variable with the same name and type
+        // This is safe when the previous variable is no longer in scope
+        if let Some(existing_var) = self.find_local_variable(name) {
+            let existing_type = self.convert_type_ref_to_local_type(var_type);
+            if existing_var.var_type == existing_type {
+                // eprintln!("🔍 DEBUG: allocate_local_variable: Reusing existing variable '{}' at index {}", name, existing_var.index);
+                return existing_var.index;
+            }
+        }
+        
         let index = self.bytecode_builder.allocate_with_type_ref(
             name.to_string(), 
             self.convert_type_ref_to_local_type(var_type),
             Some(var_type.clone())
         );
+        // eprintln!("🔍 DEBUG: allocate_local_variable: Allocated new variable '{}' at index {}", name, index);
+        
         // Track in current scope if any
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.locals.push(index as usize);
