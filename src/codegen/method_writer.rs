@@ -3689,6 +3689,7 @@ impl MethodWriter {
                 match &expr_stmt.expr {
                     Expr::Assignment(assign) => {
                         // Generate assignment without preserving value since it's used as a statement
+
                         self.generate_assignment_with_context(assign, false)?;
                     }
                     Expr::Unary(unary) => {
@@ -7779,12 +7780,38 @@ impl MethodWriter {
         // Regular assignment: generate by target kind to preserve correct operand order
         match &*assign.target {
             Expr::Identifier(ident) => {
-                if let Some(local_var) = self.find_local_variable(&ident.name) {
+                // Check if this is a field first, before checking local variables
+                let class_name = self.current_class_name.as_ref()
+                    .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
+                    .clone();
+                
+                let is_field = self.is_instance_field(&class_name, &ident.name);
+
+                
+                if is_field {
+                    // Field assignment: this.field = value
+                    // Use the correct javac pattern: aload_0, value, putfield (stack: [this, value])
+
+                    Self::map_stack(self.bytecode_builder.aload(0))?; // Load 'this'
+                    self.generate_expression(&assign.value)?; // Generate value (stack: [this, value])
+                    
+                    // If we need to preserve the value for chained assignments
+                    if preserve_value {
+                        // Stack: [this, value] -> [this, value, value] (dup the value)
+                        Self::map_stack(self.bytecode_builder.dup_x1())?; // Move duplicated value below this
+                        // Stack: [value, this, value] - now putfield will consume [this, value], leaving [value]
+                    }
+                    let field_descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
+                    let field_ref_index = self.add_field_ref(&class_name, &ident.name, &field_descriptor);
+                    Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
+                    // Value remains on stack for chained assignments
+                } else if let Some(local_var) = self.find_local_variable(&ident.name) {
                     // Extract local variable info to avoid borrow checker issues
                     let index = local_var.index;
                     let var_type = local_var.var_type.clone();
                     
                     // Local variable assignment: x = value → evaluate RHS then store to local
+
                     self.generate_expression(&assign.value)?;
                     // Duplicate the value on stack so we can store it and also return it (only if preserving value)
                     if preserve_value {
@@ -7801,24 +7828,7 @@ impl MethodWriter {
                     self.store_local_variable(index, &var_type)?;
                     // Value remains on stack for chained assignments
                 } else {
-                    // Field assignment: this.field = value
-                    // Use the correct javac pattern: aload_0, value, putfield (stack: [this, value])
-                    Self::map_stack(self.bytecode_builder.aload(0))?; // Load 'this'
-                    self.generate_expression(&assign.value)?; // Generate value (stack: [this, value])
-                    
-                    // If we need to preserve the value for chained assignments
-                    if preserve_value {
-                        // Stack: [this, value] -> [this, value, value] (dup the value)
-                        Self::map_stack(self.bytecode_builder.dup_x1())?; // Move duplicated value below this
-                        // Stack: [value, this, value] - now putfield will consume [this, value], leaving [value]
-                    }
-                    let class_name = self.current_class_name.as_ref()
-                        .ok_or_else(|| Error::codegen_error("Cannot resolve field access: no current class name available"))?
-                        .clone();
-                    let field_descriptor = self.resolve_field_descriptor(&class_name, &ident.name);
-                    let field_ref_index = self.add_field_ref(&class_name, &ident.name, &field_descriptor);
-                    Self::map_stack(self.bytecode_builder.putfield(field_ref_index))?;
-                    // Value remains on stack for chained assignments
+                    return Err(Error::codegen_error(&format!("Cannot resolve assignment target '{}': not a field or local variable", ident.name)));
                 }
             }
             Expr::FieldAccess(field_access) => {

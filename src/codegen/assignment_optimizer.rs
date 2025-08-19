@@ -90,12 +90,17 @@ impl AssignmentOptimizer {
     
     /// Analyze simple assignment for optimization
     fn analyze_simple_assignment(&self, assignment: &AssignmentExpr) -> AssignmentOptimization {
-        // Check for constant assignment
+        // Check for constant assignment, but only for local variables
         if let Some(constant_value) = self.extract_constant_int(&assignment.value) {
-            return AssignmentOptimization::ConstantAssignment {
-                value: constant_value,
-                use_optimized_load: self.can_use_optimized_constant_load(constant_value),
-            };
+            // Only apply constant assignment optimization to known local variables
+            if let Expr::Identifier(ident) = &*assignment.target {
+                if self.local_vars.contains_key(&ident.name) {
+                    return AssignmentOptimization::ConstantAssignment {
+                        value: constant_value,
+                        use_optimized_load: self.can_use_optimized_constant_load(constant_value),
+                    };
+                }
+            }
         }
         
         // Check for assignment chain optimization
