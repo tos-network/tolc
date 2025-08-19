@@ -25,7 +25,7 @@ use crate::codegen::loop_optimizer::LoopOptimizer;
 use crate::codegen::advanced_optimizer::AdvancedCodeGenerator;
 use crate::codegen::finalizer_optimizer::ExceptionHandlingOptimizer;
 use crate::codegen::instruction_optimizer::InstructionOptimizer;
-use crate::codegen::type_erasure::{TypeErasureProcessor, ErasureResult};
+use crate::codegen::type_erasure::TypeErasureProcessor;
 use crate::error::{Result, Error};
 
 // Include the generated runtime metadata
@@ -1459,8 +1459,6 @@ impl MethodWriter {
             type_erasure: TypeErasureProcessor::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
-
-
         }
     }
     
@@ -1500,8 +1498,6 @@ impl MethodWriter {
             type_erasure: TypeErasureProcessor::new(),
             stack_map_optimizer: StackMapOptimizer::new(),
             stack_map_emitter: None, // Will be initialized when needed
-
-
         }
     }
     
@@ -2225,29 +2221,53 @@ impl MethodWriter {
     /// Check if a type name is a generic type parameter
     /// Generic type parameters are typically:
     /// - Single uppercase letters (K, V, T, E, etc.)
-    /// - Short names starting with uppercase (Key, Value, Element, etc.)
-    /// - Not found in the classpath (not a real class)
+    /// - Explicitly defined in the current class or method type parameters
+    /// - Not a real class name (either known or currently being compiled)
     fn is_generic_type_parameter(&self, type_name: &str) -> bool {
         // First check: if it's a known class in classpath, it's not a generic parameter
         if classpath::resolve_class_name(type_name).is_some() {
             return false;
         }
         
-        // Second check: common patterns for generic type parameters
+        // Second check: if it's the current class being compiled, it's not a generic parameter
+        if let Some(current_class_name) = &self.current_class_name {
+            let current_simple_name = current_class_name.split('/').last().unwrap_or(current_class_name);
+            if type_name == current_simple_name {
+                eprintln!("🔍 DEBUG: is_generic_type_parameter: '{}' is the current class, not a generic parameter", type_name);
+                return false;
+            }
+        }
+        
+        // Third check: if it's explicitly defined as a type parameter in current class
+        if let Some(current_class) = &self.current_class {
+            for type_param in &current_class.type_params {
+                if type_param.name == type_name {
+                    eprintln!("🔍 DEBUG: is_generic_type_parameter: '{}' found in class type parameters", type_name);
+                    return true;
+                }
+            }
+        }
+        
+        // Fourth check: common patterns for generic type parameters (but be more conservative)
         match type_name.len() {
             1 => {
                 // Single letter, typically uppercase (K, V, T, E, etc.)
-                type_name.chars().next().unwrap().is_uppercase()
+                let is_single_upper = type_name.chars().next().unwrap().is_uppercase();
+                eprintln!("🔍 DEBUG: is_generic_type_parameter: Single letter '{}' -> {}", type_name, is_single_upper);
+                is_single_upper
             }
-            2..=10 => {
-                // Short names starting with uppercase, not found in classpath
-                // This covers cases like "Key", "Value", "Element", etc.
-                type_name.chars().next().unwrap().is_uppercase() && 
-                !type_name.contains('.') && // Not a qualified class name
-                !type_name.contains('/') && // Not an internal class name
-                !type_name.ends_with("[]")  // Not an array type
+            2..=3 => {
+                // Very short names that are commonly used as type parameters (like "Key", "Val")
+                // But be more restrictive - only if they match common patterns
+                let common_type_params = ["Key", "Val", "Num", "Obj", "Ref", "Src", "Dst", "Ret"];
+                let is_common = common_type_params.contains(&type_name);
+                eprintln!("🔍 DEBUG: is_generic_type_parameter: Short name '{}' -> {}", type_name, is_common);
+                is_common
             }
-            _ => false // Long names are likely class names
+            _ => {
+                eprintln!("🔍 DEBUG: is_generic_type_parameter: Long name '{}' -> false", type_name);
+                false // Longer names are likely class names
+            }
         }
     }
     
@@ -2279,15 +2299,10 @@ impl MethodWriter {
                     // This handles both generic type parameters and parameterized types
                     if self.is_generic_type_parameter(&type_ref.name) || !type_ref.type_args.is_empty() {
                         // This is a generic type that needs erasure
-                        // Note: We can't call erase_generic_type here because it requires &mut self
-                        // In a full implementation, we would refactor to allow mutable access
-                        if let Some(bound_type) = self.get_generic_type_bound(&type_ref.name) {
-                            eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type parameter '{}' to bound '{}'", type_ref.name, bound_type);
-                            LocalType::Reference(bound_type)
-                        } else {
-                            eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Converting generic type '{}' to Object (erasure)", type_ref.name);
-                            LocalType::Reference("java.lang.Object".to_string())
-                        }
+                        // Use the integrated TypeErasureProcessor for proper erasure
+                        let erased_type = self.perform_type_erasure_for_local_type(type_ref);
+                        eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: Erased '{}' to '{}'", type_ref.name, erased_type);
+                        LocalType::Reference(erased_type)
                     } else {
                         LocalType::Reference(type_ref.name.clone())
                     }
@@ -2296,6 +2311,71 @@ impl MethodWriter {
         };
         eprintln!("🔍 DEBUG: convert_type_ref_to_local_type: result={:?}", result);
         result
+    }
+
+    /// Perform type erasure for local type conversion (immutable version)
+    /// This is a helper method that doesn't require mutable access
+    fn perform_type_erasure_for_local_type(&self, type_ref: &TypeRef) -> String {
+        // For local type conversion, we can use a simplified erasure approach
+        // that doesn't require mutable access to the TypeErasureProcessor
+        
+        // Handle parameterized types (e.g., List<String> -> List)
+        if !type_ref.type_args.is_empty() {
+            eprintln!("🔍 DEBUG: perform_type_erasure_for_local_type: Parameterized type '{}' -> raw type", type_ref.name);
+            return type_ref.name.clone(); // Return raw type
+        }
+        
+        // Handle type variables (e.g., T, E, K, V)
+        if self.is_generic_type_parameter(&type_ref.name) {
+            if let Some(bound_type) = self.get_generic_type_bound(&type_ref.name) {
+                eprintln!("🔍 DEBUG: perform_type_erasure_for_local_type: Type variable '{}' -> bound '{}'", type_ref.name, bound_type);
+                return bound_type;
+            } else {
+                eprintln!("🔍 DEBUG: perform_type_erasure_for_local_type: Type variable '{}' -> Object", type_ref.name);
+                return "java.lang.Object".to_string();
+            }
+        }
+        
+        // For non-generic types, return as-is
+        type_ref.name.clone()
+    }
+
+    /// Perform type erasure for field access (string-based version)
+    /// This handles type erasure for receiver types in field access expressions
+    fn perform_type_erasure_for_field_access(&self, type_name: &str) -> String {
+        // Handle parameterized types (e.g., "List<String>" -> "List")
+        if let Some(generic_start) = type_name.find('<') {
+            let raw_type = type_name[..generic_start].to_string();
+            eprintln!("🔍 DEBUG: perform_type_erasure_for_field_access: Parameterized type '{}' -> raw type '{}'", type_name, raw_type);
+            return raw_type;
+        }
+        
+        // Handle type variables (e.g., "T", "E", "K", "V")
+        if self.is_generic_type_parameter(type_name) {
+            // Try to find bound for this type parameter
+            if let Some(bound_type) = self.get_generic_type_bound(type_name) {
+                eprintln!("🔍 DEBUG: perform_type_erasure_for_field_access: Type variable '{}' -> bound '{}'", type_name, bound_type);
+                return bound_type;
+            } else {
+                eprintln!("🔍 DEBUG: perform_type_erasure_for_field_access: Type variable '{}' -> Object", type_name);
+                return "java.lang.Object".to_string();
+            }
+        }
+        
+        // For non-generic types, return as-is
+        type_name.to_string()
+    }
+
+    /// Use the full TypeErasureProcessor for complete type erasure
+    /// This method provides mutable access to use the complete erasure functionality
+    pub fn perform_full_type_erasure(&mut self, type_ref: &TypeRef) -> Result<String> {
+        let env = crate::review::generics::TypeEnv::default();
+        let erasure_result = self.type_erasure.erase_type(type_ref, &env)?;
+        
+        eprintln!("🔍 DEBUG: perform_full_type_erasure: '{}' -> '{}' (was_generic: {})", 
+                 type_ref.name, erasure_result.erased_type, erasure_result.was_generic);
+        
+        Ok(erasure_result.erased_type)
     }
     
     /// Generate bytecode for a block
@@ -5059,9 +5139,12 @@ impl MethodWriter {
             // Resolve the type of the target expression
             let target_type = self.resolve_expression_type(target);
             eprintln!("🔍 DEBUG: generate_method_call: target_type = '{}'", target_type);
-            // Strip generic parameters for method resolution
-            let base_type = if let Some(generic_start) = target_type.find('<') {
-                target_type[..generic_start].to_string()
+            // Use type erasure for proper generic type handling in method calls
+            let base_type = if target_type.contains('<') || self.is_generic_type_parameter(&target_type) {
+                // This is a generic type that needs proper erasure
+                let erased_type = self.perform_type_erasure_for_field_access(&target_type);
+                eprintln!("🔍 DEBUG: generate_method_call: Erased generic type '{}' to '{}'", target_type, erased_type);
+                erased_type
             } else {
                 target_type
             };
@@ -6858,11 +6941,12 @@ impl MethodWriter {
         } else if let Some(receiver) = &field_access.target {
             let receiver_type = self.resolve_expression_type(receiver);
 
-            // Strip generic parameters for field resolution
-            let base_type = if let Some(generic_start) = receiver_type.find('<') {
-                let stripped = receiver_type[..generic_start].to_string();
-                eprintln!("🔍 DEBUG: generate_field_access: Stripped generic from '{}' to '{}'", receiver_type, stripped);
-                stripped
+            // Use type erasure for proper generic type handling
+            let base_type = if receiver_type.contains('<') || self.is_generic_type_parameter(&receiver_type) {
+                // This is a generic type that needs proper erasure
+                let erased_type = self.perform_type_erasure_for_field_access(&receiver_type);
+                eprintln!("🔍 DEBUG: generate_field_access: Erased generic type '{}' to '{}'", receiver_type, erased_type);
+                erased_type
             } else {
                 eprintln!("🔍 DEBUG: generate_field_access: No generic parameters in '{}'", receiver_type);
                 receiver_type
