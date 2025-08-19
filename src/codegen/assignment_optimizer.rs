@@ -2,9 +2,9 @@ use crate::ast::*;
 use crate::codegen::opcodes;
 use crate::error::Result;
 
-/// javac-style assignment optimization
+/// Enhanced assignment optimization
 /// 
-/// This module implements javac's sophisticated assignment optimizations including:
+/// This module implements sophisticated assignment optimizations including:
 /// - iinc instruction optimization for local variable increments
 /// - dup_x1 optimization for compound assignments
 /// - Constant assignment folding

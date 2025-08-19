@@ -1867,6 +1867,33 @@ impl BytecodeBuilder {
         Ok(())
     }
 
+    /// Emit stack map frame (enhanced emitStackMapFrame implementation)
+    pub fn emit_stack_map_frame(&mut self, pc: u16, locals_size: u16) -> Result<(), StackError> {
+        // This is a placeholder for enhanced stack map frame emission
+        // The actual implementation would need access to the current frame state,
+        // local variable information, and stack state
+        
+        // For now, we'll emit a basic frame marker
+        // In a full implementation, this would:
+        // 1. Check if this is the first frame (emit initial frame)
+        // 2. Compare with previous frame to determine optimal frame type
+        // 3. Emit compressed frame based on enhanced compression logic
+        // 4. Update frame tracking state
+        
+        Ok(())
+    }
+
+    /// Check if stack map frame emission is needed at current PC
+    pub fn needs_stack_map_frame(&self, pc: u16) -> bool {
+        // Enhanced emitter emits stack map frames at:
+        // 1. Jump targets
+        // 2. Exception handler entry points
+        // 3. After certain instructions that change stack state significantly
+        
+        // For now, return false - this would be enhanced based on control flow analysis
+        false
+    }
+
 
 }
 

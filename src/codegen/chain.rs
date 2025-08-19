@@ -1,4 +1,4 @@
-/// Chain-based jump resolution system (javac-style)
+/// Chain-based jump resolution system (enhanced)
 /// This is more efficient than simple label resolution for complex control flow
 
 #[derive(Debug, Clone)]

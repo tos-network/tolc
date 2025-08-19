@@ -2,7 +2,7 @@ use crate::codegen::chain::{Chain, StackState};
 use crate::codegen::opcodes;
 use crate::ast::{Expr, BinaryOp};
 
-/// javac-style CondItem for advanced conditional expression optimization
+/// Enhanced CondItem for advanced conditional expression optimization
 /// 
 /// This represents a conditional expression that can be efficiently compiled
 /// to bytecode using short-circuit evaluation and jump chains.

@@ -3,9 +3,9 @@ use crate::codegen::opcodes;
 use crate::codegen::chain::{Chain, StackState};
 use crate::error::Result;
 
-/// javac-style Item system for representing addressable entities in bytecode
+/// Enhanced Item system for representing addressable entities in bytecode
 /// 
-/// This module implements javac's sophisticated Item abstraction that represents
+/// This module implements sophisticated Item abstraction that represents
 /// different kinds of values and their efficient bytecode generation patterns:
 /// - LocalItem: local variables with iinc optimization
 /// - StackItem: values on the operand stack

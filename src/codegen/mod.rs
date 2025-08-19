@@ -32,6 +32,7 @@ pub mod instruction_optimizer;
 pub mod instruction_widening;
 pub mod item_system;
 pub mod item_manager;
+pub mod enhanced_stack_map_emitter;
 pub mod loop_optimizer;
 pub mod method;
 pub mod method_invocation_optimizer;

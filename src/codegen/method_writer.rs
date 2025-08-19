@@ -8,7 +8,7 @@ use super::classpath;
 use super::opcode_generator::OpcodeGenerator;    
 use crate::ast::*;
 use crate::codegen::attribute::ExceptionTableEntry;
-// use crate::codegen::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
+use crate::codegen::stack_map_optimizer::StackMapOptimizer;
 // use crate::codegen::frame::VerificationType;
 use crate::codegen::constant_optimizer::ConstantOptimizer;
 use crate::codegen::method_invocation_optimizer::MethodInvocationOptimizer;
@@ -745,8 +745,8 @@ pub struct MethodWriter {
     all_types: Option<Vec<crate::ast::TypeDecl>>,
     /// Next label ID for generating unique string labels
     next_label_id: u16,
-    // Stack map optimizer for efficient frame generation (temporarily disabled for debugging)
-    // stack_map_optimizer: StackMapOptimizer,
+    /// Stack map optimizer for efficient frame generation
+    stack_map_optimizer: StackMapOptimizer,
     /// Method invocation optimizer for javac-style optimizations
     method_invocation_optimizer: MethodInvocationOptimizer,
     /// Field access optimizer for javac-style optimizations
@@ -783,6 +783,8 @@ pub struct MethodWriter {
     string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer,
     /// javac-style item system for representing addressable entities
     item_factory: crate::codegen::item_system::ItemFactory,
+    /// Enhanced Stack Map Frame Emitter for advanced frame generation
+    stack_map_emitter: Option<crate::codegen::enhanced_stack_map_emitter::EnhancedStackMapEmitter>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -1451,6 +1453,8 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            stack_map_optimizer: StackMapOptimizer::new(),
+            stack_map_emitter: None, // Will be initialized when needed
 
 
         }
@@ -1489,6 +1493,8 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            stack_map_optimizer: StackMapOptimizer::new(),
+            stack_map_emitter: None, // Will be initialized when needed
 
 
         }
@@ -1527,6 +1533,8 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            stack_map_optimizer: StackMapOptimizer::new(),
+            stack_map_emitter: None, // Will be initialized when needed
 
         }
     }
@@ -1568,6 +1576,8 @@ impl MethodWriter {
             assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
             string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
             item_factory: crate::codegen::item_system::ItemFactory,
+            stack_map_optimizer: StackMapOptimizer::new(),
+            stack_map_emitter: None, // Will be initialized when needed
 
         }
     }
@@ -1575,6 +1585,66 @@ impl MethodWriter {
     /// Get current bytecode for inspection
     fn get_current_code(&self) -> &Vec<u8> {
         self.bytecode_builder.code()
+    }
+
+    /// Initialize enhanced stack map emitter for advanced frame generation
+    pub fn init_enhanced_stack_map_emitter(&mut self, _method_name: &str, is_static: bool, is_constructor: bool, owner_type: &str, parameter_types: Vec<String>) {
+        let method_info = crate::codegen::enhanced_stack_map_emitter::MethodInfo {
+            is_static,
+            is_constructor,
+            owner_type: owner_type.to_string(),
+            parameter_types,
+            max_locals: 255, // Will be updated during code generation
+        };
+        
+        self.stack_map_emitter = Some(crate::codegen::enhanced_stack_map_emitter::EnhancedStackMapEmitter::new(method_info));
+    }
+
+    /// Emit enhanced stack map frame at current PC
+    pub fn emit_enhanced_stack_map_frame(&mut self, locals: Vec<crate::codegen::frame::VerificationType>, stack: Vec<crate::codegen::frame::VerificationType>) -> Result<()> {
+        if let Some(ref mut emitter) = self.stack_map_emitter {
+            let pc = self.bytecode_builder.code().len() as u16;
+            emitter.emit_stack_map_frame(pc, locals, stack)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("Stack map frame emission failed: {}", e) })?;
+        }
+        Ok(())
+    }
+
+    /// Emit enhanced stack map frame at jump target
+    pub fn emit_enhanced_frame_at_jump_target(&mut self, locals: Vec<crate::codegen::frame::VerificationType>, stack: Vec<crate::codegen::frame::VerificationType>) -> Result<()> {
+        if let Some(ref mut emitter) = self.stack_map_emitter {
+            let pc = self.bytecode_builder.code().len() as u16;
+            emitter.emit_frame_at_jump_target(pc, locals, stack)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("Jump target frame emission failed: {}", e) })?;
+        }
+        Ok(())
+    }
+
+    /// Emit enhanced stack map frame at exception handler
+    pub fn emit_enhanced_frame_at_exception_handler(&mut self, locals: Vec<crate::codegen::frame::VerificationType>, exception_type: crate::codegen::frame::VerificationType) -> Result<()> {
+        if let Some(ref mut emitter) = self.stack_map_emitter {
+            let pc = self.bytecode_builder.code().len() as u16;
+            emitter.emit_frame_at_exception_handler(pc, locals, exception_type)
+                .map_err(|e| crate::error::Error::CodeGen { message: format!("Exception handler frame emission failed: {}", e) })?;
+        }
+        Ok(())
+    }
+
+    /// Get generated stack map frames from enhanced emitter
+    pub fn get_enhanced_stack_map_frames(&self) -> Option<&[crate::codegen::frame::StackMapFrame]> {
+        self.stack_map_emitter.as_ref().map(|emitter| emitter.get_frames())
+    }
+
+    /// Get enhanced stack map emission statistics
+    pub fn get_enhanced_stack_map_stats(&self) -> Option<&crate::codegen::enhanced_stack_map_emitter::EmissionStats> {
+        self.stack_map_emitter.as_ref().map(|emitter| emitter.get_stats())
+    }
+    
+    /// Get current local variables for stack map frame generation
+    fn get_current_locals_for_stack_map(&self) -> Vec<crate::codegen::frame::VerificationType> {
+        // Simplified implementation - return basic frame with object reference
+        // In a full implementation, this would track actual local variable types
+        vec![crate::codegen::frame::VerificationType::Object(1)] // Placeholder
     }
     
     /// Set all types for interface method resolution
@@ -1838,6 +1908,18 @@ impl MethodWriter {
     /// Generate bytecode for a method body
     pub fn generate_method_body(&mut self, method: &MethodDecl) -> Result<()> {
         println!("🔍 DEBUG: generate_method_body: Starting for method '{}'", method.name);
+        
+        // Initialize enhanced stack map emitter for this method
+        let parameter_types: Vec<String> = method.parameters.iter()
+            .map(|p| p.type_ref.name.clone())
+            .collect();
+        self.init_enhanced_stack_map_emitter(
+            &method.name,
+            method.modifiers.contains(&Modifier::Static),
+            method.name == "<init>",
+            "current/Class", // TODO: Get actual class name
+            parameter_types,
+        );
         
         // Use javac-style complexity analysis for fatcode decision
         if let Some(body) = &method.body {
@@ -8058,6 +8140,14 @@ impl MethodWriter {
         {
             let l = self.label_str(else_label);
             self.bytecode_builder.mark_label(&l);
+            
+            // Emit stack map frame at jump target (enhanced stack map integration)
+            let pc = self.bytecode_builder.code().len() as u16;
+            let locals = self.get_current_locals_for_stack_map();
+            let stack = vec![]; // Stack should be empty at jump target
+            if let Some(ref mut emitter) = self.stack_map_emitter {
+                let _ = emitter.emit_frame_at_jump_target(pc, locals, stack);
+            }
         }
         
         // Generate else branch if present
