@@ -6090,6 +6090,123 @@ impl MethodWriter {
         }
     }
     
+    /// Generate optimized conditional jump (javac-style)
+    /// If jump_on_true is true, jump to label when condition is true
+    /// If jump_on_true is false, jump to label when condition is false
+    fn generate_conditional_jump(&mut self, condition: &Expr, jump_on_true: bool, label: &str) -> Result<()> {
+        match condition {
+            Expr::Binary(bin_expr) => {
+                match bin_expr.operator {
+                    BinaryOp::Lt => {
+                        // Check for zero comparison optimization
+                        if let Expr::Literal(lit) = bin_expr.right.as_ref() {
+                            if let crate::ast::Literal::Integer(0) = lit.value {
+                                // left < 0 - optimize to single operand instruction
+                                self.generate_expression(&bin_expr.left)?;
+                                if jump_on_true {
+                                    Self::map_stack(self.bytecode_builder.iflt(label))?;
+                                } else {
+                                    Self::map_stack(self.bytecode_builder.ifge(label))?;
+                                }
+                                return Ok(());
+                            }
+                        }
+                        // Generate: left < right
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.if_icmplt(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.if_icmpge(label))?;
+                        }
+                    }
+                    BinaryOp::Le => {
+                        // Generate: left <= right
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.if_icmple(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.if_icmpgt(label))?;
+                        }
+                    }
+                    BinaryOp::Gt => {
+                        // Generate: left > right
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.if_icmpgt(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.if_icmple(label))?;
+                        }
+                    }
+                    BinaryOp::Ge => {
+                        // Check for zero comparison optimization
+                        if let Expr::Literal(lit) = bin_expr.right.as_ref() {
+                            if let crate::ast::Literal::Integer(0) = lit.value {
+                                // left >= 0 - optimize to single operand instruction
+                                self.generate_expression(&bin_expr.left)?;
+                                if jump_on_true {
+                                    Self::map_stack(self.bytecode_builder.ifge(label))?;
+                                } else {
+                                    Self::map_stack(self.bytecode_builder.iflt(label))?;
+                                }
+                                return Ok(());
+                            }
+                        }
+                        // Generate: left >= right
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.if_icmpge(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.if_icmplt(label))?;
+                        }
+                    }
+                    BinaryOp::Eq => {
+                        // Generate: left == right
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.if_icmpeq(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.if_icmpne(label))?;
+                        }
+                    }
+                    BinaryOp::Ne => {
+                        // Generate: left != right
+                        self.generate_expression(&bin_expr.left)?;
+                        self.generate_expression(&bin_expr.right)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.if_icmpne(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.if_icmpeq(label))?;
+                        }
+                    }
+                    _ => {
+                        // Fallback: generate expression and use ifeq/ifne
+                        self.generate_expression(condition)?;
+                        if jump_on_true {
+                            Self::map_stack(self.bytecode_builder.ifne(label))?;
+                        } else {
+                            Self::map_stack(self.bytecode_builder.ifeq(label))?;
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Fallback: generate expression and use ifeq/ifne
+                self.generate_expression(condition)?;
+                if jump_on_true {
+                    Self::map_stack(self.bytecode_builder.ifne(label))?;
+                } else {
+                    Self::map_stack(self.bytecode_builder.ifeq(label))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Unified loop generation method (javac-style genLoop)
     /// This method handles all loop types: while, for, and do-while
     fn gen_loop(
@@ -6104,14 +6221,15 @@ impl MethodWriter {
         let start_pc = self.bytecode_builder.code().len() as u16;
         
         if test_first {
+            // Mark start label for loop
+            let start_label = format!("loop_start_{}", start_pc);
+            self.bytecode_builder.mark_label(&start_label);
+            
             // While or for loop: test condition first
             if let Some(cond) = condition {
-                // Generate condition check
-                self.generate_expression(cond)?;
-                
-                // Jump to end if condition is false
+                // Generate optimized condition check (direct comparison jumps)
                 let end_label = format!("loop_end_{}", start_pc);
-                Self::map_stack(self.bytecode_builder.ifeq(&end_label))?;
+                self.generate_conditional_jump(cond, false, &end_label)?;
             }
             
             // Generate loop body
@@ -6123,8 +6241,6 @@ impl MethodWriter {
             }
             
             // Jump back to start
-            let start_label = format!("loop_start_{}", start_pc);
-            self.bytecode_builder.mark_label(&start_label);
             Self::map_stack(self.bytecode_builder.goto(&start_label))?;
             
             // Mark end label
