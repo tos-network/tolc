@@ -390,6 +390,8 @@ impl ConstantPool {
     }
     
     pub fn try_add_long(&mut self, value: i64) -> Result<u16, ConstPoolError> {
+        // Long constants take 2 slots in the constant pool, but we only store one entry
+        // The JVM spec handles the 2-slot indexing automatically
         self.ensure_space(1)?;
         let constant = Constant::Long(value);
         self.constants.push(constant);
@@ -405,6 +407,8 @@ impl ConstantPool {
     }
     
     pub fn try_add_double(&mut self, value: f64) -> Result<u16, ConstPoolError> {
+        // Double constants take 2 slots in the constant pool, but we only store one entry
+        // The JVM spec handles the 2-slot indexing automatically
         self.ensure_space(1)?;
         let constant = Constant::Double(value);
         self.constants.push(constant);

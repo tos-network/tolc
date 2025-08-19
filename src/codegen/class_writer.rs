@@ -1393,6 +1393,7 @@ impl ClassWriter {
                         }
 
                         // TODO: Long and Double ConstantValue support causes class file corruption
+                        // Need to investigate constant pool 2-slot management
                         // Literal::Long(l) => {
                         //     let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_long(*l) };
                         //     add_const_attr(self, "Long", idx, &mut field_info)?;
