@@ -4157,22 +4157,49 @@ impl MethodWriter {
             }
             BinaryOp::And => { 
                 eprintln!("🔍 DEBUG: Binary expression: Executing And branch, stack_depth={}", self.bytecode_builder.stack_depth());
-                self.emit_opcode(self.opcode_generator.iand()); 
-                // iand: pops 2 ints, pushes 1 int
-                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                // Type-aware bitwise AND
+                let left_type = self.resolve_expression_type(&binary.left);
+                let right_type = self.resolve_expression_type(&binary.right);
+                if left_type == "long" || right_type == "long" {
+                    eprintln!("🔍 DEBUG: Binary And: Using land for long operands");
+                    self.emit_opcode(self.opcode_generator.land());
+                    Self::map_stack(self.bytecode_builder.update_stack(4, 2))?; // 2 longs -> 1 long
+                } else {
+                    eprintln!("🔍 DEBUG: Binary And: Using iand for int operands");
+                    self.emit_opcode(self.opcode_generator.iand());
+                    Self::map_stack(self.bytecode_builder.update_stack(2, 1))?; // 2 ints -> 1 int
+                }
                 eprintln!("🔍 DEBUG: Binary expression: And branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
             },
             BinaryOp::Or => { 
                 eprintln!("🔍 DEBUG: Binary expression: Executing Or branch, stack_depth={}", self.bytecode_builder.stack_depth());
-                self.emit_opcode(self.opcode_generator.ior()); 
-                // ior: pops 2 ints, pushes 1 int
-                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                // Type-aware bitwise OR
+                let left_type = self.resolve_expression_type(&binary.left);
+                let right_type = self.resolve_expression_type(&binary.right);
+                if left_type == "long" || right_type == "long" {
+                    eprintln!("🔍 DEBUG: Binary Or: Using lor for long operands");
+                    self.emit_opcode(self.opcode_generator.lor());
+                    Self::map_stack(self.bytecode_builder.update_stack(4, 2))?; // 2 longs -> 1 long
+                } else {
+                    eprintln!("🔍 DEBUG: Binary Or: Using ior for int operands");
+                    self.emit_opcode(self.opcode_generator.ior());
+                    Self::map_stack(self.bytecode_builder.update_stack(2, 1))?; // 2 ints -> 1 int
+                }
                 eprintln!("🔍 DEBUG: Binary expression: Or branch completed, stack_depth={}", self.bytecode_builder.stack_depth());
             },
             BinaryOp::Xor => { 
-                self.emit_opcode(self.opcode_generator.ixor()); 
-                // ixor: pops 2 ints, pushes 1 int
-                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                // Type-aware bitwise XOR
+                let left_type = self.resolve_expression_type(&binary.left);
+                let right_type = self.resolve_expression_type(&binary.right);
+                if left_type == "long" || right_type == "long" {
+                    eprintln!("🔍 DEBUG: Binary Xor: Using lxor for long operands");
+                    self.emit_opcode(self.opcode_generator.lxor());
+                    Self::map_stack(self.bytecode_builder.update_stack(4, 2))?; // 2 longs -> 1 long
+                } else {
+                    eprintln!("🔍 DEBUG: Binary Xor: Using ixor for int operands");
+                    self.emit_opcode(self.opcode_generator.ixor());
+                    Self::map_stack(self.bytecode_builder.update_stack(2, 1))?; // 2 ints -> 1 int
+                }
             },
             BinaryOp::LShift => { 
                 self.emit_opcode(self.opcode_generator.ishl()); 
@@ -4458,11 +4485,21 @@ impl MethodWriter {
             }
             UnaryOp::BitNot => {
                 self.generate_expression(&unary.operand)?;
-                Self::map_stack(self.bytecode_builder.iconst_m1())?;
-                // TODO: add ixor in builder; keep legacy for now
-                self.emit_opcode(self.opcode_generator.ixor());
-                // ixor: pops 2 ints, pushes 1 int
-                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                // Type-aware bitwise NOT
+                let operand_type = self.resolve_expression_type(&unary.operand);
+                if operand_type == "long" {
+                    eprintln!("🔍 DEBUG: BitNot: Using lconst_1 + lneg + lxor for long operand");
+                    // Generate -1L using lconst_1 + lneg
+                    Self::map_stack(self.bytecode_builder.lconst_1())?;
+                    Self::map_stack(self.bytecode_builder.lneg())?;
+                    self.emit_opcode(self.opcode_generator.lxor());
+                    Self::map_stack(self.bytecode_builder.update_stack(4, 2))?; // 2 longs -> 1 long
+                } else {
+                    eprintln!("🔍 DEBUG: BitNot: Using iconst_m1 + ixor for int operand");
+                    Self::map_stack(self.bytecode_builder.iconst_m1())?;
+                    self.emit_opcode(self.opcode_generator.ixor());
+                    Self::map_stack(self.bytecode_builder.update_stack(2, 1))?; // 2 ints -> 1 int
+                }
             }
                         UnaryOp::PreInc => {
                 // Pre-increment: ++x
@@ -4877,6 +4914,21 @@ impl MethodWriter {
                             crate::ast::Literal::Integer(i) => {
                                 let optimization = crate::codegen::constant_optimizer::ConstantOptimizer::optimize_int(*i as i32);
                                 self.emit_constant_instruction(optimization)?;
+                            }
+                            crate::ast::Literal::Long(l) => {
+                                // Special handling for long constants like MASK = -1L
+                                if *l == -1 {
+                                    // Use lconst_1 + lneg to generate -1L (avoids constant pool issues)
+                                    Self::map_stack(self.bytecode_builder.lconst_1())?;
+                                    Self::map_stack(self.bytecode_builder.lneg())?;
+                                } else if *l == 0 {
+                                    Self::map_stack(self.bytecode_builder.lconst_0())?;
+                                } else if *l == 1 {
+                                    Self::map_stack(self.bytecode_builder.lconst_1())?;
+                                } else {
+                                    // For other long values, fall back to getstatic for now
+                                    Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+                                }
                             }
                             _ => {
                                 // For other types, fall back to getstatic
@@ -7384,9 +7436,17 @@ impl MethodWriter {
         if is_static_access {
             // Static field access: getstatic pushes field value (no objectref involved)
             Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+            // Correct stack depth for long/double fields
+            if field_slots == 2 {
+                Self::map_stack(self.bytecode_builder.update_stack(0, 1))?; // Add 1 more slot for long/double
+            }
         } else {
             // Instance field access: getfield pops objectref and pushes field value
             Self::map_stack(self.bytecode_builder.getfield(field_ref_index))?;
+            // Correct stack depth for long/double fields
+            if field_slots == 2 {
+                Self::map_stack(self.bytecode_builder.update_stack(0, 1))?; // Add 1 more slot for long/double
+            }
         }
         
         Ok(())
@@ -7804,8 +7864,14 @@ impl MethodWriter {
                     self.load_local_variable(index, &var_type)?;
                     // Generate right operand
                     self.generate_expression(&assign.value)?;
-                    // Apply operation
-                    self.generate_compound_assignment(assign.operator.clone())?;
+                    // Apply operation with type awareness
+                    let operand_type = match var_type {
+                        crate::codegen::LocalType::Long => "long",
+                        crate::codegen::LocalType::Double => "double", 
+                        crate::codegen::LocalType::Float => "float",
+                        _ => "int", // int, boolean, char, short, byte, reference
+                    };
+                    self.generate_compound_assignment_typed(assign.operator.clone(), operand_type)?;
                     // Duplicate the result for chained assignments (only if preserving value)
                     if preserve_value {
                     // Use dup2 for long/double (64-bit types), dup for others
@@ -7882,8 +7948,16 @@ impl MethodWriter {
                     
                     // Generate right operand: arr, idx, current_value -> arr, idx, current_value, rhs_value
                     self.generate_expression(&assign.value)?;
+                    
+                    // Handle type conversion if needed (e.g., int to long for long arrays)
+                    let rhs_type = self.resolve_expression_type(&assign.value);
+                    if element_type == "long" && rhs_type == "int" {
+                        eprintln!("🔍 DEBUG: Compound assignment: Converting int to long for long array operation");
+                        Self::map_stack(self.bytecode_builder.i2l())?;
+                    }
+                    
                     // Apply operation: arr, idx, current_value, rhs_value -> arr, idx, result
-                    self.generate_compound_assignment(assign.operator.clone())?;
+                    self.generate_compound_assignment_typed(assign.operator.clone(), element_type)?;
                     
                     // Duplicate result for return value (only if preserve_value is true)
                     if preserve_value {

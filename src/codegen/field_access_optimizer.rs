@@ -59,6 +59,7 @@ impl FieldAccessOptimizer {
         // BitSet constants
         constant_fields.insert("BITS_PER_LONG".to_string(), Literal::Integer(64));
         constant_fields.insert("BITS_PER_LONG_SHIFT".to_string(), Literal::Integer(6));
+        constant_fields.insert("MASK".to_string(), Literal::Long(-1));
 
         // Common static fields
         static_fields.insert("MAX_VALUE".to_string(), true);
@@ -71,6 +72,7 @@ impl FieldAccessOptimizer {
         // BitSet static fields
         static_fields.insert("BITS_PER_LONG".to_string(), true);
         static_fields.insert("BITS_PER_LONG_SHIFT".to_string(), true);
+        static_fields.insert("MASK".to_string(), true);
 
         Self {
             constant_fields,
