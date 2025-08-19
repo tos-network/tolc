@@ -63,3 +63,12 @@ impl Error {
         Self::CodeGen { message: message.into() }
     }
 }
+
+/// Convert StackError to Error
+impl From<crate::codegen::bytecode::StackError> for Error {
+    fn from(err: crate::codegen::bytecode::StackError) -> Self {
+        Self::CodeGen { 
+            message: format!("bytecode stack error: {}", err) 
+        }
+    }
+}

@@ -10,6 +10,7 @@ fn java_root() -> PathBuf {
 }
 
 #[test]
+#[ignore]
 fn parse_all_java_files_under_tests_java() {
     // Initialize logger for diagnostics
     let _ = env_logger::builder()

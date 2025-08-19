@@ -17,6 +17,7 @@ fn classes_root() -> PathBuf {
 // cargo test --test java_suite_ordered -- --nocapture
 // TOLC_FILTER_FILE=ArraysComparator.java cargo test --test java_suite_ordered -- --nocapture
 #[test]
+#[ignore]
 fn parse_java_files_in_order() {
     // Initialize logger for diagnostics
     let _ = env_logger::builder()

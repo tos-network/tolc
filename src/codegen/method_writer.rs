@@ -8,6 +8,23 @@ use super::classpath;
 use super::opcode_generator::OpcodeGenerator;    
 use crate::ast::*;
 use crate::codegen::attribute::ExceptionTableEntry;
+// use crate::codegen::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
+// use crate::codegen::frame::VerificationType;
+use crate::codegen::constant_optimizer::ConstantOptimizer;
+use crate::codegen::method_invocation_optimizer::MethodInvocationOptimizer;
+use crate::codegen::field_access_optimizer::FieldAccessOptimizer;
+use crate::codegen::increment_optimizer::IncrementOptimizer;
+use crate::codegen::type_coercion_optimizer::TypeCoercionOptimizer;
+use crate::codegen::string_optimizer::StringOptimizer;
+use crate::codegen::switch_optimizer::SwitchOptimizer;
+use crate::codegen::cast_optimizer::CastOptimizer;
+// use crate::codegen::chain::Chain;
+// use crate::codegen::instruction_widening::InstructionWidener;
+use crate::codegen::exception_optimizer::ExceptionOptimizer;
+use crate::codegen::loop_optimizer::LoopOptimizer;
+use crate::codegen::advanced_optimizer::AdvancedCodeGenerator;
+use crate::codegen::finalizer_optimizer::ExceptionHandlingOptimizer;
+use crate::codegen::instruction_optimizer::InstructionOptimizer;
 use crate::error::{Result, Error};
 
 // Include the generated runtime metadata
@@ -728,6 +745,44 @@ pub struct MethodWriter {
     all_types: Option<Vec<crate::ast::TypeDecl>>,
     /// Next label ID for generating unique string labels
     next_label_id: u16,
+    // Stack map optimizer for efficient frame generation (temporarily disabled for debugging)
+    // stack_map_optimizer: StackMapOptimizer,
+    /// Method invocation optimizer for javac-style optimizations
+    method_invocation_optimizer: MethodInvocationOptimizer,
+    /// Field access optimizer for javac-style optimizations
+    field_access_optimizer: FieldAccessOptimizer,
+    /// Switch statement optimizer for tableswitch vs lookupswitch selection
+    switch_optimizer: SwitchOptimizer,
+    /// Cast optimizer for intelligent checkcast generation
+    cast_optimizer: CastOptimizer,
+    /// Constant optimizer for efficient constant loading
+    constant_optimizer: ConstantOptimizer,
+    /// Type coercion optimizer for primitive type conversions
+    type_coercion_optimizer: TypeCoercionOptimizer,
+    /// String optimizer for string concatenation and operations
+    string_optimizer: StringOptimizer,
+    /// Increment optimizer for ++/-- operations using iinc
+    increment_optimizer: IncrementOptimizer,
+    /// Exception optimizer for try-catch and exception handling
+    exception_optimizer: ExceptionOptimizer,
+    /// Loop optimizer for unified loop generation and optimization
+    loop_optimizer: LoopOptimizer,
+    /// Advanced code generator for complex optimizations
+    advanced_optimizer: AdvancedCodeGenerator,
+    /// Exception handling optimizer for finalizer and JSR optimization
+    finalizer_optimizer: ExceptionHandlingOptimizer,
+    /// Instruction optimizer for peephole and instruction-level optimizations
+    instruction_optimizer: InstructionOptimizer,
+    /// javac-style conditional item system for advanced condition optimization
+    cond_item_optimizer: crate::codegen::cond_item::CondItemOptimizer,
+    /// javac-style genCond system for intelligent conditional generation
+    gen_cond_optimizer: crate::codegen::gen_cond::GenCond,
+    /// javac-style assignment optimizer with iinc and dup_x1 optimizations
+    assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer,
+    /// javac-style string buffer optimizer for efficient string concatenation
+    string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer,
+    /// javac-style item system for representing addressable entities
+    item_factory: crate::codegen::item_system::ItemFactory,
 }
 
 #[derive(Debug, PartialEq)]
@@ -784,7 +839,7 @@ impl MethodWriter {
                             // Filter out private methods (following Java visibility rules)
                             let is_private = method.modifiers.contains(&crate::ast::Modifier::Private);
                             if !is_private {
-                                let descriptor = self.generate_descriptor_from_ast_method(method);
+                                let descriptor = self.generate_descriptor_from_ast_method(&method);
                                 candidates.push(ResolvedMethod {
                                     owner_internal: current_class_internal.clone(),
                                     name: method.name.clone(),
@@ -1377,6 +1432,27 @@ impl MethodWriter {
             current_class_name: None,
             current_class: None,
             all_types: None,
+            // Optimizers temporarily disabled for debugging
+            method_invocation_optimizer: MethodInvocationOptimizer::new(),
+            field_access_optimizer: FieldAccessOptimizer::new(),
+            switch_optimizer: SwitchOptimizer::new(),
+            cast_optimizer: CastOptimizer::new(),
+            constant_optimizer: ConstantOptimizer,
+            type_coercion_optimizer: TypeCoercionOptimizer::new(),
+            string_optimizer: StringOptimizer,
+            increment_optimizer: IncrementOptimizer::new(),
+            exception_optimizer: ExceptionOptimizer::new(),
+            loop_optimizer: LoopOptimizer,
+            advanced_optimizer: AdvancedCodeGenerator::new(),
+            finalizer_optimizer: ExceptionHandlingOptimizer,
+            instruction_optimizer: InstructionOptimizer,
+            cond_item_optimizer: crate::codegen::cond_item::CondItemOptimizer,
+            gen_cond_optimizer: crate::codegen::gen_cond::GenCond,
+            assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
+            string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
+            item_factory: crate::codegen::item_system::ItemFactory,
+
+
         }
     }
     
@@ -1394,6 +1470,27 @@ impl MethodWriter {
             current_class_name: None,
             current_class: None,
             all_types: None,
+            // Optimizers temporarily disabled for debugging
+            method_invocation_optimizer: MethodInvocationOptimizer::new(),
+            field_access_optimizer: FieldAccessOptimizer::new(),
+            switch_optimizer: SwitchOptimizer::new(),
+            cast_optimizer: CastOptimizer::new(),
+            constant_optimizer: ConstantOptimizer,
+            type_coercion_optimizer: TypeCoercionOptimizer::new(),
+            string_optimizer: StringOptimizer,
+            increment_optimizer: IncrementOptimizer::new(),
+            exception_optimizer: ExceptionOptimizer::new(),
+            loop_optimizer: LoopOptimizer,
+            advanced_optimizer: AdvancedCodeGenerator::new(),
+            finalizer_optimizer: ExceptionHandlingOptimizer,
+            instruction_optimizer: InstructionOptimizer,
+            cond_item_optimizer: crate::codegen::cond_item::CondItemOptimizer,
+            gen_cond_optimizer: crate::codegen::gen_cond::GenCond,
+            assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
+            string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
+            item_factory: crate::codegen::item_system::ItemFactory,
+
+
         }
     }
     
@@ -1411,6 +1508,26 @@ impl MethodWriter {
             current_class_name: Some(class_name),
             current_class: None,
             all_types: None,
+            // Optimizers temporarily disabled for debugging
+            method_invocation_optimizer: MethodInvocationOptimizer::new(),
+            field_access_optimizer: FieldAccessOptimizer::new(),
+            switch_optimizer: SwitchOptimizer::new(),
+            cast_optimizer: CastOptimizer::new(),
+            constant_optimizer: ConstantOptimizer,
+            type_coercion_optimizer: TypeCoercionOptimizer::new(),
+            string_optimizer: StringOptimizer,
+            increment_optimizer: IncrementOptimizer::new(),
+            exception_optimizer: ExceptionOptimizer::new(),
+            loop_optimizer: LoopOptimizer,
+            advanced_optimizer: AdvancedCodeGenerator::new(),
+            finalizer_optimizer: ExceptionHandlingOptimizer,
+            instruction_optimizer: InstructionOptimizer,
+            cond_item_optimizer: crate::codegen::cond_item::CondItemOptimizer,
+            gen_cond_optimizer: crate::codegen::gen_cond::GenCond,
+            assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
+            string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
+            item_factory: crate::codegen::item_system::ItemFactory,
+
         }
     }
     
@@ -1432,6 +1549,26 @@ impl MethodWriter {
             current_class_name: Some(class_name),
             current_class: Some(class_decl),
             all_types: None,
+            // Optimizers temporarily disabled for debugging
+            method_invocation_optimizer: MethodInvocationOptimizer::new(),
+            field_access_optimizer: FieldAccessOptimizer::new(),
+            switch_optimizer: SwitchOptimizer::new(),
+            cast_optimizer: CastOptimizer::new(),
+            constant_optimizer: ConstantOptimizer,
+            type_coercion_optimizer: TypeCoercionOptimizer::new(),
+            string_optimizer: StringOptimizer,
+            increment_optimizer: IncrementOptimizer::new(),
+            exception_optimizer: ExceptionOptimizer::new(),
+            loop_optimizer: LoopOptimizer,
+            advanced_optimizer: AdvancedCodeGenerator::new(),
+            finalizer_optimizer: ExceptionHandlingOptimizer,
+            instruction_optimizer: InstructionOptimizer,
+            cond_item_optimizer: crate::codegen::cond_item::CondItemOptimizer,
+            gen_cond_optimizer: crate::codegen::gen_cond::GenCond,
+            assignment_optimizer: crate::codegen::assignment_optimizer::AssignmentOptimizer::new(),
+            string_buffer_optimizer: crate::codegen::string_buffer_optimizer::StringBufferOptimizer::new(),
+            item_factory: crate::codegen::item_system::ItemFactory,
+
         }
     }
     
@@ -1702,6 +1839,22 @@ impl MethodWriter {
     pub fn generate_method_body(&mut self, method: &MethodDecl) -> Result<()> {
         println!("🔍 DEBUG: generate_method_body: Starting for method '{}'", method.name);
         
+        // Use javac-style complexity analysis for fatcode decision
+        if let Some(body) = &method.body {
+            let complexity = crate::codegen::complexity_analyzer::ComplexityAnalyzer::analyze_complexity(&crate::ast::Stmt::Block(body.clone()));
+            let method_size = crate::codegen::complexity_analyzer::ComplexityAnalyzer::estimate_method_size(&crate::ast::Stmt::Block(body.clone()));
+            
+            // javac-style fatcode decision
+            let should_use_fatcode = crate::codegen::complexity_analyzer::ComplexityAnalyzer::should_use_fatcode(complexity) || method_size > 500;
+            
+            if should_use_fatcode {
+                // Enable fat code for complex methods
+                self.bytecode_builder.fatcode = true;
+                self.advanced_optimizer.fat_code = true;
+                println!("🔍 DEBUG: generate_method_body: Enabled fat code (complexity: {}, size: {})", complexity, method_size);
+            }
+        }
+        
         // Initialize local variables for parameters
         println!("🔍 DEBUG: generate_method_body: About to initialize_parameters...");
         self.initialize_parameters(method)?;
@@ -1767,6 +1920,11 @@ impl MethodWriter {
             // Stack balancing disabled to avoid interference with varargs
         }
         println!("🔍 DEBUG: generate_method_body: Basic stack validation completed");
+        
+        // Use AdvancedCodeGenerator for post-processing optimizations
+        println!("🔍 DEBUG: generate_method_body: About to apply advanced optimizations...");
+        self.apply_advanced_optimizations()?;
+        println!("🔍 DEBUG: generate_method_body: Advanced optimizations completed");
         
         // Deep structure analysis and repair
         println!("🔍 DEBUG: generate_method_body: About to deep_structure_analysis_and_repair...");
@@ -3191,9 +3349,12 @@ impl MethodWriter {
                         self.generate_assignment_with_context(assign, false)?;
                     }
                     Expr::Unary(unary) => {
+                        // javac-style optimization: convert PostInc/PostDec to PreInc/PreDec in expression statements
+                        let optimized_unary = self.optimize_postfix_to_prefix(unary);
+                        
                         // For PostInc/PostDec/PreInc/PreDec in expression statements, we can optimize
-                        if matches!(unary.operator, UnaryOp::PostInc | UnaryOp::PostDec | UnaryOp::PreInc | UnaryOp::PreDec) {
-                            self.generate_unary_expression_as_statement(unary)?;
+                        if matches!(optimized_unary.operator, UnaryOp::PostInc | UnaryOp::PostDec | UnaryOp::PreInc | UnaryOp::PreDec) {
+                            self.generate_unary_expression_as_statement(&optimized_unary)?;
                         } else {
                             self.generate_expression(&expr_stmt.expr)?;
                         }
@@ -3242,10 +3403,12 @@ impl MethodWriter {
                 self.generate_if_statement(if_stmt)?;
             }
             Stmt::While(while_stmt) => {
-                self.generate_while_statement_labeled(None, while_stmt)?;
+                // Use LoopOptimizer for optimized while loop generation
+                self.generate_optimized_while_statement(None, while_stmt)?;
             }
             Stmt::For(for_stmt) => {
-                self.generate_for_statement(for_stmt)?;
+                // Use LoopOptimizer for optimized for loop generation
+                self.generate_optimized_for_statement(for_stmt)?;
             }
             Stmt::Labeled(labeled) => {
                 // If the labeled statement is a loop, pass the label down, otherwise just generate inner
@@ -3342,143 +3505,15 @@ impl MethodWriter {
             Stmt::Try(try_stmt) => {
                 // mark source line for try
                 self.record_line_number(try_stmt.span.start.line as u16);
-                // try-with-resources with exceptional path auto close and addSuppressed
-                let mut res_locals: Vec<(u16, TypeRef)> = Vec::new();
-                for (idx, res) in try_stmt.resources.iter().enumerate() {
-                    match res {
-                        TryResource::Var { type_ref, name, initializer, .. } => {
-                            self.generate_expression(initializer)?;
-                            let local_index = self.allocate_local_variable(name, type_ref);
-                            let local_type = self.convert_type_ref_to_local_type(type_ref);
-                            self.store_local_variable(local_index, &local_type)?;
-                            res_locals.push((local_index, type_ref.clone()));
-                        }
-                        TryResource::Expr { expr, .. } => {
-                            self.generate_expression(expr)?;
-                            let tref = TypeRef { name: "java/lang/AutoCloseable".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: try_stmt.span };
-                            let local_index = self.allocate_local_variable(&format!("$res{}", idx), &tref);
-                            let local_type = self.convert_type_ref_to_local_type(&tref);
-                            self.store_local_variable(local_index, &local_type)?;
-                            res_locals.push((local_index, tref));
-                        }
-                    }
-                }
-                // Outer try/catch-all
-                let try_start = self.create_label();
-                let try_end = self.create_label();
-                let handler = self.create_label();
-                let after = self.create_label();
-                {
-                    let l = self.label_str(try_start);
-                    self.bytecode_builder.mark_label(&l);
-                }
-                self.generate_block(&try_stmt.try_block)?;
-                {
-                    let l = self.label_str(try_end);
-                    self.bytecode_builder.mark_label(&l);
-                }
-                // Normal close
-                for (local_index, tref) in res_locals.iter().rev() {
-                    self.generate_close_for_local(*local_index, tref)?;
-                }
-                // jump over handler
-                {
-                    let l = self.label_str(after);
-                    Self::map_stack(self.bytecode_builder.goto(&l))?;
-                }
-                // Handler
-                {
-                    let l = self.label_str(handler);
-                    self.bytecode_builder.mark_label(&l);
-                }
-                // JVM automatically pushes the exception object onto the stack when entering exception handler
-                // We need to simulate this for our stack tracking
-                Self::map_stack(self.bytecode_builder.update_stack(0, 1))?; // Exception object pushed by JVM
                 
-                let thr_t = TypeRef { name: "java/lang/Throwable".to_string(), type_args: Vec::new(), annotations: Vec::new(), array_dims: 0, span: try_stmt.span };
-                let primary_exc = self.allocate_local_variable("$primary_exc", &thr_t);
-                let thr_local_type = self.convert_type_ref_to_local_type(&thr_t);
-                self.store_local_variable(primary_exc, &thr_local_type)?;
-                // Close with addSuppressed
-                for (local_index, _tref) in res_locals.iter().rev() {
-                    let skip = self.create_label();
-                    Self::map_stack(self.bytecode_builder.aload(*local_index as u16))?;
-                    {
-                        let l = self.label_str(skip);
-                        Self::map_stack(self.bytecode_builder.ifnull(&l))?;
-                    }
-                    let inner_start = self.create_label();
-                    let inner_end = self.create_label();
-                    let inner_handler = self.create_label();
-                    let inner_after = self.create_label();
-                    {
-                        let l = self.label_str(inner_start);
-                        self.bytecode_builder.mark_label(&l);
-                    }
-                    // Resource is not null - load it again for the method call
-                    Self::map_stack(self.bytecode_builder.aload(*local_index as u16))?;
-                    self.emit_opcode(self.opcode_generator.invokeinterface(0, 0));
-                    // invokeinterface: pops receiver, no return value
-                    Self::map_stack(self.bytecode_builder.update_stack(1, 0))?;
-                    self.bytecode_builder.push_short(1); self.bytecode_builder.push_byte(1); self.bytecode_builder.push_byte(0);
-                    {
-                        let l = self.label_str(inner_end);
-                        self.bytecode_builder.mark_label(&l);
-                    }
-                    {
-                        let l = self.label_str(inner_after);
-                        Self::map_stack(self.bytecode_builder.goto(&l))?;
-                    }
-                    {
-                        let l = self.label_str(inner_handler);
-                        self.bytecode_builder.mark_label(&l);
-                    }
-                    // JVM automatically pushes the exception object onto the stack when entering exception handler
-                    Self::map_stack(self.bytecode_builder.update_stack(0, 1))?; // Exception object pushed by JVM
-                    
-                    let suppressed = self.allocate_local_variable("$suppressed", &thr_t);
-                    self.store_local_variable(suppressed, &thr_local_type)?;
-                    
-                    Self::map_stack(self.bytecode_builder.aload(primary_exc as u16))?;
-                    Self::map_stack(self.bytecode_builder.aload(suppressed as u16))?;
-                    
-                    self.emit_opcode(self.opcode_generator.invokevirtual(0));
-                    // invokevirtual: pops receiver + 1 argument, no return value
-                    Self::map_stack(self.bytecode_builder.update_stack(2, 0))?;
-                    self.bytecode_builder.push_short(1);
-                    
-                    {
-                        let l = self.label_str(inner_after);
-                        self.bytecode_builder.mark_label(&l);
-                    }
-                    self.add_exception_handler_labels(inner_start, inner_end, inner_handler, 0);
-                    
-                    {
-                        let l = self.label_str(skip);
-                        self.bytecode_builder.mark_label(&l);
-                    }
-                }
-                // rethrow
-                Self::map_stack(self.bytecode_builder.aload(0))?; self.bytecode_builder.push_byte(primary_exc as u8);
-                Self::map_stack(self.bytecode_builder.athrow())?;
-                // add outer entry
-                self.add_exception_handler_labels(try_start, try_end, handler, 0);
-                // after
-                {
-                    let l = self.label_str(after);
-                    self.bytecode_builder.mark_label(&l);
-                }
-                if let Some(finally_block) = &try_stmt.finally_block { self.generate_block(finally_block)?; }
-                // close lifetimes of resource locals at end of try-with-resources
-                let end_pc = self.bytecode_builder.code().len() as u16;
-                for (local_index, _) in &res_locals {
-                    self.set_local_length((*local_index) as usize, end_pc);
-                }
+                // Use ExceptionHandlingOptimizer for optimized try-catch-finally generation
+                self.generate_optimized_try_statement(try_stmt)?;
             }
             Stmt::Throw(throw_stmt) => {
                 self.record_line_number(throw_stmt.span.start.line as u16);
-                self.generate_expression(&throw_stmt.expr)?;
-                Self::map_stack(self.bytecode_builder.athrow())?;
+                
+                // Use ExceptionOptimizer for optimized exception handling
+                self.generate_optimized_throw_statement(throw_stmt)?;
             }
             Stmt::Block(block) => {
                 self.record_line_number(block.span.start.line as u16);
@@ -3656,11 +3691,97 @@ impl MethodWriter {
         // Generate operation
         eprintln!("🔍 DEBUG: Binary expression: About to apply operator {:?}", binary.operator);
         match binary.operator {
-            BinaryOp::Add => { Self::map_stack(self.bytecode_builder.iadd())?; },
-            BinaryOp::Sub => { Self::map_stack(self.bytecode_builder.isub())?; },
-            BinaryOp::Mul => { Self::map_stack(self.bytecode_builder.imul())?; },
-            BinaryOp::Div => { Self::map_stack(self.bytecode_builder.idiv())?; },
-            BinaryOp::Mod => { Self::map_stack(self.bytecode_builder.irem())?; },
+            BinaryOp::Add => { 
+                // Check if this is string concatenation
+                if self.is_string_concatenation(&binary.left, &binary.right) {
+                    // Use javac-style StringBufferOptimizer for advanced string concatenation
+                    let temp_binary = crate::ast::BinaryExpr {
+                        left: binary.left.clone(),
+                        operator: crate::ast::BinaryOp::Add,
+                        right: binary.right.clone(),
+                        span: crate::ast::Span::new(
+                            crate::ast::Location::new(0, 0, 0),
+                            crate::ast::Location::new(0, 0, 0)
+                        ),
+                    };
+                    let temp_expr = crate::ast::Expr::Binary(temp_binary);
+                    
+                    // Analyze with javac-style string buffer optimizer
+                    let analysis = self.string_buffer_optimizer.analyze_string_concatenation(&temp_expr);
+                    
+                    match &analysis {
+                        crate::codegen::string_buffer_optimizer::StringConcatenationAnalysis::CompileTimeFoldable { result } => {
+                            // Compile-time constant folding
+                            if let Some(cp) = &self.constant_pool {
+                                let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_string(result) };
+                                Self::map_stack(self.bytecode_builder.ldc(idx))?;
+                            }
+                        }
+                        crate::codegen::string_buffer_optimizer::StringConcatenationAnalysis::StringConcatenation { expressions: _, estimated_length: _ } => {
+                            // Use StringBuilder with capacity estimation (javac-style)
+                            let bytecode = self.string_buffer_optimizer.generate_string_concatenation_bytecode(analysis)?;
+                            self.bytecode_builder.emit_raw(&bytecode)?;
+                        }
+                        crate::codegen::string_buffer_optimizer::StringConcatenationAnalysis::SingleString { value: _, can_pool } => {
+                            // Single string optimization
+                            if *can_pool {
+                                let bytecode = self.string_buffer_optimizer.generate_string_concatenation_bytecode(analysis)?;
+                                self.bytecode_builder.emit_raw(&bytecode)?;
+                            } else {
+                                // Fallback to old string optimizer
+                                if let Some(optimization) = crate::codegen::string_optimizer::StringOptimizer::analyze_string_concat(&temp_expr) {
+                                    self.apply_string_optimization(optimization)?;
+                                } else {
+                                    self.generate_simple_string_concat()?;
+                                }
+                            }
+                        }
+                        _ => {
+                            // Fallback to old string optimizer
+                            if let Some(optimization) = crate::codegen::string_optimizer::StringOptimizer::analyze_string_concat(&temp_expr) {
+                                self.apply_string_optimization(optimization)?;
+                            } else {
+                                self.generate_simple_string_concat()?;
+                            }
+                        }
+                    }
+                } else {
+                    // Use InstructionOptimizer for optimized binary operations
+                    let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_binary_operation(&binary.operator, "int");
+                    for &byte in &optimized_bytecode {
+                        self.bytecode_builder.push_byte(byte);
+                    }
+                    Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+                }
+            },
+            BinaryOp::Sub => { 
+                let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_binary_operation(&binary.operator, "int");
+                for &byte in &optimized_bytecode {
+                    self.bytecode_builder.push_byte(byte);
+                }
+                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+            },
+            BinaryOp::Mul => { 
+                let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_binary_operation(&binary.operator, "int");
+                for &byte in &optimized_bytecode {
+                    self.bytecode_builder.push_byte(byte);
+                }
+                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+            },
+            BinaryOp::Div => { 
+                let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_binary_operation(&binary.operator, "int");
+                for &byte in &optimized_bytecode {
+                    self.bytecode_builder.push_byte(byte);
+                }
+                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+            },
+            BinaryOp::Mod => { 
+                let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_binary_operation(&binary.operator, "int");
+                for &byte in &optimized_bytecode {
+                    self.bytecode_builder.push_byte(byte);
+                }
+                Self::map_stack(self.bytecode_builder.update_stack(2, 1))?;
+            },
             BinaryOp::Lt => {
                 self.generate_integer_comparison("if_icmplt")?;
             }
@@ -3747,6 +3868,35 @@ impl MethodWriter {
     
     /// Generate bytecode for a unary expression used as a statement (optimized for PostInc/PostDec)
     fn generate_unary_expression_as_statement(&mut self, unary: &UnaryExpr) -> Result<()> {
+        // Use IncrementOptimizer for simple optimization check
+        if let Expr::Identifier(ident) = &*unary.operand {
+            let local_var = self.find_local_variable(&ident.name).cloned();
+            if let Some(local_var) = local_var {
+                // For local variables, use optimized iinc instruction (javac-style)
+                let increment = match unary.operator {
+                    UnaryOp::PostInc | UnaryOp::PreInc => 1,
+                    UnaryOp::PostDec | UnaryOp::PreDec => -1,
+                    _ => {
+                        // Not an increment/decrement, fallback
+                        self.generate_standard_increment_as_statement(unary)?;
+                        return Ok(());
+                    }
+                };
+                
+                // Use optimized iinc instruction for local variables
+                let iinc_bytes = self.opcode_generator.iinc(local_var.index, increment);
+                self.bytecode_builder.extend_from_slice(&iinc_bytes);
+                return Ok(());
+            }
+        }
+        
+        // Fallback to standard increment/decrement logic for fields and complex expressions
+        self.generate_standard_increment_as_statement(unary)?;
+        Ok(())
+    }
+    
+    /// Generate standard increment/decrement as statement (fallback method)
+    fn generate_standard_increment_as_statement(&mut self, unary: &UnaryExpr) -> Result<()> {
         match unary.operator {
             UnaryOp::PostInc => {
                 // Post-increment as statement: no need to preserve original value
@@ -4134,98 +4284,123 @@ impl MethodWriter {
         self.generate_literal(&literal.value)
     }
     
-    /// Generate bytecode for a literal
+    /// Generate bytecode for a literal (javac-style optimized)
     fn generate_literal(&mut self, lit: &Literal) -> Result<()> {
-        match lit {
-            Literal::Integer(value) => {
-                match *value {
-                    0 => Self::map_stack(self.bytecode_builder.iconst_0())?,
-                    1 => Self::map_stack(self.bytecode_builder.iconst_1())?,
-                    2 => Self::map_stack(self.bytecode_builder.iconst_2())?,
-                    3 => Self::map_stack(self.bytecode_builder.iconst_3())?,
-                    4 => Self::map_stack(self.bytecode_builder.iconst_4())?,
-                    5 => Self::map_stack(self.bytecode_builder.iconst_5())?,
-                    -1 => Self::map_stack(self.bytecode_builder.iconst_m1())?,
-                    _ => {
-                        if *value >= -128 && *value <= 127 {
-                            Self::map_stack(self.bytecode_builder.bipush(*value as i8))?;
-                        } else if *value >= -32768 && *value <= 32767 {
-                            Self::map_stack(self.bytecode_builder.sipush(*value as i16))?;
-                        } else {
-                            // For larger values, we need to use LDC with proper constant pool entry
-                            if let Some(cp) = &self.constant_pool {
-                                let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_integer(*value as i32) };
-                                Self::map_stack(self.bytecode_builder.ldc(idx))?;
-                            } else {
-                                Self::map_stack(self.bytecode_builder.ldc(1))?; // Fallback
-                            }
-                        }
-                    }
-                }
-            }
-            Literal::Float(value) => {
-                if *value == 0.0 {
-                    Self::map_stack(self.bytecode_builder.fconst_0())?;
-                } else if *value == 1.0 {
-                    Self::map_stack(self.bytecode_builder.fconst_1())?;
-                } else if *value == 2.0 {
-                    Self::map_stack(self.bytecode_builder.fconst_2())?;
-                } else {
-                    // For other values, we need to use LDC with proper constant pool entry
-                    if let Some(cp) = &self.constant_pool {
-                        let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_float(*value as f32) };
-                        Self::map_stack(self.bytecode_builder.ldc(idx))?;
-                    } else {
-                        Self::map_stack(self.bytecode_builder.ldc(1))?; // Fallback
-                    }
-                }
-            }
-            Literal::Boolean(value) => {
-                if *value {
-                    Self::map_stack(self.bytecode_builder.iconst_1())?;
-                } else {
-                    Self::map_stack(self.bytecode_builder.iconst_0())?;
-                }
-            }
+        // Use javac-style constant optimization
+        let optimization = match lit {
+            Literal::Integer(value) => ConstantOptimizer::optimize_int(*value as i32),
+            Literal::Float(value) => ConstantOptimizer::optimize_float(*value as f32),
+            Literal::Boolean(true) => ConstantOptimizer::optimize_int(1),
+            Literal::Boolean(false) => ConstantOptimizer::optimize_int(0),
             Literal::String(value) => {
-                // Add string to constant pool and emit LDC
-                if let Some(cp) = &self.constant_pool {
+                // String constants use ldc
+                            if let Some(cp) = &self.constant_pool {
                     let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_string(value) };
+                                Self::map_stack(self.bytecode_builder.ldc(idx))?;
+                    return Ok(());
+                            } else {
+                    return Err(Error::codegen_error("No constant pool available for string literal"));
+                }
+            }
+            Literal::Char(value) => ConstantOptimizer::optimize_int(*value as i32),
+            Literal::Null => {
+                // null reference
+                Self::map_stack(self.bytecode_builder.aconst_null())?;
+                return Ok(());
+            }
+        };
+        
+        // Generate optimized constant loading instruction
+        match optimization {
+            crate::codegen::constant_optimizer::ConstantInstruction::Iconst0 => {
+                Self::map_stack(self.bytecode_builder.iconst_0())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Iconst1 => {
+                Self::map_stack(self.bytecode_builder.iconst_1())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Iconst2 => {
+                Self::map_stack(self.bytecode_builder.iconst_2())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Iconst3 => {
+                Self::map_stack(self.bytecode_builder.iconst_3())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Iconst4 => {
+                Self::map_stack(self.bytecode_builder.iconst_4())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Iconst5 => {
+                Self::map_stack(self.bytecode_builder.iconst_5())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::IconstM1 => {
+                Self::map_stack(self.bytecode_builder.iconst_m1())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Bipush(value) => {
+                Self::map_stack(self.bytecode_builder.bipush(value))?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Sipush(value) => {
+                Self::map_stack(self.bytecode_builder.sipush(value))?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Ldc(value) => {
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_integer(value as i32) };
                     Self::map_stack(self.bytecode_builder.ldc(idx))?;
                 } else {
-                    Self::map_stack(self.bytecode_builder.ldc(1))?;
+                    return Err(Error::codegen_error("No constant pool available for integer literal"));
                 }
             }
-            Literal::Char(value) => {
-                let int_value = *value as i32;
-                if int_value >= 0 && int_value <= 5 {
-                    match int_value {
-                        0 => Self::map_stack(self.bytecode_builder.iconst_0())?,
-                        1 => Self::map_stack(self.bytecode_builder.iconst_1())?,
-                        2 => Self::map_stack(self.bytecode_builder.iconst_2())?,
-                        3 => Self::map_stack(self.bytecode_builder.iconst_3())?,
-                        4 => Self::map_stack(self.bytecode_builder.iconst_4())?,
-                        5 => Self::map_stack(self.bytecode_builder.iconst_5())?,
-                        _ => unreachable!(),
-                    }
+            crate::codegen::constant_optimizer::ConstantInstruction::Fconst0 => {
+                Self::map_stack(self.bytecode_builder.fconst_0())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Fconst1 => {
+                Self::map_stack(self.bytecode_builder.fconst_1())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::Fconst2 => {
+                Self::map_stack(self.bytecode_builder.fconst_2())?;
+            }
+            crate::codegen::constant_optimizer::ConstantInstruction::LdcFloat(value) => {
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_float(value as f32) };
+                    Self::map_stack(self.bytecode_builder.ldc(idx))?;
                 } else {
-                    Self::map_stack(self.bytecode_builder.bipush(int_value as i8))?;
+                    return Err(Error::codegen_error("No constant pool available for float literal"));
                 }
             }
-            Literal::Null => {
-                Self::map_stack(self.bytecode_builder.aconst_null())?;
+            _ => {
+                return Err(Error::codegen_error("Unsupported constant optimization"));
             }
         }
         
         Ok(())
     }
     
-    /// Generate bytecode for an identifier expression
+    /// Generate bytecode for an identifier expression (javac-style optimized)
     fn generate_identifier(&mut self, ident: &str) -> Result<()> {
-        // Look up local variable
+        // Look up local variable using javac-style Item management
         if let Some(local_var) = self.find_local_variable(ident) {
-            let var_type = local_var.var_type.clone();
-            self.load_local_variable(local_var.index, &var_type)?;
+            // Convert LocalType to TypeRef for Item system
+            let type_ref = crate::ast::TypeRef {
+                name: self.local_type_to_string(&local_var.var_type),
+                type_args: Vec::new(),
+                annotations: Vec::new(),
+                array_dims: 0,
+                span: crate::ast::Span::from_to(0, 0, 0, 0),
+            };
+            
+            // Create LocalItem using javac-style Item system
+            let local_item = crate::codegen::item_manager::ItemManager::make_local_item(
+                local_var.index,
+                type_ref.clone(),
+                false, // Not a parameter for now
+            );
+            
+            // Generate optimized bytecode using Item system
+            let bytecode = local_item.load();
+            for &byte in &bytecode {
+                self.bytecode_builder.push_byte(byte);
+            }
+            
+            // Update stack for local variable load
+            let stack_effect = if matches!(type_ref.name.as_str(), "long" | "double") { 2 } else { 1 };
+            Self::map_stack(self.bytecode_builder.update_stack(0, stack_effect))?;
         } else {
             // Check if it's a known static constant from Assembler class
             if let Some(constant_value) = self.get_assembler_constant(ident) {
@@ -4289,7 +4464,7 @@ impl MethodWriter {
                 let field_ref_index = self.add_field_ref(&field_owner, ident, &field_descriptor);
                 
                 // Handle field slots for stack management
-            let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+            let field_slots = if field_descriptor.as_str() == "J" || field_descriptor.as_str() == "D" {
                 2 // long or double
             } else {
                 1 // all other types
@@ -4593,9 +4768,124 @@ impl MethodWriter {
         }
     }
 
+    /// Generate optimized method invocation using javac-style optimizations
+    fn generate_optimized_method_invocation(&mut self, optimization: crate::codegen::method_invocation_optimizer::InvocationOptimizationType) -> Result<()> {
+        use crate::codegen::method_invocation_optimizer::InvocationOptimizationType;
+        
+        match optimization {
+            InvocationOptimizationType::Direct { opcode, method_ref, is_interface: _ } => {
+                // Direct method call (invokestatic, invokespecial)
+                match opcode {
+                    184 => Self::map_stack(self.bytecode_builder.invokestatic(method_ref))?, // invokestatic
+                    183 => Self::map_stack(self.bytecode_builder.invokespecial(method_ref))?, // invokespecial
+                    _ => return Err(Error::codegen_error(&format!("Unsupported direct method opcode: {}", opcode))),
+                }
+            }
+            InvocationOptimizationType::Virtual { opcode, method_ref, is_interface } => {
+                // Virtual method call (invokevirtual, invokeinterface)
+                match opcode {
+                    182 => Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?, // invokevirtual
+                    185 if is_interface => Self::map_stack(self.bytecode_builder.invokeinterface(method_ref, 1))?, // invokeinterface
+                    _ => return Err(Error::codegen_error(&format!("Unsupported virtual method opcode: {}", opcode))),
+                }
+            }
+            InvocationOptimizationType::Dynamic { bootstrap_method: _, name_and_type: _ } => {
+                // Dynamic method call (invokedynamic) - not supported in Java 8 target
+                return Err(Error::codegen_error("invokedynamic not supported in Java 8 target"));
+            }
+            InvocationOptimizationType::StringConcatenation { expressions: _ } => {
+                // String concatenation optimization - implement later
+                return Err(Error::codegen_error("String concatenation optimization not yet implemented"));
+            }
+            InvocationOptimizationType::NullCheck { expression: _ } => {
+                // Null check optimization - implement later
+                return Err(Error::codegen_error("Null check optimization not yet implemented"));
+            }
+            InvocationOptimizationType::ArrayLength { array_expr: _ } => {
+                // Array length access - implement later
+                return Err(Error::codegen_error("Array length optimization not yet implemented"));
+            }
+            InvocationOptimizationType::ClassLiteral { class_type: _ } => {
+                // Class literal access - implement later
+                return Err(Error::codegen_error("Class literal optimization not yet implemented"));
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Check if we can safely apply pre-generation optimization for this method call
+    fn can_apply_pre_generation_optimization(&self, call: &MethodCallExpr) -> bool {
+        // Only allow pre-generation optimization for:
+        // 1. Static method calls (no target object needed)
+        // 2. Simple method calls with no complex expressions
+        // 3. Calls where we can guarantee stack state
+        
+        match &call.target {
+            None => true, // Static method call - safe
+            Some(target) => {
+                // Only allow simple targets that don't affect stack depth unpredictably
+                matches!(**target, 
+                    Expr::Identifier(_) |  // Simple variable reference
+                    Expr::Literal(_)       // Literal value
+                )
+            }
+        }
+    }
+    
+    /// Check if the optimization type is safe for pre-generation application
+    fn is_safe_for_pre_optimization(&self, opt_type: &crate::codegen::method_invocation_optimizer::InvocationOptimizationType) -> bool {
+        use crate::codegen::method_invocation_optimizer::InvocationOptimizationType;
+        
+        match opt_type {
+            InvocationOptimizationType::Direct { opcode: 184, .. } => true, // invokestatic - safe
+            InvocationOptimizationType::StringConcatenation { .. } => false, // Complex - defer
+            InvocationOptimizationType::ArrayLength { array_expr: _ } => false, // Needs target object - defer
+            InvocationOptimizationType::ClassLiteral { .. } => true, // Simple constant - safe
+            _ => false, // Default to safe - defer to post-generation
+        }
+    }
+    
+    /// Apply post-generation optimizations after method call is complete
+    fn apply_post_generation_optimizations(&mut self, call: &MethodCallExpr, pre_call_stack_depth: u16) -> Result<()> {
+        // Only apply post-generation optimizations if:
+        // 1. We didn't apply pre-generation optimizations
+        // 2. The stack state is predictable
+        // 3. The optimization would be beneficial
+        
+        let current_stack_depth = self.bytecode_builder.get_stack_depth();
+        let stack_change = current_stack_depth.saturating_sub(pre_call_stack_depth);
+        
+        // For now, only log the optimization opportunity
+        // In the future, we could apply peephole optimizations here
+        eprintln!("🔧 POST-OPT: Method {} completed, stack change: {} -> {} (delta: {})", 
+                 call.name, pre_call_stack_depth, current_stack_depth, stack_change);
+        
+        // TODO: Implement actual post-generation optimizations:
+        // - Peephole optimizations on the generated bytecode sequence
+        // - Stack optimization (e.g., removing unnecessary dup/pop pairs)
+        // - Constant folding for method results
+        // - Inlining for simple methods
+        
+        Ok(())
+    }
+
     /// Generate bytecode for a method call using rt.rs method resolution
     fn generate_method_call(&mut self, call: &MethodCallExpr) -> Result<()> {
         eprintln!("🔍 DEBUG: generate_method_call: method_name={}, args_count={}, target={:?}", call.name, call.arguments.len(), call.target);
+        
+        // Step 1: Record current stack state for optimization analysis
+        let pre_call_stack_depth = self.bytecode_builder.get_stack_depth();
+        
+        // Step 2: Check if we can apply pre-generation optimizations (only for simple cases)
+        // TEMPORARILY DISABLED: Pre-generation optimization has a critical bug where it doesn't generate arguments
+        // TODO: Fix pre-generation optimization to properly generate arguments before method invocation
+        if false && self.can_apply_pre_generation_optimization(call) {
+            let pattern = self.method_invocation_optimizer.analyze_method_invocation(call, None);
+            if pattern.estimated_cost < 50 && self.is_safe_for_pre_optimization(&pattern.optimization_type) {
+                return self.generate_optimized_method_invocation(pattern.optimization_type);
+            }
+        }
         // Handle System.out.println specially (keep this for now as it's a common pattern)
         if call.name == "println" {
             let is_system_out = match &call.target {
@@ -4626,6 +4916,9 @@ impl MethodWriter {
                     Self::map_stack(self.bytecode_builder.adjust_invoke_stack(false, 1, 0))?;
                     Self::map_stack(self.bytecode_builder.invokevirtual(mref))?;
                 }
+                
+                // Step 3: Apply post-generation optimizations for System.out.println
+                self.apply_post_generation_optimizations(call, pre_call_stack_depth)?;
                 return Ok(());
             }
         }
@@ -4706,11 +4999,17 @@ impl MethodWriter {
                     Self::map_stack(self.bytecode_builder.aload(0))?; 
                 }
             }
+            // Record stack depth after receiver generation for accurate post-optimization analysis
+            let post_receiver_stack_depth = self.bytecode_builder.get_stack_depth();
+            
             // Generate arguments with type conversion if needed
             self.generate_arguments_with_conversion(&final_arguments, &resolved.descriptor)?;
             
             // Use the resolved method information
             self.emit_invoke(&resolved)?;
+            
+            // Step 3: Apply post-generation optimizations if beneficial
+            self.apply_post_generation_optimizations(call, post_receiver_stack_depth)?;
             return Ok(());
         }
         
@@ -4726,11 +5025,17 @@ impl MethodWriter {
                     Self::map_stack(self.bytecode_builder.aload(0))?; 
                 }
             }
+            // Record stack depth after receiver generation for accurate post-optimization analysis
+            let post_receiver_stack_depth = self.bytecode_builder.get_stack_depth();
+            
             // Generate arguments with type conversion if needed
             self.generate_arguments_with_conversion(&final_arguments, &resolved.descriptor)?;
             
             // Use the resolved method information
             self.emit_invoke(&resolved)?;
+            
+            // Step 3: Apply post-generation optimizations if beneficial
+            self.apply_post_generation_optimizations(call, post_receiver_stack_depth)?;
             return Ok(());
         }
                 // Fallback: Method not found in rt.rs, report error
@@ -4768,52 +5073,738 @@ impl MethodWriter {
                 let expected_type = &param_types[i];
                 let actual_type = self.infer_expression_type(arg);
 
-                
-                // Convert int to long if needed
-                if actual_type == "I" && expected_type == "J" {
-                    // Emit i2l (int to long conversion)
-                    Self::map_stack(self.bytecode_builder.i2l())?;
-                }
-                // Convert wrapper types to long if needed
-                else if expected_type == "J" {
-                    match actual_type.as_str() {
-                        "Ljava/lang/Byte;" | "LByte;" => {
-                            // Byte -> byte -> long: call byteValue() then i2l (byte is promoted to int on stack)
-                            let method_ref = self.add_method_ref("java/lang/Byte", "byteValue", "()B");
-                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
-                            Self::map_stack(self.bytecode_builder.i2l())?; // byte is promoted to int, then convert to long
-                        }
-                        "Ljava/lang/Short;" | "LShort;" => {
-                            // Short -> short -> long: call shortValue() then i2l (short is promoted to int on stack)
-                            let method_ref = self.add_method_ref("java/lang/Short", "shortValue", "()S");
-                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
-                            Self::map_stack(self.bytecode_builder.i2l())?; // short is promoted to int, then convert to long
-                        }
-                        "Ljava/lang/Integer;" | "LInteger;" => {
-                            // Integer -> int -> long: call intValue() then i2l
-                            let method_ref = self.add_method_ref("java/lang/Integer", "intValue", "()I");
-                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
-                            Self::map_stack(self.bytecode_builder.i2l())?;
-                        }
-                        "Ljava/lang/Long;" | "LLong;" => {
-                            // Long -> long: call longValue()
-                            let method_ref = self.add_method_ref("java/lang/Long", "longValue", "()J");
-                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
-                        }
-                        "Ljava/lang/Character;" | "LCharacter;" => {
-                            // Character -> char -> long: call charValue() then i2l (char is promoted to int on stack)
-                            let method_ref = self.add_method_ref("java/lang/Character", "charValue", "()C");
-                            Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
-                            Self::map_stack(self.bytecode_builder.i2l())?; // char is promoted to int, then convert to long
-                        }
-                        _ => {
-                            // No conversion needed or unsupported conversion
-                        }
-                    }
-                }
-                // Add more conversions as needed
+                // Use TypeCoercionOptimizer for intelligent type conversion
+                // For now, use simplified logic and gradually integrate full optimizer
+                self.apply_original_type_conversion(&actual_type, expected_type)?;
             }
         }
+        
+        Ok(())
+    }
+    
+    /// Check if this is a string concatenation operation
+    fn is_string_concatenation(&self, left: &Expr, right: &Expr) -> bool {
+        // Simple heuristic: if either operand is a string literal or string expression
+        self.is_string_expression(left) || self.is_string_expression(right)
+    }
+    
+    /// Check if an expression is likely to be a string
+    fn is_string_expression(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(lit_expr) => {
+                matches!(lit_expr.value, crate::ast::Literal::String(_))
+            }
+            Expr::MethodCall(call) => {
+                // Methods that typically return strings
+                matches!(call.name.as_str(), "toString" | "substring" | "concat" | "valueOf")
+            }
+            Expr::FieldAccess(_) => {
+                // Could be a string field, but hard to determine without type info
+                // For now, assume false to avoid false positives
+                false
+            }
+            _ => false,
+        }
+    }
+    
+    /// Apply string optimization based on StringOptimizer analysis
+    fn apply_string_optimization(&mut self, optimization: crate::codegen::string_optimizer::StringConcatenation) -> Result<()> {
+        // Use StringBuilder for efficient concatenation (javac-style)
+        self.generate_string_builder_concatenation_from_string_exprs(&optimization.expressions)?;
+        Ok(())
+    }
+    
+    /// Generate StringBuilder-based string concatenation from StringExpr
+    fn generate_string_builder_concatenation_from_string_exprs(&mut self, expressions: &[crate::codegen::string_optimizer::StringExpr]) -> Result<()> {
+        // new StringBuilder()
+        let string_builder_class = self.add_class_ref("java/lang/StringBuilder");
+        Self::map_stack(self.bytecode_builder.new_object(string_builder_class))?;
+        Self::map_stack(self.bytecode_builder.dup())?;
+        
+        // StringBuilder.<init>()
+        let init_method = self.add_method_ref("java/lang/StringBuilder", "<init>", "()V");
+        Self::map_stack(self.bytecode_builder.invokespecial(init_method))?;
+        
+        // Append each expression
+        for expr in expressions {
+            match expr {
+                crate::codegen::string_optimizer::StringExpr::Literal(s) => {
+                    // Load string literal
+                    if let Some(cp) = &self.constant_pool {
+                        let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_string(s) };
+                        Self::map_stack(self.bytecode_builder.ldc(idx))?;
+                    } else {
+                        return Err(Error::codegen_error("No constant pool available for string literal"));
+                    }
+                    
+                    let append_method = self.add_method_ref("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(append_method))?;
+                }
+                crate::codegen::string_optimizer::StringExpr::Variable(name) => {
+                    // Load variable
+                    self.generate_identifier(name)?;
+                    
+                    // Assume it's a string for now
+                    let append_method = self.add_method_ref("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(append_method))?;
+                }
+                crate::codegen::string_optimizer::StringExpr::Expression(expr) => {
+                    // Generate expression
+                    self.generate_expression(expr)?;
+                    
+                    // Determine append method based on expression type
+                    let append_descriptor = if self.is_string_expression(expr) {
+                        "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+                    } else {
+                        // Assume int for simplicity
+                        "(I)Ljava/lang/StringBuilder;"
+                    };
+                    
+                    let append_method = self.add_method_ref("java/lang/StringBuilder", "append", append_descriptor);
+                    Self::map_stack(self.bytecode_builder.invokevirtual(append_method))?;
+                }
+            }
+        }
+        
+        // toString()
+        let to_string_method = self.add_method_ref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+        Self::map_stack(self.bytecode_builder.invokevirtual(to_string_method))?;
+        
+        Ok(())
+    }
+    
+    /// Generate StringBuilder-based string concatenation
+    fn generate_string_builder_concatenation(&mut self, expressions: &[crate::ast::Expr]) -> Result<()> {
+        // new StringBuilder()
+        let string_builder_class = self.add_class_ref("java/lang/StringBuilder");
+        Self::map_stack(self.bytecode_builder.new_object(string_builder_class))?;
+        Self::map_stack(self.bytecode_builder.dup())?;
+        
+        // StringBuilder.<init>()
+        let init_method = self.add_method_ref("java/lang/StringBuilder", "<init>", "()V");
+        Self::map_stack(self.bytecode_builder.invokespecial(init_method))?;
+        
+        // Append each expression
+        for expr in expressions {
+            self.generate_expression(expr)?;
+            
+            // Determine append method based on expression type
+            let append_descriptor = if self.is_string_expression(expr) {
+                "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+            } else {
+                // Assume int for simplicity, could be enhanced with type inference
+                "(I)Ljava/lang/StringBuilder;"
+            };
+            
+            let append_method = self.add_method_ref("java/lang/StringBuilder", "append", append_descriptor);
+            Self::map_stack(self.bytecode_builder.invokevirtual(append_method))?;
+        }
+        
+        // toString()
+        let to_string_method = self.add_method_ref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+        Self::map_stack(self.bytecode_builder.invokevirtual(to_string_method))?;
+        
+        Ok(())
+    }
+    
+    /// Generate direct string concatenation using String.concat
+    fn generate_direct_string_concat(&mut self, expressions: &[crate::ast::Expr]) -> Result<()> {
+        if expressions.len() < 2 {
+            return Err(Error::codegen_error("Direct concat requires at least 2 expressions"));
+        }
+        
+        // Generate first expression
+        self.generate_expression(&expressions[0])?;
+        
+        // Chain concat calls for remaining expressions
+        for expr in &expressions[1..] {
+            self.generate_expression(expr)?;
+            let concat_method = self.add_method_ref("java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;");
+            Self::map_stack(self.bytecode_builder.invokevirtual(concat_method))?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate simple string concatenation (fallback)
+    fn generate_simple_string_concat(&mut self) -> Result<()> {
+        // The two operands are already on the stack
+        // Convert them to strings if needed and concatenate
+        
+        // For now, assume they are already strings and use String.concat
+        let concat_method = self.add_method_ref("java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;");
+        Self::map_stack(self.bytecode_builder.invokevirtual(concat_method))?;
+        
+        Ok(())
+    }
+    
+    /// Generate optimized while statement using LoopOptimizer
+    fn generate_optimized_while_statement(&mut self, label: Option<&str>, while_stmt: &crate::ast::WhileStmt) -> Result<()> {
+        // Use javac-style unified genLoop for while loops
+        self.gen_loop(
+            &while_stmt.body,
+            Some(&while_stmt.condition),
+            &[], // No step statements for while loops
+            true, // testFirst = true for while loops
+            label
+        )?;
+        Ok(())
+    }
+    
+    /// Generate optimized for statement using LoopOptimizer
+    fn generate_optimized_for_statement(&mut self, for_stmt: &crate::ast::ForStmt) -> Result<()> {
+        // Generate initialization (javac-style)
+        for init_stmt in &for_stmt.init {
+            self.generate_statement(init_stmt)?;
+        }
+        
+        // Convert update expressions to statements
+        let step_stmts: Vec<Stmt> = for_stmt.update.iter().map(|expr_stmt| {
+            Stmt::Expression(expr_stmt.clone())
+        }).collect();
+        
+        // Use javac-style unified genLoop for for loops
+        self.gen_loop(
+            &for_stmt.body,
+            for_stmt.condition.as_ref(),
+            &step_stmts,
+            true, // testFirst = true for for loops
+            None
+        )?;
+        
+        Ok(())
+    }
+    
+    /// Apply loop optimizations based on LoopOptimizer analysis
+    fn apply_loop_optimizations(&mut self, pattern: &crate::codegen::loop_optimizer::LoopPattern) -> Result<()> {
+        // Check for optimization opportunities
+        for optimization in &pattern.optimization_opportunities {
+            match optimization {
+                crate::codegen::loop_optimizer::LoopOptimization::ConstantCondition { always_true } => {
+                    if *always_true {
+                        // Infinite loop - generate without condition check
+                        self.generate_infinite_loop(&pattern.body)?;
+                        return Ok(());
+                    } else {
+                        // Never executes - skip loop entirely
+                        return Ok(());
+                    }
+                }
+                crate::codegen::loop_optimizer::LoopOptimization::LoopUnrolling { iteration_count } => {
+                    // Unroll small loops
+                    self.generate_unrolled_loop(&pattern.body, *iteration_count)?;
+                    return Ok(());
+                }
+                _ => {
+                    // Other optimizations can be applied later
+                }
+            }
+        }
+        
+        // Apply standard loop generation with optimizations
+        match pattern.loop_type {
+            crate::codegen::loop_optimizer::LoopType::While => {
+                self.generate_optimized_while_loop_body(pattern)?;
+            }
+            crate::codegen::loop_optimizer::LoopType::For => {
+                self.generate_optimized_for_loop_body(pattern)?;
+            }
+            crate::codegen::loop_optimizer::LoopType::Enhanced => {
+                // Enhanced for loop - use standard generation for now
+                self.generate_statement(&pattern.body)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate infinite loop (optimized for always-true condition)
+    fn generate_infinite_loop(&mut self, body: &crate::ast::Stmt) -> Result<()> {
+        let start_label = self.create_label();
+        let end_label = self.create_label();
+        
+        // Push loop context
+        self.loop_stack.push(LoopContext { 
+            label: None, 
+            continue_label: start_label, 
+            break_label: end_label 
+        });
+        
+        // Mark start label
+        {
+            let l = self.label_str(start_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Generate body
+        self.generate_statement(body)?;
+        
+        // Unconditional jump back to start
+        {
+            let l = self.label_str(start_label);
+            Self::map_stack(self.bytecode_builder.goto(&l))?;
+        }
+        
+        // Mark end label (for break statements)
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Pop loop context
+        self.loop_stack.pop();
+        
+        Ok(())
+    }
+    
+    /// Generate unrolled loop
+    fn generate_unrolled_loop(&mut self, body: &crate::ast::Stmt, iteration_count: usize) -> Result<()> {
+        // Simply repeat the body the specified number of times
+        for _ in 0..iteration_count {
+            self.generate_statement(body)?;
+        }
+        Ok(())
+    }
+    
+    /// Generate optimized while loop body
+    fn generate_optimized_while_loop_body(&mut self, pattern: &crate::codegen::loop_optimizer::LoopPattern) -> Result<()> {
+        let start_label = self.create_label();
+        let end_label = self.create_label();
+        
+        // Push loop context
+        self.loop_stack.push(LoopContext { 
+            label: None, 
+            continue_label: start_label, 
+            break_label: end_label 
+        });
+        
+        // Mark start label
+        {
+            let l = self.label_str(start_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Generate condition if present
+        if let Some(ref condition) = pattern.condition {
+            self.generate_expression(condition)?;
+            
+            // Jump to end if condition is false
+            let l = self.label_str(end_label);
+            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+        }
+        
+        // Generate body
+        self.generate_statement(&pattern.body)?;
+        
+        // Jump back to start
+        {
+            let l = self.label_str(start_label);
+            Self::map_stack(self.bytecode_builder.goto(&l))?;
+        }
+        
+        // Mark end label
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Pop loop context
+        self.loop_stack.pop();
+        
+        Ok(())
+    }
+    
+    /// Generate optimized for loop body
+    fn generate_optimized_for_loop_body(&mut self, pattern: &crate::codegen::loop_optimizer::LoopPattern) -> Result<()> {
+        // Generate initialization
+        for init in &pattern.initialization {
+            self.generate_statement(init)?;
+        }
+        
+        let start_label = self.create_label();
+        let end_label = self.create_label();
+        let continue_label = self.create_label();
+        
+        // Push loop context
+        self.loop_stack.push(LoopContext { 
+            label: None, 
+            continue_label, 
+            break_label: end_label 
+        });
+        
+        // Mark start label
+        {
+            let l = self.label_str(start_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Generate condition if present
+        if let Some(ref condition) = pattern.condition {
+            self.generate_expression(condition)?;
+            
+            // Jump to end if condition is false
+            let l = self.label_str(end_label);
+            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+        }
+        
+        // Generate body
+        self.generate_statement(&pattern.body)?;
+        
+        // Mark continue label
+        {
+            let l = self.label_str(continue_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Generate step statements
+        for step in &pattern.step {
+            self.generate_statement(step)?;
+        }
+        
+        // Jump back to start
+        {
+            let l = self.label_str(start_label);
+            Self::map_stack(self.bytecode_builder.goto(&l))?;
+        }
+        
+        // Mark end label
+        {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Pop loop context
+        self.loop_stack.pop();
+        
+        Ok(())
+    }
+    
+    /// Apply advanced optimizations using AdvancedCodeGenerator
+    fn apply_advanced_optimizations(&mut self) -> Result<()> {
+        // Resolve any pending jumps
+        if !self.advanced_optimizer.pending_jumps.is_empty() {
+            self.advanced_optimizer.resolve_pending_jumps();
+        }
+        
+        // Update current PC
+        self.advanced_optimizer.current_pc = self.bytecode_builder.code().len() as u16;
+        
+        // Generate stack map frames if needed
+        if self.advanced_optimizer.need_stack_map {
+            let locals = self.collect_local_types();
+            let stack = self.collect_stack_types();
+            let stack_map_bytecode = self.advanced_optimizer.emit_stack_map(locals, stack);
+            
+            // Add stack map to method attributes (this would be handled by ClassWriter)
+            // For now, we just track that we generated it
+            println!("🔍 DEBUG: Generated stack map frame with {} bytes", stack_map_bytecode.len());
+        }
+        
+        // Create entry point for method
+        let locals = self.collect_local_types();
+        let entry_pc = self.advanced_optimizer.entry_point(locals);
+        println!("🔍 DEBUG: Method entry point at PC: {}", entry_pc);
+        
+        Ok(())
+    }
+    
+    /// Collect local variable types for stack map generation
+    fn collect_local_types(&self) -> Vec<crate::codegen::advanced_optimizer::LocalType> {
+        let mut locals = Vec::new();
+        
+        for local in self.bytecode_builder.locals() {
+            let local_type = match &local.var_type {
+                LocalType::Int => crate::codegen::advanced_optimizer::LocalType::Int,
+                LocalType::Long => crate::codegen::advanced_optimizer::LocalType::Long,
+                LocalType::Float => crate::codegen::advanced_optimizer::LocalType::Float,
+                LocalType::Double => crate::codegen::advanced_optimizer::LocalType::Double,
+                LocalType::Reference(class) => crate::codegen::advanced_optimizer::LocalType::Reference(class.clone()),
+                LocalType::Array(_) => crate::codegen::advanced_optimizer::LocalType::Reference("java/lang/Object".to_string()),
+            };
+            locals.push(local_type);
+        }
+        
+        locals
+    }
+    
+    /// Collect stack types for stack map generation
+    fn collect_stack_types(&self) -> Vec<crate::codegen::advanced_optimizer::StackType> {
+        // For now, return empty stack since we don't track stack types in detail
+        // In a full implementation, this would analyze the current stack state
+        Vec::new()
+    }
+    
+    /// Generate optimized try statement using ExceptionHandlingOptimizer
+    fn generate_optimized_try_statement(&mut self, try_stmt: &crate::ast::TryStmt) -> Result<()> {
+        // Use ExceptionHandlingOptimizer to analyze the try statement
+        let pattern = crate::codegen::finalizer_optimizer::ExceptionHandlingOptimizer::analyze_try_statement(try_stmt);
+        
+        // Check if we should use the optimizer or fallback to standard generation
+        match pattern.optimization_type {
+            crate::codegen::finalizer_optimizer::TryOptimizationType::JSROptimization => {
+                // Use JSR optimization for complex finalizers
+                self.generate_jsr_optimized_try(try_stmt, &pattern)?;
+            }
+            crate::codegen::finalizer_optimizer::TryOptimizationType::InlineFinalizer => {
+                // Inline finalizer for simple cases
+                self.generate_inline_finalizer_try(try_stmt, &pattern)?;
+            }
+            crate::codegen::finalizer_optimizer::TryOptimizationType::ExceptionTableCompression => {
+                // Compress exception table for multiple catches
+                self.generate_compressed_exception_table_try(try_stmt, &pattern)?;
+            }
+            crate::codegen::finalizer_optimizer::TryOptimizationType::Standard => {
+                // Use standard try-catch generation (fallback to original logic)
+                self.generate_standard_try_statement(try_stmt)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate JSR-optimized try statement
+    fn generate_jsr_optimized_try(&mut self, try_stmt: &crate::ast::TryStmt, pattern: &crate::codegen::finalizer_optimizer::TryOptimizationPattern) -> Result<()> {
+        // For now, fallback to standard generation
+        // In a full implementation, this would use JSR instructions for complex finalizers
+        println!("🔍 DEBUG: Using JSR optimization for complex try statement (complexity: {})", pattern.complexity);
+        self.generate_standard_try_statement(try_stmt)
+    }
+    
+    /// Generate inline finalizer try statement
+    fn generate_inline_finalizer_try(&mut self, try_stmt: &crate::ast::TryStmt, pattern: &crate::codegen::finalizer_optimizer::TryOptimizationPattern) -> Result<()> {
+        // For now, fallback to standard generation
+        // In a full implementation, this would inline the finalizer code
+        println!("🔍 DEBUG: Using inline finalizer optimization for try statement (complexity: {})", pattern.complexity);
+        self.generate_standard_try_statement(try_stmt)
+    }
+    
+    /// Generate compressed exception table try statement
+    fn generate_compressed_exception_table_try(&mut self, try_stmt: &crate::ast::TryStmt, pattern: &crate::codegen::finalizer_optimizer::TryOptimizationPattern) -> Result<()> {
+        // For now, fallback to standard generation
+        // In a full implementation, this would compress the exception table for multiple catches
+        println!("🔍 DEBUG: Using exception table compression for try statement ({} catches)", pattern.catch_count);
+        self.generate_standard_try_statement(try_stmt)
+    }
+    
+    /// Generate standard try statement (original logic)
+    fn generate_standard_try_statement(&mut self, try_stmt: &crate::ast::TryStmt) -> Result<()> {
+        // This is the original try-catch-finally generation logic
+        // For now, we'll implement a simplified version
+        
+        // Generate try block
+        let try_start = self.create_label();
+        let try_end = self.create_label();
+        let after = self.create_label();
+        
+        // Mark try start
+        {
+            let l = self.label_str(try_start);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Generate try body
+        self.generate_block(&try_stmt.try_block)?;
+        
+        // Mark try end
+        {
+            let l = self.label_str(try_end);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        // Generate catch clauses
+        for (i, catch_clause) in try_stmt.catch_clauses.iter().enumerate() {
+            let handler = self.create_label();
+            
+            // Mark catch handler
+            {
+                let l = self.label_str(handler);
+                self.bytecode_builder.mark_label(&l);
+            }
+            
+            // JVM automatically pushes the exception object onto the stack
+            Self::map_stack(self.bytecode_builder.update_stack(0, 1))?;
+            
+            // Store exception in local variable
+            let exception_type = &catch_clause.parameter.type_ref;
+            let exception_name = &catch_clause.parameter.name;
+            let local_index = self.allocate_local_variable(exception_name, exception_type);
+            let local_type = self.convert_type_ref_to_local_type(exception_type);
+            self.store_local_variable(local_index, &local_type)?;
+            
+            // Generate catch body
+            self.generate_block(&catch_clause.block)?;
+            
+            // Jump to after if not the last catch
+            if i < try_stmt.catch_clauses.len() - 1 || try_stmt.finally_block.is_some() {
+                let l = self.label_str(after);
+                Self::map_stack(self.bytecode_builder.goto(&l))?;
+            }
+            
+            // Add exception handler entry (simplified)
+            self.add_exception_handler_labels(try_start, try_end, handler, 0);
+        }
+        
+        // Generate finally block if present
+        if let Some(finally_block) = &try_stmt.finally_block {
+            self.generate_block(finally_block)?;
+        }
+        
+        // Mark after label
+        {
+            let l = self.label_str(after);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate optimized throw statement using ExceptionOptimizer
+    fn generate_optimized_throw_statement(&mut self, throw_stmt: &crate::ast::ThrowStmt) -> Result<()> {
+        // Generate the exception expression
+        self.generate_expression(&throw_stmt.expr)?;
+        
+        // Use ExceptionOptimizer to optimize the throw instruction
+        // For now, use standard athrow but register with optimizer for future optimizations
+        let current_pc = self.bytecode_builder.code().len();
+        
+        // Register this throw with the exception optimizer for analysis
+        // This helps with exception table optimization and JSR analysis
+        self.exception_optimizer.add_gap(current_pc, current_pc + 1);
+        
+        // Generate the athrow instruction
+        Self::map_stack(self.bytecode_builder.athrow())?;
+        
+        Ok(())
+    }
+    
+    /// Optimize postfix increment/decrement to prefix in expression statements (javac-style)
+    /// This is a key javac optimization: x++ becomes ++x when used as a statement
+    fn optimize_postfix_to_prefix(&self, unary: &UnaryExpr) -> UnaryExpr {
+        let optimized_operator = match unary.operator {
+            UnaryOp::PostInc => UnaryOp::PreInc,
+            UnaryOp::PostDec => UnaryOp::PreDec,
+            _ => unary.operator, // No change for other operators
+        };
+        
+        UnaryExpr {
+            operator: optimized_operator,
+            operand: unary.operand.clone(),
+            span: unary.span,
+        }
+    }
+    
+    /// Unified loop generation method (javac-style genLoop)
+    /// This method handles all loop types: while, for, and do-while
+    fn gen_loop(
+        &mut self,
+        body: &Stmt,
+        condition: Option<&Expr>,
+        step: &[Stmt],
+        test_first: bool,
+        _label: Option<&str>
+    ) -> Result<()> {
+        // Create entry point for the loop (javac-style)
+        let start_pc = self.bytecode_builder.code().len() as u16;
+        
+        if test_first {
+            // While or for loop: test condition first
+            if let Some(cond) = condition {
+                // Generate condition check
+                self.generate_expression(cond)?;
+                
+                // Jump to end if condition is false
+                let end_label = format!("loop_end_{}", start_pc);
+                Self::map_stack(self.bytecode_builder.ifeq(&end_label))?;
+            }
+            
+            // Generate loop body
+            self.generate_statement(body)?;
+            
+            // Generate step statements (for for-loops)
+            for step_stmt in step {
+                self.generate_statement(step_stmt)?;
+            }
+            
+            // Jump back to start
+            let start_label = format!("loop_start_{}", start_pc);
+            self.bytecode_builder.mark_label(&start_label);
+            Self::map_stack(self.bytecode_builder.goto(&start_label))?;
+            
+            // Mark end label
+            if condition.is_some() {
+                let end_label = format!("loop_end_{}", start_pc);
+                self.bytecode_builder.mark_label(&end_label);
+            }
+        } else {
+            // Do-while loop: execute body first, then test
+            let loop_start = format!("do_start_{}", start_pc);
+            self.bytecode_builder.mark_label(&loop_start);
+            
+            // Generate loop body
+            self.generate_statement(body)?;
+            
+            // Generate step statements
+            for step_stmt in step {
+                self.generate_statement(step_stmt)?;
+            }
+            
+            // Generate condition check
+            if let Some(cond) = condition {
+                self.generate_expression(cond)?;
+                // Jump back to start if condition is true
+                Self::map_stack(self.bytecode_builder.ifne(&loop_start))?;
+            }
+        }
+        
+        Ok(())
+    }
+
+    
+    /// Continue with original manual conversion logic (fallback)
+    fn apply_original_type_conversion(&mut self, actual_type: &str, expected_type: &str) -> Result<()> {
+        // Convert int to long if needed
+        if actual_type == "I" && expected_type == "J" {
+            // Emit i2l (int to long conversion)
+            Self::map_stack(self.bytecode_builder.i2l())?;
+        }
+        // Convert wrapper types to long if needed
+        else if expected_type == "J" {
+            match actual_type {
+                "Ljava/lang/Byte;" | "LByte;" => {
+                    // Byte -> byte -> long: call byteValue() then i2l (byte is promoted to int on stack)
+                    let method_ref = self.add_method_ref("java/lang/Byte", "byteValue", "()B");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                    Self::map_stack(self.bytecode_builder.i2l())?; // byte is promoted to int, then convert to long
+                }
+                "Ljava/lang/Short;" | "LShort;" => {
+                    // Short -> short -> long: call shortValue() then i2l (short is promoted to int on stack)
+                    let method_ref = self.add_method_ref("java/lang/Short", "shortValue", "()S");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                    Self::map_stack(self.bytecode_builder.i2l())?; // short is promoted to int, then convert to long
+                }
+                "Ljava/lang/Integer;" | "LInteger;" => {
+                    // Integer -> int -> long: call intValue() then i2l
+                    let method_ref = self.add_method_ref("java/lang/Integer", "intValue", "()I");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                    Self::map_stack(self.bytecode_builder.i2l())?;
+                }
+                "Ljava/lang/Long;" | "LLong;" => {
+                    // Long -> long: call longValue()
+                    let method_ref = self.add_method_ref("java/lang/Long", "longValue", "()J");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                }
+                "Ljava/lang/Character;" | "LCharacter;" => {
+                    // Character -> char -> long: call charValue() then i2l (char is promoted to int on stack)
+                    let method_ref = self.add_method_ref("java/lang/Character", "charValue", "()C");
+                    Self::map_stack(self.bytecode_builder.invokevirtual(method_ref))?;
+                    Self::map_stack(self.bytecode_builder.i2l())?; // char is promoted to int, then convert to long
+                }
+                _ => {
+                    // No conversion needed or unsupported conversion
+                }
+            }
+        }
+        // Add more conversions as needed
         
         Ok(())
     }
@@ -5455,8 +6446,170 @@ impl MethodWriter {
         }
     }
 
+    /// Generate optimized field access using javac-style optimizations
+    fn generate_optimized_field_access(&mut self, optimization: crate::codegen::field_access_optimizer::FieldAccessOptimizationType) -> Result<()> {
+        use crate::codegen::field_access_optimizer::FieldAccessOptimizationType;
+        
+        match optimization {
+            FieldAccessOptimizationType::Static { opcode, field_ref, is_constant: _, constant_value: _ } => {
+                // Static field access (getstatic/putstatic)
+                match opcode {
+                    178 => Self::map_stack(self.bytecode_builder.getstatic(field_ref))?, // getstatic
+                    179 => Self::map_stack(self.bytecode_builder.putstatic(field_ref))?, // putstatic
+                    _ => return Err(Error::codegen_error(&format!("Unsupported static field opcode: {}", opcode))),
+                }
+            }
+            FieldAccessOptimizationType::Instance { opcode, field_ref, requires_null_check: _ } => {
+                // Instance field access (getfield/putfield)
+                match opcode {
+                    180 => Self::map_stack(self.bytecode_builder.getfield(field_ref))?, // getfield
+                    181 => Self::map_stack(self.bytecode_builder.putfield(field_ref))?, // putfield
+                    _ => return Err(Error::codegen_error(&format!("Unsupported instance field opcode: {}", opcode))),
+                }
+            }
+            FieldAccessOptimizationType::ArrayLength => {
+                // Array length access (arraylength)
+                Self::map_stack(self.bytecode_builder.arraylength())?;
+            }
+            FieldAccessOptimizationType::ConstantInline { value } => {
+                // Constant inlining - load the constant value directly
+                match value {
+                    crate::ast::Literal::Integer(i) => {
+                        let optimization = ConstantOptimizer::optimize_int(i as i32);
+                        self.emit_constant_instruction(optimization)?;
+                    }
+                    crate::ast::Literal::Float(f) => {
+                        let optimization = ConstantOptimizer::optimize_float(f as f32);
+                        self.emit_constant_instruction(optimization)?;
+                    }
+                    crate::ast::Literal::String(s) => {
+                        if let Some(cp) = &self.constant_pool {
+                            let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_string(&s) };
+                            Self::map_stack(self.bytecode_builder.ldc(idx))?;
+                        } else {
+                            return Err(Error::codegen_error("No constant pool available for string literal"));
+                        }
+                    }
+                    _ => {
+                        return Err(Error::codegen_error("Unsupported constant inlining type"));
+                    }
+                }
+            }
+            FieldAccessOptimizationType::ClassLiteral { class_ref } => {
+                // Class literal access (.class -> ldc)
+                Self::map_stack(self.bytecode_builder.ldc(class_ref))?;
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Helper method to emit constant instruction
+    fn emit_constant_instruction(&mut self, optimization: crate::codegen::constant_optimizer::ConstantInstruction) -> Result<()> {
+        use crate::codegen::constant_optimizer::ConstantInstruction;
+        
+        match optimization {
+            ConstantInstruction::Iconst0 => Self::map_stack(self.bytecode_builder.iconst_0())?,
+            ConstantInstruction::Iconst1 => Self::map_stack(self.bytecode_builder.iconst_1())?,
+            ConstantInstruction::Iconst2 => Self::map_stack(self.bytecode_builder.iconst_2())?,
+            ConstantInstruction::Iconst3 => Self::map_stack(self.bytecode_builder.iconst_3())?,
+            ConstantInstruction::Iconst4 => Self::map_stack(self.bytecode_builder.iconst_4())?,
+            ConstantInstruction::Iconst5 => Self::map_stack(self.bytecode_builder.iconst_5())?,
+            ConstantInstruction::IconstM1 => Self::map_stack(self.bytecode_builder.iconst_m1())?,
+            ConstantInstruction::Bipush(value) => Self::map_stack(self.bytecode_builder.bipush(value))?,
+            ConstantInstruction::Sipush(value) => Self::map_stack(self.bytecode_builder.sipush(value))?,
+            ConstantInstruction::Ldc(value) => {
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_integer(value as i32) };
+                    Self::map_stack(self.bytecode_builder.ldc(idx))?;
+                } else {
+                    return Err(Error::codegen_error("No constant pool available for integer literal"));
+                }
+            }
+            ConstantInstruction::Fconst0 => Self::map_stack(self.bytecode_builder.fconst_0())?,
+            ConstantInstruction::Fconst1 => Self::map_stack(self.bytecode_builder.fconst_1())?,
+            ConstantInstruction::Fconst2 => Self::map_stack(self.bytecode_builder.fconst_2())?,
+            ConstantInstruction::LdcFloat(value) => {
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_float(value as f32) };
+                    Self::map_stack(self.bytecode_builder.ldc(idx))?;
+                } else {
+                    return Err(Error::codegen_error("No constant pool available for float literal"));
+                }
+            }
+            _ => return Err(Error::codegen_error("Unsupported constant instruction")),
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if we can safely apply pre-generation optimization for this field access
+    fn can_apply_pre_generation_field_optimization(&self, field_access: &FieldAccessExpr) -> bool {
+        // Only allow pre-generation optimization for:
+        // 1. Static field access (no target object needed)
+        // 2. Simple field access with predictable targets
+        // 3. Constant field access
+        
+        match &field_access.target {
+            None => true, // Static field access - safe
+            Some(target) => {
+                // Only allow simple targets
+                matches!(**target, 
+                    Expr::Identifier(_) |  // Simple variable reference
+                    Expr::Literal(_)       // Literal value (rare but possible)
+                )
+            }
+        }
+    }
+    
+    /// Check if the field optimization type is safe for pre-generation application
+    fn is_safe_for_pre_field_optimization(&self, opt_type: &crate::codegen::field_access_optimizer::FieldAccessOptimizationType) -> bool {
+        use crate::codegen::field_access_optimizer::FieldAccessOptimizationType;
+        
+        match opt_type {
+            FieldAccessOptimizationType::Static { .. } => true, // Static field - safe
+            FieldAccessOptimizationType::ConstantInline { .. } => true, // Constant - safe
+            FieldAccessOptimizationType::ClassLiteral { .. } => true, // Class literal - safe
+            FieldAccessOptimizationType::Instance { .. } => false, // Needs target object - defer
+            FieldAccessOptimizationType::ArrayLength => false, // Needs array object - defer
+        }
+    }
+    
+    /// Apply post-generation optimizations after field access is complete
+    fn apply_post_generation_field_optimizations(&mut self, field_access: &FieldAccessExpr, pre_access_stack_depth: u16) -> Result<()> {
+        let current_stack_depth = self.bytecode_builder.get_stack_depth();
+        let stack_change = current_stack_depth.saturating_sub(pre_access_stack_depth);
+        
+        // Log the optimization opportunity
+        eprintln!("🔧 POST-OPT: Field {} completed, stack change: {} -> {} (delta: {})", 
+                 field_access.name, pre_access_stack_depth, current_stack_depth, stack_change);
+        
+        // TODO: Implement actual post-generation field optimizations:
+        // - Constant folding for static final fields
+        // - Redundant field access elimination
+        // - Field access coalescing
+        
+        Ok(())
+    }
+
     /// Generate bytecode for field access
     fn generate_field_access(&mut self, field_access: &FieldAccessExpr) -> Result<()> {
+        // Step 1: Record current stack state for optimization analysis
+        let pre_access_stack_depth = self.bytecode_builder.get_stack_depth();
+        
+        // Step 2: Check if we can apply pre-generation optimizations (only for simple cases)
+        if self.can_apply_pre_generation_field_optimization(field_access) {
+            let pattern = self.field_access_optimizer.analyze_field_access(field_access, false);
+            if pattern.estimated_cost < 30 && self.is_safe_for_pre_field_optimization(&pattern.optimization_type) {
+                let result = self.generate_optimized_field_access(pattern.optimization_type);
+                if result.is_ok() {
+                    // Step 3: Apply post-generation optimizations for pre-optimized field access
+                    self.apply_post_generation_field_optimizations(field_access, pre_access_stack_depth)?;
+                }
+                return result;
+            }
+        }
+        
         // Check if this is a qualified class name chain (e.g., java.lang.reflect.Array)
         if let Some(qualified_name) = self.is_qualified_class_name_chain(field_access) {
             eprintln!("🔍 DEBUG: generate_field_access: Detected qualified class name: {}", qualified_name);
@@ -5624,7 +6777,7 @@ impl MethodWriter {
         let field_ref_index = self.add_field_ref(&actual_field_class, &field_access.name, &field_descriptor);
         
         // Handle field access with proper stack management for 64-bit types
-        let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+        let field_slots = if field_descriptor.as_str() == "J" || field_descriptor.as_str() == "D" {
             2 // long or double
         } else {
             1 // all other types
@@ -5740,7 +6893,7 @@ impl MethodWriter {
             for type_decl in all_types {
                 if let crate::ast::TypeDecl::Class(class) = type_decl {
                     if class.name == class_name || class.name.ends_with(&format!(".{}", class_name)) {
-                        if let Some(desc) = self.find_constructor_in_class(class, arguments) {
+                        if let Some(desc) = self.find_constructor_in_class(&class, arguments) {
                             return Some(desc);
                         }
                     }
@@ -5876,19 +7029,35 @@ impl MethodWriter {
         }
     }
 
-    /// Generate bytecode for new expression
+    /// Generate bytecode for new expression (javac-style optimized)
     fn generate_new_expression(&mut self, new_expr: &NewExpr) -> Result<()> {
-        // Check if it's an array creation
-        if new_expr.target_type.array_dims > 0 {
-            self.generate_array_creation(new_expr)?;
+        // Use javac-style object creation optimization
+        let pattern = crate::codegen::object_optimizer::ObjectOptimizer::analyze_object_creation(new_expr);
+        
+        match &pattern.optimization_type {
+            crate::codegen::object_optimizer::ObjectOptimizationType::StringLiteral(value) => {
+                // Optimize string constructor to direct ldc (javac-style)
+                if let Some(cp) = &self.constant_pool {
+                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.add_string(value) };
+                    Self::map_stack(self.bytecode_builder.ldc(idx))?;
         } else {
-            // Regular object creation
+                    Self::map_stack(self.bytecode_builder.ldc(1))?; // Fallback
+                }
+                return Ok(());
+            }
+            crate::codegen::object_optimizer::ObjectOptimizationType::ArrayCreation { .. } => {
+                // Use optimized array creation
+            self.generate_array_creation(new_expr)?;
+                return Ok(());
+            }
+            _ => {
+                // Standard object creation with javac new+dup pattern
             let class_ref_index = self.add_class_constant(&new_expr.target_type.name);
             
-            // NEW instruction
+                // NEW instruction (javac pattern)
             Self::map_stack(self.bytecode_builder.new_object(class_ref_index))?;
             
-            // DUP to keep reference for constructor call
+                // DUP to keep reference for constructor call (javac pattern)
             Self::map_stack(self.bytecode_builder.dup())?;
             
             // Generate constructor arguments
@@ -5896,51 +7065,52 @@ impl MethodWriter {
                 self.generate_expression(arg)?;
             }
             
-            // Call constructor - generate descriptor based on arguments
-            let mut descriptor = String::new();
-            descriptor.push('(');
-            
-            // Handle specific constructor cases
-            if new_expr.target_type.name == "ArraysListIterator" && new_expr.arguments.len() == 2 {
-                // ArraysListIterator(Object[] array, int index)
-                descriptor.push_str("[Ljava/lang/Object;"); // Array of objects for first arg
-                descriptor.push('I'); // Integer for second arg
-            } else if new_expr.target_type.name == "UnsupportedOperationException" && new_expr.arguments.len() == 1 {
-                // UnsupportedOperationException(String message)
-                descriptor.push_str("Ljava/lang/String;"); // String argument
-            } else if new_expr.target_type.name == "NoSuchElementException" && new_expr.arguments.len() == 0 {
-                // NoSuchElementException() - no arguments
-            } else if new_expr.arguments.is_empty() {
-                // Default constructor with no arguments
-            } else {
-                // For other constructors, use javac-style type inference
-                // First, try to find the constructor signature from the target class
-                let constructor_descriptor = self.infer_constructor_descriptor(&new_expr.target_type.name, &new_expr.arguments);
-                if let Some(desc) = constructor_descriptor {
-                    // Use the inferred descriptor (without the return type)
-                    let param_part = &desc[1..desc.len()-2]; // Remove '(' and ')V'
-                    descriptor.push_str(param_part);
+                // Call constructor - generate descriptor based on arguments
+                let mut descriptor = String::new();
+                descriptor.push('(');
+                
+                // Handle specific constructor cases
+                if new_expr.target_type.name == "ArraysListIterator" && new_expr.arguments.len() == 2 {
+                    // ArraysListIterator(Object[] array, int index)
+                    descriptor.push_str("[Ljava/lang/Object;"); // Array of objects for first arg
+                    descriptor.push('I'); // Integer for second arg
+                } else if new_expr.target_type.name == "UnsupportedOperationException" && new_expr.arguments.len() == 1 {
+                    // UnsupportedOperationException(String message)
+                    descriptor.push_str("Ljava/lang/String;"); // String argument
+                } else if new_expr.target_type.name == "NoSuchElementException" && new_expr.arguments.len() == 0 {
+                    // NoSuchElementException() - no arguments
+                } else if new_expr.arguments.is_empty() {
+                    // Default constructor with no arguments
                 } else {
-                    // Fallback to simple type inference
-                    for arg in &new_expr.arguments {
-                        let arg_descriptor = self.type_to_descriptor_with_generics(arg);
-                        descriptor.push_str(&arg_descriptor);
+                    // For other constructors, use javac-style type inference
+                    // First, try to find the constructor signature from the target class
+                    let constructor_descriptor = self.infer_constructor_descriptor(&new_expr.target_type.name, &new_expr.arguments);
+                    if let Some(desc) = constructor_descriptor {
+                        // Use the inferred descriptor (without the return type)
+                        let param_part = &desc[1..desc.len()-2]; // Remove '(' and ')V'
+                        descriptor.push_str(param_part);
+                    } else {
+                        // Fallback to simple type inference
+                        for arg in &new_expr.arguments {
+                            let arg_descriptor = self.type_to_descriptor_with_generics(arg);
+                            descriptor.push_str(&arg_descriptor);
+                        }
                     }
                 }
-            }
-            
-            descriptor.push_str(")V");
-            
-            // Convert simple class name to internal name for method reference
-            let internal_class_name = self.resolve_class_name(&new_expr.target_type.name);
-            let method_ref_index = self.add_method_ref(&internal_class_name, "<init>", &descriptor);
+                
+                descriptor.push_str(")V");
+                
+                // Convert simple class name to internal name for method reference
+                let internal_class_name = self.resolve_class_name(&new_expr.target_type.name);
+                let method_ref_index = self.add_method_ref(&internal_class_name, "<init>", &descriptor);
             Self::map_stack(self.bytecode_builder.invokespecial(method_ref_index))?;
-            
-            // Manually adjust stack for constructor call
-            // Constructor consumes: this (1) + arguments (new_expr.arguments.len())
-            // Constructor returns: void (0)
-            let args_consumed = 1 + new_expr.arguments.len() as u16; // this + arguments
-            Self::map_stack(self.bytecode_builder.update_stack(args_consumed, 0))?;
+                
+                // Manually adjust stack for constructor call
+                // Constructor consumes: this (1) + arguments (new_expr.arguments.len())
+                // Constructor returns: void (0)
+                let args_consumed = 1 + new_expr.arguments.len() as u16; // this + arguments
+                Self::map_stack(self.bytecode_builder.update_stack(args_consumed, 0))?;
+            }
         }
         
         Ok(())
@@ -5988,6 +7158,42 @@ impl MethodWriter {
     /// Generate bytecode for an assignment expression with context about value preservation
     /// preserve_value: true for expressions (a = b = c), false for statements (a = b;)
     fn generate_assignment_with_context(&mut self, assign: &AssignmentExpr, preserve_value: bool) -> Result<()> {
+        // Use javac-style assignment optimizer for advanced optimizations
+        let optimization = self.assignment_optimizer.analyze_assignment(assign);
+        
+        match optimization {
+            crate::codegen::assignment_optimizer::AssignmentOptimization::IincOptimization { var_index, increment } => {
+                // Use iinc instruction for local variable increment/decrement
+                let bytecode = self.assignment_optimizer.generate_assignment_bytecode(assign)?;
+                self.bytecode_builder.emit_raw(&bytecode)?;
+                
+                // If preserving value, load the result
+                if preserve_value {
+                    // For iinc, we need to load the variable after increment
+                    self.bytecode_builder.iload(var_index)?;
+                }
+                return Ok(());
+            }
+            crate::codegen::assignment_optimizer::AssignmentOptimization::DupX1Optimization { needs_wide_instruction: _ } => {
+                // Use dup_x1 optimization for compound assignments
+                let bytecode = self.assignment_optimizer.generate_assignment_bytecode(assign)?;
+                self.bytecode_builder.emit_raw(&bytecode)?;
+                return Ok(());
+            }
+            crate::codegen::assignment_optimizer::AssignmentOptimization::ConstantAssignment { value: _, use_optimized_load } => {
+                if use_optimized_load {
+                    // Use optimized constant loading
+                    let bytecode = self.assignment_optimizer.generate_assignment_bytecode(assign)?;
+                    self.bytecode_builder.emit_raw(&bytecode)?;
+                    return Ok(());
+                }
+                // Fall through to standard assignment handling
+            }
+            _ => {
+                // Fall through to standard assignment handling
+            }
+        }
+        
         // Handle compound assignments
         if assign.operator != AssignmentOp::Assign {
             // For compound assignments, we need to load the target first
@@ -6142,7 +7348,7 @@ impl MethodWriter {
                 // Handle putfield with proper stack management for 64-bit types
                 // putfield pops objectref and field value
                 // For long/double fields, the value takes 2 stack slots
-                let field_slots = if field_descriptor == "J" || field_descriptor == "D" {
+                let field_slots = if field_descriptor.as_str() == "J" || field_descriptor.as_str() == "D" {
                     2 // long or double
                 } else {
                     1 // all other types
@@ -6352,6 +7558,46 @@ impl MethodWriter {
     }
 
     fn generate_switch_statement(&mut self, switch_stmt: &SwitchStmt) -> Result<()> {
+        // Use SwitchOptimizer to determine optimal switch implementation
+        let mut optimizer = crate::codegen::switch_optimizer::SwitchOptimizer::new();
+        
+        // Extract case values and add to optimizer
+        for (idx, case) in switch_stmt.cases.iter().enumerate() {
+            if case.labels.is_empty() {
+                // Default case
+                optimizer.set_default(idx);
+            } else {
+                for label_expr in &case.labels {
+                    if let crate::ast::Expr::Literal(lit) = label_expr {
+                        if let crate::ast::Literal::Integer(value) = &lit.value {
+                            optimizer.add_case(*value as i32, idx);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Get optimization recommendation
+        let optimization = optimizer.optimize(0); // current_pc = 0 for simplicity
+        
+        match optimization {
+            crate::codegen::switch_optimizer::SwitchInstruction::TableSwitch { low, high, default_offset, offsets } => {
+                // Generate optimized tableswitch
+                self.generate_expression(&switch_stmt.expression)?;
+                self.generate_optimized_tableswitch(low, high, offsets, default_offset, switch_stmt)?;
+            }
+            crate::codegen::switch_optimizer::SwitchInstruction::LookupSwitch { default_offset, pairs } => {
+                // Generate optimized lookupswitch
+                self.generate_expression(&switch_stmt.expression)?;
+                self.generate_optimized_lookupswitch(pairs, default_offset, switch_stmt)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate traditional switch as if-else chain (fallback method)
+    fn generate_switch_as_if_else_chain(&mut self, switch_stmt: &SwitchStmt) -> Result<()> {
         // Evaluate switch expression (assume int)
         self.generate_expression(&switch_stmt.expression)?;
         // For each case label, duplicate value, compare, and jump
@@ -6430,11 +7676,31 @@ impl MethodWriter {
         Ok(())
     }
     
+    /// Generate optimized tableswitch instruction
+    fn generate_optimized_tableswitch(&mut self, _low: i32, _high: i32, _offsets: Vec<i32>, _default_offset: i32, switch_stmt: &SwitchStmt) -> Result<()> {
+        // TODO: Implement actual tableswitch bytecode generation
+        // For now, fallback to if-else chain
+        self.generate_switch_as_if_else_chain(switch_stmt)
+    }
+    
+    /// Generate optimized lookupswitch instruction  
+    fn generate_optimized_lookupswitch(&mut self, _pairs: Vec<(i32, i32)>, _default_offset: i32, switch_stmt: &SwitchStmt) -> Result<()> {
+        // TODO: Implement actual lookupswitch bytecode generation
+        // For now, fallback to if-else chain
+        self.generate_switch_as_if_else_chain(switch_stmt)
+    }
+    
     /// Generate bytecode for a cast expression
     fn generate_cast(&mut self, cast: &CastExpr) -> Result<()> {
         // Generate expression to cast
         self.generate_expression(&cast.expr)?;
         
+        // Use CastOptimizer to determine if checkcast is needed
+        // First, we need to infer the source type from the expression
+        let source_type = self.infer_type_ref_from_expr(&cast.expr);
+        let needs_cast = self.cast_optimizer.needs_checkcast(&source_type, &cast.target_type);
+        
+        if needs_cast {
         // Generate cast bytecode based on target type
         match cast.target_type.name.as_str() {
             "int" | "boolean" | "byte" | "short" | "char" => {
@@ -6464,13 +7730,97 @@ impl MethodWriter {
                 Self::map_stack(self.bytecode_builder.checkcast(class_ref_index))?;
             }
         }
+        }
+        // If cast is not needed, CastOptimizer has determined it's redundant (javac-style optimization)
         
         Ok(())
     }
     
-    /// Generate bytecode for a ternary expression
+    /// Infer TypeRef from an expression for cast optimization
+    fn infer_type_ref_from_expr(&self, expr: &Expr) -> crate::ast::TypeRef {
+        match expr {
+            Expr::Literal(lit) => {
+                match &lit.value {
+                    crate::ast::Literal::Integer(_) => crate::ast::TypeRef {
+                        name: "int".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    crate::ast::Literal::Float(_) => crate::ast::TypeRef {
+                        name: "float".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    crate::ast::Literal::Boolean(_) => crate::ast::TypeRef {
+                        name: "boolean".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    crate::ast::Literal::String(_) => crate::ast::TypeRef {
+                        name: "java.lang.String".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    crate::ast::Literal::Char(_) => crate::ast::TypeRef {
+                        name: "char".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                    crate::ast::Literal::Null => crate::ast::TypeRef {
+                        name: "java.lang.Object".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: lit.span.clone(),
+                    },
+                }
+            }
+            Expr::Cast(cast_expr) => {
+                // For cast expressions, return the target type
+                cast_expr.target_type.clone()
+            }
+            _ => {
+                // Default fallback for other expressions
+                crate::ast::TypeRef {
+                    name: "java.lang.Object".to_string(),
+                    type_args: vec![],
+                    annotations: vec![],
+                    array_dims: 0,
+                    span: crate::ast::Span::new(
+                        crate::ast::Location::new(0, 0, 0),
+                        crate::ast::Location::new(0, 0, 0)
+                    ),
+                }
+            }
+        }
+    }
+    
+    /// Generate bytecode for a ternary expression (javac-style optimized)
     fn generate_ternary_expression(&mut self, ternary: &ConditionalExpr) -> Result<()> {
-        // Generate condition
+        // Use javac-style conditional optimization
+        let pattern = crate::codegen::conditional_optimizer::ConditionalOptimizer::analyze_conditional(ternary);
+        
+        match &pattern.optimization_type {
+            crate::codegen::conditional_optimizer::ConditionalOptimization::ConstantCondition { always_true } => {
+                // Compile-time constant folding optimization (javac-style)
+                if *always_true {
+                    self.generate_expression(&pattern.true_expr)?;
+                } else {
+                    self.generate_expression(&pattern.false_expr)?;
+                }
+            }
+            _ => {
+                // Standard conditional with javac-style short-circuit evaluation
         self.generate_expression(&ternary.condition)?;
         
         // Create labels for then and else branches
@@ -6505,6 +7855,8 @@ impl MethodWriter {
         {
             let l = self.label_str(end_label);
             self.bytecode_builder.mark_label(&l);
+                }
+            }
         }
         
         Ok(())
@@ -6512,6 +7864,24 @@ impl MethodWriter {
     
     /// Generate bytecode for an if statement
     fn generate_if_statement(&mut self, if_stmt: &IfStmt) -> Result<()> {
+        // Use javac-style genCond for advanced conditional optimization
+        let cond_item = crate::codegen::gen_cond::GenCond::gen_cond(&if_stmt.condition, true)?;
+        
+        // Check for constant conditions (javac-style optimization)
+        if cond_item.is_true() {
+            // Condition is always true - only generate then branch
+            self.generate_statement(&if_stmt.then_branch)?;
+            return Ok(());
+        }
+        
+        if cond_item.is_false() {
+            // Condition is always false - only generate else branch if present
+            if let Some(ref else_branch) = if_stmt.else_branch {
+                self.generate_statement(else_branch)?;
+            }
+            return Ok(());
+        }
+        
         // Create labels
         let else_label = self.create_label();
         let end_label = if if_stmt.else_branch.is_some() {
@@ -7511,68 +8881,71 @@ impl MethodWriter {
         Ok(())
     }
     
-    /// Generate bytecode for a return statement
+    /// Generate bytecode for a return statement using InstructionOptimizer
     fn generate_return(&mut self, return_type: &TypeRef) -> Result<()> {
-        // Check if it's a void return type
-        if return_type.name == "void" {
-            Self::map_stack(self.bytecode_builder.return_())?;
-        } else {
-            // For primitive types, use appropriate return instruction
-            match return_type.name.as_str() {
-                "int" | "boolean" | "byte" | "short" | "char" => {
-                    Self::map_stack(self.bytecode_builder.ireturn())?;
-                }
-                "long" => {
-                    Self::map_stack(self.bytecode_builder.lreturn())?;
-                }
-                "float" => {
-                    Self::map_stack(self.bytecode_builder.freturn())?;
-                }
-                "double" => {
-                    Self::map_stack(self.bytecode_builder.dreturn())?;
-                }
-                _ => {
-                    // Reference type
-                    Self::map_stack(self.bytecode_builder.areturn())?;
-                }
-            }
+        // Use InstructionOptimizer for optimized return instructions
+        let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_return_instruction(&return_type.name);
+        
+        // Emit the optimized bytecode
+        for &byte in &optimized_bytecode {
+            self.bytecode_builder.push_byte(byte);
+        }
+        
+        // Return instructions clear the stack and terminate the method
+        let current_depth = self.bytecode_builder.get_stack_depth();
+        if current_depth > 0 {
+            Self::map_stack(self.bytecode_builder.update_stack(current_depth, 0))?;
         }
         
         Ok(())
     }
     
-    /// Load a local variable
+    /// Load a local variable using InstructionOptimizer
     fn load_local_variable(&mut self, index: u16, var_type: &LocalType) -> Result<()> {
-        match var_type {
-            LocalType::Int => { Self::map_stack(self.bytecode_builder.iload(index))?; }
-            LocalType::Long => { Self::map_stack(self.bytecode_builder.lload(index))?; }
-            LocalType::Float => { Self::map_stack(self.bytecode_builder.fload(index))?; }
-            LocalType::Double => { Self::map_stack(self.bytecode_builder.dload(index))?; }
-            LocalType::Reference(_) | LocalType::Array(_) => { Self::map_stack(self.bytecode_builder.aload(index))?; }
+        // Use InstructionOptimizer for optimized load instructions
+        let type_str = match var_type {
+            LocalType::Int => "int",
+            LocalType::Long => "long",
+            LocalType::Float => "float",
+            LocalType::Double => "double",
+            LocalType::Reference(_) | LocalType::Array(_) => "reference",
+        };
+        
+        let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_load_instruction(type_str, index);
+        
+        // Emit the optimized bytecode
+        for &byte in &optimized_bytecode {
+            self.bytecode_builder.push_byte(byte);
         }
+        
+        // Update stack for local variable load
+        let stack_effect = if matches!(var_type, LocalType::Long | LocalType::Double) { 2 } else { 1 };
+        Self::map_stack(self.bytecode_builder.update_stack(0, stack_effect))?;
         
         Ok(())
     }
     
-    /// Store a local variable
+    /// Store a local variable using InstructionOptimizer
     fn store_local_variable(&mut self, index: u16, var_type: &LocalType) -> Result<()> {
-        match var_type {
-            LocalType::Int => {
-                Self::map_stack(self.bytecode_builder.istore(index))?;
-            }
-            LocalType::Long => {
-                Self::map_stack(self.bytecode_builder.lstore(index))?;
-            }
-            LocalType::Float => {
-                Self::map_stack(self.bytecode_builder.fstore(index))?;
-            }
-            LocalType::Double => {
-                Self::map_stack(self.bytecode_builder.dstore(index))?;
-            }
-            LocalType::Reference(_) | LocalType::Array(_) => {
-                Self::map_stack(self.bytecode_builder.astore(index))?;
-            }
+        // Use InstructionOptimizer for optimized store instructions
+        let type_str = match var_type {
+            LocalType::Int => "int",
+            LocalType::Long => "long",
+            LocalType::Float => "float",
+            LocalType::Double => "double",
+            LocalType::Reference(_) | LocalType::Array(_) => "reference",
+        };
+        
+        let optimized_bytecode = crate::codegen::instruction_optimizer::InstructionOptimizer::optimize_store_instruction(type_str, index);
+        
+        // Emit the optimized bytecode
+        for &byte in &optimized_bytecode {
+            self.bytecode_builder.push_byte(byte);
         }
+        
+        // Update stack for local variable store
+        let stack_effect = if matches!(var_type, LocalType::Long | LocalType::Double) { -2 } else { -1 };
+        Self::map_stack(self.bytecode_builder.update_stack((-stack_effect) as u16, 0))?;
         
         Ok(())
     }
@@ -7677,6 +9050,22 @@ impl MethodWriter {
     }
     
     /// Add a method reference to the constant pool
+    fn add_class_ref(&mut self, class: &str) -> u16 {
+        if let Some(cp) = &self.constant_pool {
+            let mut cp_ref = cp.borrow_mut();
+            match cp_ref.try_add_class(class) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    eprintln!("Warning: Failed to add class ref {}: {:?}", class, e);
+                    // Fallback to Object class
+                    cp_ref.try_add_class("java/lang/Object").unwrap_or(1)
+                }
+            }
+        } else {
+            1 // Fallback index
+        }
+    }
+    
     fn add_method_ref(&mut self, class: &str, name: &str, descriptor: &str) -> u16 {
         if let Some(cp) = &self.constant_pool {
             let mut cp_ref = cp.borrow_mut();

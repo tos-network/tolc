@@ -59,7 +59,7 @@ impl fmt::Display for ImportDecl {
 }
 
 // Type Declarations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeDecl {
     Class(ClassDecl),
     Interface(InterfaceDecl),
@@ -98,7 +98,7 @@ impl fmt::Display for TypeDecl {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -126,7 +126,7 @@ impl fmt::Display for ClassDecl {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InterfaceDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -171,7 +171,7 @@ pub enum Modifier {
     Default,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
     pub name: String,
     pub arguments: Vec<AnnotationArg>,
@@ -188,14 +188,14 @@ impl AstNode for Annotation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnnotationArg {
     Value(Expr),
     Named(String, Expr),
 }
 
 // Type References
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeRef {
     pub name: String,
     pub type_args: Vec<TypeArg>,
@@ -214,22 +214,22 @@ impl AstNode for TypeRef {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeArg {
     Type(TypeRef),
     Wildcard(WildcardType),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WildcardType {
     pub bound: Option<(BoundKind, TypeRef)>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BoundKind { Extends, Super }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
     pub bounds: Vec<TypeRef>,
@@ -247,7 +247,7 @@ impl AstNode for TypeParam {
 }
 
 // Class and Interface Members
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClassMember {
     Field(FieldDecl),
     Method(MethodDecl),
@@ -256,14 +256,14 @@ pub enum ClassMember {
     TypeDecl(TypeDecl),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InterfaceMember {
     Method(MethodDecl),
     Field(FieldDecl),
     TypeDecl(TypeDecl),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FieldDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -283,7 +283,7 @@ impl AstNode for FieldDecl {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -306,7 +306,7 @@ impl AstNode for MethodDecl {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConstructorDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -328,7 +328,7 @@ impl AstNode for ConstructorDecl {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -338,7 +338,7 @@ pub struct Parameter {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExplicitCtorInvocation {
     This { arg_count: usize },
     Super { arg_count: usize },
@@ -355,7 +355,7 @@ impl AstNode for Parameter {
 }
 
 // Statements and Expressions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub statements: Vec<Stmt>,
     pub span: Span,
@@ -371,7 +371,7 @@ impl AstNode for Block {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Expression(ExprStmt),
     Declaration(VarDeclStmt),
@@ -392,13 +392,13 @@ pub enum Stmt {
     Empty,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExprStmt {
     pub expr: Expr,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarDeclStmt {
     pub modifiers: Vec<Modifier>,
     pub type_ref: TypeRef,
@@ -406,7 +406,7 @@ pub struct VarDeclStmt {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariableDeclarator {
     pub name: String,
     pub array_dims: usize,
@@ -414,7 +414,7 @@ pub struct VariableDeclarator {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IfStmt {
     pub condition: Expr,
     pub then_branch: Box<Stmt>,
@@ -422,14 +422,14 @@ pub struct IfStmt {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WhileStmt {
     pub condition: Expr,
     pub body: Box<Stmt>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ForStmt {
     pub init: Vec<Stmt>,
     pub condition: Option<Expr>,
@@ -438,39 +438,39 @@ pub struct ForStmt {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwitchStmt {
     pub expression: Expr,
     pub cases: Vec<SwitchCase>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwitchCase {
     pub labels: Vec<Expr>, // empty labels indicates default
     pub statements: Vec<Stmt>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReturnStmt {
     pub value: Option<Expr>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BreakStmt {
     pub label: Option<String>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContinueStmt {
     pub label: Option<String>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TryStmt {
     pub resources: Vec<TryResource>,
     pub try_block: Block,
@@ -479,7 +479,7 @@ pub struct TryStmt {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CatchClause {
     pub parameter: Parameter,
     // Additional alternatives for multi-catch: catch (A | B e)
@@ -488,13 +488,13 @@ pub struct CatchClause {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ThrowStmt {
     pub expr: Expr,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TryResource {
     Var {
         modifiers: Vec<Modifier>,
@@ -509,21 +509,21 @@ pub enum TryResource {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssertStmt {
     pub condition: Expr,
     pub message: Option<Expr>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SynchronizedStmt {
     pub lock: Expr,
     pub body: Block,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LabeledStmt {
     pub label: String,
     pub statement: Box<Stmt>,
@@ -531,7 +531,7 @@ pub struct LabeledStmt {
 }
 
 // Expressions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(LiteralExpr),
     Identifier(IdentifierExpr),
@@ -550,13 +550,13 @@ pub enum Expr {
     ArrayInitializer(Vec<Expr>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LiteralExpr {
     pub value: Literal,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Integer(i64),
     Float(f64),
@@ -566,13 +566,13 @@ pub enum Literal {
     Null,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IdentifierExpr {
     pub name: String,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BinaryExpr {
     pub left: Box<Expr>,
     pub operator: BinaryOp,
@@ -580,21 +580,21 @@ pub struct BinaryExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
     Add, Sub, Mul, Div, Mod,
     Lt, Le, Gt, Ge, Eq, Ne,
     And, Or, Xor, LShift, RShift, URShift,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnaryExpr {
     pub operator: UnaryOp,
     pub operand: Box<Expr>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
     Plus, Minus, Not, BitNot, PreInc, PreDec, PostInc, PostDec,
 }
@@ -605,7 +605,7 @@ pub enum AssignmentOp {
     AndAssign, OrAssign, XorAssign, LShiftAssign, RShiftAssign, URShiftAssign,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssignmentExpr {
     pub target: Box<Expr>,
     pub operator: AssignmentOp,
@@ -613,7 +613,7 @@ pub struct AssignmentExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodCallExpr {
     pub target: Option<Box<Expr>>,
     pub name: String,
@@ -621,35 +621,35 @@ pub struct MethodCallExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FieldAccessExpr {
     pub target: Option<Box<Expr>>,
     pub name: String,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArrayAccessExpr {
     pub array: Box<Expr>,
     pub index: Box<Expr>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CastExpr {
     pub target_type: TypeRef,
     pub expr: Box<Expr>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InstanceOfExpr {
     pub expr: Box<Expr>,
     pub target_type: TypeRef,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConditionalExpr {
     pub condition: Box<Expr>,
     pub then_expr: Box<Expr>,
@@ -657,7 +657,7 @@ pub struct ConditionalExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewExpr {
     pub target_type: TypeRef,
     pub arguments: Vec<Expr>,
@@ -666,14 +666,14 @@ pub struct NewExpr {
 }
 
 // Additional structures
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InitializerBlock {
     pub modifiers: Vec<Modifier>,
     pub body: Block,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -684,7 +684,7 @@ pub struct EnumDecl {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumConstant {
     pub name: String,
     pub arguments: Vec<Expr>,
@@ -692,7 +692,7 @@ pub struct EnumConstant {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationDecl {
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<Annotation>,
@@ -701,7 +701,7 @@ pub struct AnnotationDecl {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationMember {
     pub type_ref: TypeRef,
     pub name: String,
