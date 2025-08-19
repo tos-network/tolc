@@ -55,6 +55,10 @@ impl FieldAccessOptimizer {
         constant_fields.insert("SIZE".to_string(), Literal::Integer(32));
         constant_fields.insert("TRUE".to_string(), Literal::Boolean(true));
         constant_fields.insert("FALSE".to_string(), Literal::Boolean(false));
+        
+        // BitSet constants
+        constant_fields.insert("BITS_PER_LONG".to_string(), Literal::Integer(64));
+        constant_fields.insert("BITS_PER_LONG_SHIFT".to_string(), Literal::Integer(6));
 
         // Common static fields
         static_fields.insert("MAX_VALUE".to_string(), true);
@@ -63,6 +67,10 @@ impl FieldAccessOptimizer {
         static_fields.insert("out".to_string(), true);
         static_fields.insert("err".to_string(), true);
         static_fields.insert("in".to_string(), true);
+        
+        // BitSet static fields
+        static_fields.insert("BITS_PER_LONG".to_string(), true);
+        static_fields.insert("BITS_PER_LONG_SHIFT".to_string(), true);
 
         Self {
             constant_fields,
@@ -70,6 +78,11 @@ impl FieldAccessOptimizer {
         }
     }
 
+    /// Get constant value for a field if it exists
+    pub fn get_constant_value(&self, field_name: &str) -> Option<&Literal> {
+        self.constant_fields.get(field_name)
+    }
+    
     /// Analyze field access for optimization (from Gen.visitSelect)
     pub fn analyze_field_access(
         &self,

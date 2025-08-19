@@ -1359,6 +1359,7 @@ impl ClassWriter {
                 };
                 // Evaluate compile-time constant expression if possible
                 let folded = Self::eval_compile_time_constant(init).or_else(|| match init { Expr::Literal(l) => Some(l.value.clone()), _ => None });
+
                 if let Some(val) = folded {
                     match &val {
                         Literal::Integer(i) => {
@@ -1384,6 +1385,7 @@ impl ClassWriter {
                             let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_integer(v) };
                             add_const_attr(self, "Boolean", idx, &mut field_info)?;
                         }
+
                         Literal::String(s) => {
                             let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_string(s) };
                             add_const_attr(self, "String", idx, &mut field_info)?;

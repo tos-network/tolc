@@ -4869,8 +4869,24 @@ impl MethodWriter {
             
                 if is_static_field {
                     eprintln!("🔍 DEBUG: generate_identifier static field access: field_descriptor={}, field_slots={}, owner={}", field_descriptor, field_slots, field_owner);
-                    // Static field access - just push the field value
-                    Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+                    
+                    // Check if this field can be inlined as a constant
+                    let optimizer = crate::codegen::field_access_optimizer::FieldAccessOptimizer::new();
+                    if let Some(constant_value) = optimizer.get_constant_value(ident) {
+                        match constant_value {
+                            crate::ast::Literal::Integer(i) => {
+                                let optimization = crate::codegen::constant_optimizer::ConstantOptimizer::optimize_int(*i as i32);
+                                self.emit_constant_instruction(optimization)?;
+                            }
+                            _ => {
+                                // For other types, fall back to getstatic
+                                Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+                            }
+                        }
+                    } else {
+                        // Regular static field access - just push the field value
+                        Self::map_stack(self.bytecode_builder.getstatic(field_ref_index))?;
+                    }
                 } else {
                     eprintln!("🔍 DEBUG: generate_identifier instance field access: field_descriptor={}, field_slots={}", field_descriptor, field_slots);
                     // Instance field access - load 'this' first
