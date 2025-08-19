@@ -3758,6 +3758,7 @@ impl MethodWriter {
                 self.generate_optimized_while_statement(None, while_stmt)?;
             }
             Stmt::For(for_stmt) => {
+
                 // Use LoopOptimizer for optimized for loop generation
                 self.generate_optimized_for_statement(for_stmt)?;
             }
@@ -3766,6 +3767,7 @@ impl MethodWriter {
                 match &*labeled.statement {
                     Stmt::While(ws) => self.generate_while_statement_labeled(Some(&labeled.label), ws)?,
                     Stmt::For(fs) => {
+
                         // TODO: implement for with labels; fallback to normal generation
                         self.generate_for_statement(fs)?;
                     }
@@ -5651,6 +5653,15 @@ impl MethodWriter {
     
     /// Generate optimized for statement using LoopOptimizer
     fn generate_optimized_for_statement(&mut self, for_stmt: &crate::ast::ForStmt) -> Result<()> {
+        // Check if this is an enhanced for loop (for-each)
+        // Enhanced for loops have: 1 init (var declaration), no condition, no updates
+        if for_stmt.init.len() == 1 && for_stmt.condition.is_none() && for_stmt.update.is_empty() {
+            if let Stmt::Declaration(var_decl) = &for_stmt.init[0] {
+                // This looks like an enhanced for loop
+                return self.generate_enhanced_for_statement(var_decl, &for_stmt.body);
+            }
+        }
+        
         // Generate initialization (javac-style)
         for init_stmt in &for_stmt.init {
             self.generate_statement(init_stmt)?;
@@ -6165,23 +6176,69 @@ impl MethodWriter {
                         }
                     }
                     BinaryOp::Eq => {
-                        // Generate: left == right
-                        self.generate_expression(&bin_expr.left)?;
-                        self.generate_expression(&bin_expr.right)?;
-                        if jump_on_true {
-                            Self::map_stack(self.bytecode_builder.if_icmpeq(label))?;
+                        // Check for null comparison optimization
+                        if self.is_null_literal(&bin_expr.right) {
+                            // left == null
+                            self.generate_expression(&bin_expr.left)?;
+                            if jump_on_true {
+                                // Jump if left == null -> ifnull
+                                Self::map_stack(self.bytecode_builder.ifnull(label))?;
+                            } else {
+                                // Jump if left != null -> ifnonnull
+                                Self::map_stack(self.bytecode_builder.ifnonnull(label))?;
+                            }
+                        } else if self.is_null_literal(&bin_expr.left) {
+                            // null == right
+                            self.generate_expression(&bin_expr.right)?;
+                            if jump_on_true {
+                                // Jump if null == right -> ifnull
+                                Self::map_stack(self.bytecode_builder.ifnull(label))?;
+                            } else {
+                                // Jump if null != right -> ifnonnull
+                                Self::map_stack(self.bytecode_builder.ifnonnull(label))?;
+                            }
                         } else {
-                            Self::map_stack(self.bytecode_builder.if_icmpne(label))?;
+                            // Generate: left == right
+                            self.generate_expression(&bin_expr.left)?;
+                            self.generate_expression(&bin_expr.right)?;
+                            if jump_on_true {
+                                Self::map_stack(self.bytecode_builder.if_icmpeq(label))?;
+                            } else {
+                                Self::map_stack(self.bytecode_builder.if_icmpne(label))?;
+                            }
                         }
                     }
                     BinaryOp::Ne => {
-                        // Generate: left != right
-                        self.generate_expression(&bin_expr.left)?;
-                        self.generate_expression(&bin_expr.right)?;
-                        if jump_on_true {
-                            Self::map_stack(self.bytecode_builder.if_icmpne(label))?;
+                        // Check for null comparison optimization
+                        if self.is_null_literal(&bin_expr.right) {
+                            // left != null
+                            self.generate_expression(&bin_expr.left)?;
+                            if jump_on_true {
+                                // Jump if left != null -> ifnonnull
+                                Self::map_stack(self.bytecode_builder.ifnonnull(label))?;
+                            } else {
+                                // Jump if left == null -> ifnull
+                                Self::map_stack(self.bytecode_builder.ifnull(label))?;
+                            }
+                        } else if self.is_null_literal(&bin_expr.left) {
+                            // null != right
+                            self.generate_expression(&bin_expr.right)?;
+                            if jump_on_true {
+                                // Jump if null != right -> ifnonnull
+                                Self::map_stack(self.bytecode_builder.ifnonnull(label))?;
+                            } else {
+                                // Jump if null == right -> ifnull
+                                Self::map_stack(self.bytecode_builder.ifnull(label))?;
+                            }
                         } else {
-                            Self::map_stack(self.bytecode_builder.if_icmpeq(label))?;
+                            // Generate: left != right
+                            self.generate_expression(&bin_expr.left)?;
+                            self.generate_expression(&bin_expr.right)?;
+                            if jump_on_true {
+                                Self::map_stack(self.bytecode_builder.if_icmpne(label))?;
+                            } else {
+                                Self::map_stack(self.bytecode_builder.if_icmpeq(label))?;
+                            }
                         }
                     }
                     _ => {
@@ -8908,20 +8965,14 @@ impl MethodWriter {
     
     /// Generate bytecode for a for statement
     fn generate_for_statement(&mut self, for_stmt: &ForStmt) -> Result<()> {
-        println!("🔍 DEBUG: generate_for_statement: Starting");
-        
         // Check if this is an enhanced for loop (for-each)
         // Enhanced for loops have: 1 init (var declaration), no condition, no updates
         if for_stmt.init.len() == 1 && for_stmt.condition.is_none() && for_stmt.update.is_empty() {
             if let Stmt::Declaration(var_decl) = &for_stmt.init[0] {
                 // This looks like an enhanced for loop
-                println!("🔍 DEBUG: generate_for_statement: Enhanced for loop detected");
                 return self.generate_enhanced_for_statement(var_decl, &for_stmt.body);
             }
         }
-        
-        // Traditional for loop
-        println!("🔍 DEBUG: generate_for_statement: Traditional for loop");
         
         // Generate initialization statements
         println!("🔍 DEBUG: generate_for_statement: Generating {} init statements", for_stmt.init.len());
@@ -8954,8 +9005,6 @@ impl MethodWriter {
         
         // Generate condition check
         if let Some(cond) = &for_stmt.condition {
-            println!("🔍 DEBUG: generate_for_statement: Generating condition");
-            
             // Check if this is a binary comparison that we can optimize
             if let Expr::Binary(bin_expr) = cond {
                 match bin_expr.operator {
@@ -9056,8 +9105,7 @@ impl MethodWriter {
                 let l = self.label_str(end_label);
                 Self::map_stack(self.bytecode_builder.ifeq(&l))?;
             }
-            
-            println!("🔍 DEBUG: generate_for_statement: Condition generated");
+
         }
         
         // Generate loop body
