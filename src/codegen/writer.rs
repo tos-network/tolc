@@ -193,6 +193,11 @@ impl ClassfileWritable for super::constpool::Constant {
                 buffer.write_all(&[20u8])?; // tag
                 buffer.write_all(&name_index.to_be_bytes())?;
             }
+            Placeholder => {
+                // Placeholder for Long/Double 2-slot requirement - never serialized
+                // This should never be called in normal serialization
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Placeholder constants should not be serialized"));
+            }
         }
         Ok(())
     }

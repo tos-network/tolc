@@ -8162,16 +8162,39 @@ impl MethodWriter {
                 self.generate_expression(&array_access.index)?;
                 eprintln!("🔍 DEBUG: Array assignment: After index, stack_depth={}", self.bytecode_builder.stack_depth());
                 
-                // Then evaluate RHS value
-                self.generate_expression(&assign.value)?;
-                eprintln!("🔍 DEBUG: Array assignment: After value, stack_depth={}", self.bytecode_builder.stack_depth());
-                
-                // Handle type conversion if needed (e.g., int literal to long array)
+                // Then evaluate RHS value with target type awareness
                 let value_type = self.resolve_expression_type(&assign.value);
+                
+                // For long arrays with int literals, generate long constants directly
                 if element_type == "long" && value_type == "int" {
-                    eprintln!("🔍 DEBUG: Array assignment: Converting int to long with i2l");
-                    Self::map_stack(self.bytecode_builder.i2l())?;
+                    if let Expr::Literal(lit_expr) = assign.value.as_ref() {
+                        match &lit_expr.value {
+                            crate::ast::Literal::Integer(0) => {
+                                eprintln!("🔍 DEBUG: Array assignment: Using lconst_0 for long array");
+                                Self::map_stack(self.bytecode_builder.lconst_0())?;
+                            }
+                            crate::ast::Literal::Integer(1) => {
+                                eprintln!("🔍 DEBUG: Array assignment: Using lconst_1 for long array");
+                                Self::map_stack(self.bytecode_builder.lconst_1())?;
+                            }
+                            _ => {
+                                // For other int literals, use normal generation + conversion
+                                self.generate_expression(&assign.value)?;
+                                eprintln!("🔍 DEBUG: Array assignment: Converting int to long with i2l");
+                                Self::map_stack(self.bytecode_builder.i2l())?;
+                            }
+                        }
+                    } else {
+                        // For non-literal expressions, use normal generation + conversion
+                        self.generate_expression(&assign.value)?;
+                        eprintln!("🔍 DEBUG: Array assignment: Converting int to long with i2l");
+                        Self::map_stack(self.bytecode_builder.i2l())?;
+                    }
+                } else {
+                    // Normal expression generation for other cases
+                    self.generate_expression(&assign.value)?;
                 }
+                eprintln!("🔍 DEBUG: Array assignment: After value, stack_depth={}", self.bytecode_builder.stack_depth());
                 
                 // For chained assignments, duplicate the value before store (only if preserve_value is true)
                 if preserve_value {

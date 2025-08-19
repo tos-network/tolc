@@ -28,6 +28,8 @@ pub enum Constant {
     InvokeDynamic(u16, u16),
     Module(u16),
     Package(u16),
+    // Special placeholder for Long/Double 2-slot requirement (never serialized)
+    Placeholder,
 }
 
 mod constant_tags {
@@ -131,6 +133,11 @@ impl Constant {
             Constant::Package(name_index) => {
                 bytes.push(CONSTANT_PACKAGE);
                 bytes.extend_from_slice(&name_index.to_be_bytes());
+            }
+            Constant::Placeholder => {
+                // Placeholder for Long/Double 2-slot requirement - never serialized
+                // This should never be called in normal serialization
+                panic!("Placeholder constants should not be serialized");
             }
         }
         bytes
@@ -390,37 +397,51 @@ impl ConstantPool {
     }
     
     pub fn try_add_long(&mut self, value: i64) -> Result<u16, ConstPoolError> {
-        // Long constants take 2 slots in the constant pool, but we only store one entry
-        // The JVM spec handles the 2-slot indexing automatically
-        self.ensure_space(1)?;
+        // Long constants take 2 slots in the constant pool (javac-style)
+        self.ensure_space(2)?;
+        let index = (self.constants.len() + 1) as u16; // Index before adding
         let constant = Constant::Long(value);
         self.constants.push(constant);
         self.pending.push(None);
-        Ok(self.constants.len() as u16)
+        // Add placeholder for the second slot (javac Pool.java line 115)
+        self.constants.push(Constant::Placeholder); // Never serialized
+        self.pending.push(None);
+        Ok(index)
     }
 
     pub fn add_long(&mut self, value: i64) -> u16 {
+        let index = (self.constants.len() + 1) as u16; // Index before adding
         let constant = Constant::Long(value);
         self.constants.push(constant);
         self.pending.push(None);
-        self.constants.len() as u16  // Indices start at 1
+        // Add placeholder for the second slot (javac Pool.java line 115)
+        self.constants.push(Constant::Placeholder); // Never serialized
+        self.pending.push(None);
+        index
     }
     
     pub fn try_add_double(&mut self, value: f64) -> Result<u16, ConstPoolError> {
-        // Double constants take 2 slots in the constant pool, but we only store one entry
-        // The JVM spec handles the 2-slot indexing automatically
-        self.ensure_space(1)?;
+        // Double constants take 2 slots in the constant pool (javac-style)
+        self.ensure_space(2)?;
+        let index = (self.constants.len() + 1) as u16; // Index before adding
         let constant = Constant::Double(value);
         self.constants.push(constant);
         self.pending.push(None);
-        Ok(self.constants.len() as u16)
+        // Add placeholder for the second slot (javac Pool.java line 115)
+        self.constants.push(Constant::Placeholder); // Never serialized
+        self.pending.push(None);
+        Ok(index)
     }
 
     pub fn add_double(&mut self, value: f64) -> u16 {
+        let index = (self.constants.len() + 1) as u16; // Index before adding
         let constant = Constant::Double(value);
         self.constants.push(constant);
         self.pending.push(None);
-        self.constants.len() as u16  // Indices start at 1
+        // Add placeholder for the second slot (javac Pool.java line 115)
+        self.constants.push(Constant::Placeholder); // Never serialized
+        self.pending.push(None);
+        index
     }
     
     pub fn try_add_method_handle(&mut self, reference_kind: u8, reference_index: u16) -> Result<u16, ConstPoolError> {
@@ -473,10 +494,18 @@ impl ConstantPool {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&((cp.constants.len() + 1) as u16).to_be_bytes());
         
-        // Serialize constants in their original order
+        // Serialize constants in their original order, skipping placeholders
         for constant in &cp.constants {
-            let constant_bytes = constant.to_bytes();
-            bytes.extend_from_slice(&constant_bytes);
+            match constant {
+                Constant::Placeholder => {
+                    // Skip placeholder - it's not a real constant pool entry
+                    continue;
+                }
+                _ => {
+                    let constant_bytes = constant.to_bytes();
+                    bytes.extend_from_slice(&constant_bytes);
+                }
+            }
         }
         
         bytes
@@ -803,6 +832,10 @@ impl ConstantPool {
                 }
                 Constant::Module(n) => { out.push(constant_tags::CONSTANT_MODULE); out.extend_from_slice(&map.get(&n).unwrap_or(&0).to_be_bytes()); }
                 Constant::Package(n) => { out.push(constant_tags::CONSTANT_PACKAGE); out.extend_from_slice(&map.get(&n).unwrap_or(&0).to_be_bytes()); }
+                Constant::Placeholder => {
+                    // Skip placeholder - it's not a real constant pool entry
+                    return;
+                }
             }
         }
 

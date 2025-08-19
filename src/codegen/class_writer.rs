@@ -1392,16 +1392,14 @@ impl ClassWriter {
                             add_const_attr(self, "Boolean", idx, &mut field_info)?;
                         }
 
-                        // TODO: Long and Double ConstantValue support causes class file corruption
-                        // Need to investigate constant pool 2-slot management
-                        // Literal::Long(l) => {
-                        //     let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_long(*l) };
-                        //     add_const_attr(self, "Long", idx, &mut field_info)?;
-                        // }
-                        // Literal::Double(d) => {
-                        //     let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_double(*d) };
-                        //     add_const_attr(self, "Double", idx, &mut field_info)?;
-                        // }
+                        Literal::Long(l) => {
+                            let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_long(*l) };
+                            add_const_attr(self, "Long", idx, &mut field_info)?;
+                        }
+                        Literal::Double(d) => {
+                            let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_double(*d) };
+                            add_const_attr(self, "Double", idx, &mut field_info)?;
+                        }
                         Literal::String(s) => {
                             let idx = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.add_string(s) };
                             add_const_attr(self, "String", idx, &mut field_info)?;
