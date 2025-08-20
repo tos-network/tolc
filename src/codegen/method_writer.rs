@@ -4269,25 +4269,25 @@ impl MethodWriter {
                     // left op 0 - check if we should use lcmp mode for long operands
                     let left_type = self.resolve_expression_type(&binary.left);
                     eprintln!("🔍 DEBUG: Binary expression: left op 0, left_type = '{}'", left_type);
+                    eprintln!("🔍 DEBUG: Binary expression: left expression = {:?}", binary.left);
+                    eprintln!("🔍 DEBUG: Binary expression: is_long_expression = {}", self.is_long_expression(&binary.left));
                     // 🔧 FIX: Also check for long expressions that result from bitwise operations
                     if left_type == "long" || left_type.contains("long") || self.is_long_expression(&binary.left) {
-                        // For long operands, use lcmp mode: lconst_0, lcmp, ifeq/ifne
+                        // For long operands, use lcmp mode: generate expression and let ifeq_typed handle lconst_0+lcmp
                         eprintln!("🔍 DEBUG: Binary expression: Detected long zero comparison, using lcmp mode");
                         self.generate_expression(&binary.left)?;
-                        Self::map_stack(self.bytecode_builder.lconst_0())?;
-                        self.emit_opcode(self.opcode_generator.lcmp());
-                        // Now generate the appropriate conditional jump
+                        // Now generate the appropriate conditional jump (ifeq_typed will handle lconst_0+lcmp automatically)
                         let true_label = self.create_label();
                         let true_label_str = self.label_str(true_label);
                         // 🔧 FIX: Use type-aware conditional jumps for long values
                         let operand_type = "long"; // We know this is a long comparison
                         match binary.operator {
-                            BinaryOp::Eq => Self::map_stack(self.bytecode_builder.ifeq_typed(&true_label_str, operand_type))?,
-                            BinaryOp::Ne => Self::map_stack(self.bytecode_builder.ifne_typed(&true_label_str, operand_type))?,
-                            BinaryOp::Lt => Self::map_stack(self.bytecode_builder.iflt(&true_label_str))?,
-                            BinaryOp::Le => Self::map_stack(self.bytecode_builder.ifle(&true_label_str))?,
-                            BinaryOp::Gt => Self::map_stack(self.bytecode_builder.ifgt(&true_label_str))?,
-                            BinaryOp::Ge => Self::map_stack(self.bytecode_builder.ifge(&true_label_str))?,
+                            BinaryOp::Eq => Self::map_stack(self.bytecode_builder.ifne_typed(&true_label_str, operand_type))?,  // == 0: jump to false if NOT equal
+                            BinaryOp::Ne => Self::map_stack(self.bytecode_builder.ifeq_typed(&true_label_str, operand_type))?,  // != 0: jump to false if equal
+                            BinaryOp::Lt => Self::map_stack(self.bytecode_builder.ifge(&true_label_str))?,  // < 0: jump to false if >= 0
+                            BinaryOp::Le => Self::map_stack(self.bytecode_builder.ifgt(&true_label_str))?,  // <= 0: jump to false if > 0
+                            BinaryOp::Gt => Self::map_stack(self.bytecode_builder.ifle(&true_label_str))?,  // > 0: jump to false if <= 0
+                            BinaryOp::Ge => Self::map_stack(self.bytecode_builder.iflt(&true_label_str))?,  // >= 0: jump to false if < 0
                             _ => unreachable!(),
                         }
                         
@@ -8266,12 +8266,21 @@ impl MethodWriter {
                     _ => false
                 }
             }
+            Expr::ArrayAccess(array_access) => {
+                // 🔧 FIX: Check if array access returns long type (e.g., bits[i] where bits is long[])
+                let array_type = self.resolve_expression_type(&array_access.array);
+                array_type == "long[]" || array_type.contains("long[]")
+            }
             Expr::MethodCall(method_call) => {
                 // Check for methods that return long (like bitPosition)
                 match method_call.name.as_str() {
                     "bitPosition" => true, // bitPosition returns long
                     _ => false
                 }
+            }
+            Expr::Parenthesized(expr) => {
+                // 🔧 FIX: Recursively check parenthesized expressions for long types
+                self.is_long_expression(expr)
             }
             _ => false
         }
