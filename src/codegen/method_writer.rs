@@ -3,6 +3,7 @@
 //! This module handles the conversion of AST method declarations into Java bytecode instructions.
 
 use super::bytecode::*;
+use super::opcodes;
 
 use super::classpath;
 use super::opcode_generator::OpcodeGenerator;    
@@ -4152,6 +4153,13 @@ impl MethodWriter {
         };
         eprintln!("🔍 DEBUG: generate_expression: Starting {}, stack_depth={}", 
                  expr_name, self.bytecode_builder.stack_depth());
+        
+        // Special debug for equal method calls
+        if let Expr::MethodCall(method_call) = expr {
+            if method_call.name == "equal" {
+                eprintln!("🔍 DEBUG: generate_expression: EQUAL METHOD CALL DETECTED at PC {}", self.bytecode_builder.current_pc());
+            }
+        }
         match expr {
             Expr::Literal(lit_expr) => {
                 self.generate_literal_expression(lit_expr)?;
@@ -6835,26 +6843,34 @@ impl MethodWriter {
         test_first: bool,
         _label: Option<&str>
     ) -> Result<()> {
+        println!("🔍 DEBUG: gen_loop called with test_first={}, condition={:?}, step.len()={}", test_first, condition.is_some(), step.len());
+        
         // Create entry point for the loop (javac-style)
         let start_pc = self.bytecode_builder.code().len() as u16;
         
         if test_first {
+            println!("🔍 DEBUG: gen_loop: Generating test-first loop (while/for)");
             // Mark start label for loop
             let start_label = format!("loop_start_{}", start_pc);
             self.bytecode_builder.mark_label(&start_label);
             
             // While or for loop: test condition first
             if let Some(cond) = condition {
+                println!("🔍 DEBUG: gen_loop: Generating condition check: {:?}", cond);
                 // Generate optimized condition check (direct comparison jumps)
                 let end_label = format!("loop_end_{}", start_pc);
                 self.generate_conditional_jump(cond, false, &end_label)?;
+                println!("🔍 DEBUG: gen_loop: Condition check generated successfully");
             }
             
             // Generate loop body
+            println!("🔍 DEBUG: gen_loop: About to generate loop body: {:?}", body);
             self.generate_statement(body)?;
+            println!("🔍 DEBUG: gen_loop: Loop body generated successfully");
             
             // Generate step statements (for for-loops)
-            for step_stmt in step {
+            for (i, step_stmt) in step.iter().enumerate() {
+                println!("🔍 DEBUG: gen_loop: Generating step statement {}: {:?}", i, step_stmt);
                 self.generate_statement(step_stmt)?;
             }
             
@@ -6867,6 +6883,7 @@ impl MethodWriter {
                 self.bytecode_builder.mark_label(&end_label);
             }
         } else {
+            println!("🔍 DEBUG: gen_loop: Generating do-while loop");
             // Do-while loop: execute body first, then test
             let loop_start = format!("do_start_{}", start_pc);
             self.bytecode_builder.mark_label(&loop_start);
@@ -6887,6 +6904,7 @@ impl MethodWriter {
             }
         }
         
+        println!("🔍 DEBUG: gen_loop: Completed successfully");
         Ok(())
     }
 
@@ -10692,30 +10710,31 @@ impl MethodWriter {
         Ok(())
     }
     
-    /// Generate bytecode for an if statement
-    fn generate_if_statement(&mut self, if_stmt: &IfStmt) -> Result<()> {
+    /// Generate bytecode for an if statement (OLD IMPLEMENTATION - TO BE REMOVED)
+    fn generate_if_statement_old(&mut self, if_stmt: &IfStmt) -> Result<()> {
         // Use javac-style genCond for advanced conditional optimization
         // 🔧 FIX: Use the enhanced version that can generate actual bytecode and record real PC values
-        let cond_item = crate::codegen::gen_cond::GenCond::gen_cond_with_bytecode(
-            &if_stmt.condition, 
-            true, 
-            &mut self.bytecode_builder
-        )?;
+        // TEMP: Skip this to avoid duplicate generation
+        // let cond_item = crate::codegen::gen_cond::GenCond::gen_cond_with_bytecode(
+        //     &if_stmt.condition, 
+        //     true, 
+        //     &mut self.bytecode_builder
+        // )?;
         
-        // Check for constant conditions (javac-style optimization)
-        if cond_item.is_true() {
-            // Condition is always true - only generate then branch
-            self.generate_statement(&if_stmt.then_branch)?;
-            return Ok(());
-        }
-        
-        if cond_item.is_false() {
-            // Condition is always false - only generate else branch if present
-            if let Some(ref else_branch) = if_stmt.else_branch {
-                self.generate_statement(else_branch)?;
-            }
-            return Ok(());
-        }
+        // TEMP: Skip constant condition optimization
+        // if cond_item.is_true() {
+        //     // Condition is always true - only generate then branch
+        //     self.generate_statement(&if_stmt.then_branch)?;
+        //     return Ok(());
+        // }
+        // 
+        // if cond_item.is_false() {
+        //     // Condition is always false - only generate else branch if present
+        //     if let Some(ref else_branch) = if_stmt.else_branch {
+        //         self.generate_statement(else_branch)?;
+        //     }
+        //     return Ok(());
+        // }
         
         // 🔧 FIX: Use genCond result for advanced conditional optimization (javac-style)
         // The cond_item contains optimized jump chains and short-circuit evaluation
@@ -10743,7 +10762,9 @@ impl MethodWriter {
         }
         
         // Check if we can optimize null comparisons directly
+        eprintln!("🔍 DEBUG: generate_if_statement: Checking for binary expression optimization");
         if let Expr::Binary(bin_expr) = &if_stmt.condition {
+            eprintln!("🔍 DEBUG: generate_if_statement: Found binary expression: {:?}", bin_expr.operator);
             match bin_expr.operator {
                 BinaryOp::Ne => {
                     // Special handling for long != 0 comparisons in if statements
@@ -11352,7 +11373,7 @@ impl MethodWriter {
         Ok(())
     }
     
-    /// Generate bytecode for a for statement
+    /// Generate bytecode for a for statement (NEW IMPLEMENTATION using gen_loop)
     fn generate_for_statement(&mut self, for_stmt: &ForStmt) -> Result<()> {
         // 🔧 LOOP OPT: Analyze for loop pattern for optimization opportunities
         if let Some(loop_pattern) = LoopOptimizer::analyze_loop_pattern(&Stmt::For(for_stmt.clone())) {
@@ -11383,215 +11404,118 @@ impl MethodWriter {
             println!("🔍 DEBUG: generate_for_statement: Init statement {} completed", i + 1);
         }
         
-        // Create labels for control flow
-        let start_label = self.create_label();  // L_loop (header)
-        let end_label = self.create_label();    // L_after (after-loop)
-        let continue_label = self.create_label(); // L_inc (increment)
+        // Convert update expressions to statements
+        let step_stmts: Vec<Stmt> = for_stmt.update.iter().map(|expr_stmt| {
+            Stmt::Expression(expr_stmt.clone())
+        }).collect();
         
-
+        // Use javac-style unified genLoop for for loops (FIX: This prevents duplicate condition checks)
+        self.gen_loop(
+            &for_stmt.body,
+            for_stmt.condition.as_ref(),
+            &step_stmts,
+            true, // testFirst = true for for loops
+            None
+        )?;
         
-        // Push loop context
-        self.loop_stack.push(LoopContext { 
-            label: None, 
-            continue_label, 
-            break_label: end_label 
-        });
+        Ok(())
+    }
+    
+    /// Generate bytecode for an if statement (NEW IMPLEMENTATION using GenCond)
+    fn generate_if_statement(&mut self, if_stmt: &IfStmt) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond mode for if statement");
         
-        // Mark start label
-        {
-            let l = self.label_str(start_label);
-
-            self.bytecode_builder.mark_label(&l);
+        // Use javac-style genCond for advanced conditional optimization
+        let cond_item = crate::codegen::gen_cond::GenCond::gen_cond_with_bytecode(
+            &if_stmt.condition, 
+            true, 
+            &mut self.bytecode_builder
+        )?;
+        
+        // Check for constant conditions (javac-style optimization)
+        if cond_item.is_true() {
+            eprintln!("🔍 DEBUG: generate_if_statement: Condition is always true, only generating then branch");
+            self.generate_statement(&if_stmt.then_branch)?;
+            return Ok(());
         }
         
-        // Generate condition check
-        if let Some(cond) = &for_stmt.condition {
-            // Check if this is a binary comparison that we can optimize
-            if let Expr::Binary(bin_expr) = cond {
-                match bin_expr.operator {
-                    BinaryOp::Lt => {
-                        // Generate: left < right -> if_icmpge end_label (jump if left >= right)
-                        self.generate_expression(&bin_expr.left)?;
-                        self.generate_expression(&bin_expr.right)?;
-                        let l = self.label_str(end_label);
-                        Self::map_stack(self.bytecode_builder.if_icmpge(&l))?;
-                    }
-                    BinaryOp::Le => {
-                        // Generate: left <= right -> if_icmpgt end_label (jump if left > right)
-                        self.generate_expression(&bin_expr.left)?;
-                        self.generate_expression(&bin_expr.right)?;
-                        let l = self.label_str(end_label);
-                        Self::map_stack(self.bytecode_builder.if_icmpgt(&l))?;
-                    }
-                    BinaryOp::Gt => {
-                        // Generate: left > right -> if_icmple end_label (jump if left <= right)
-                        self.generate_expression(&bin_expr.left)?;
-                        self.generate_expression(&bin_expr.right)?;
-                        let l = self.label_str(end_label);
-                        Self::map_stack(self.bytecode_builder.if_icmple(&l))?;
-                    }
-                    BinaryOp::Ge => {
-                        // Check if we can optimize comparison with zero
-                        if let Expr::Literal(lit_expr) = bin_expr.right.as_ref() {
-                            if let Literal::Integer(0) = &lit_expr.value {
-                                // Optimize: left >= 0 -> iflt end_label (jump if left < 0)
-                                self.generate_expression(&bin_expr.left)?;
-                                let l = self.label_str(end_label);
-                                Self::map_stack(self.bytecode_builder.iflt(&l))?;
-                            } else {
-                                // Generate: left >= right -> if_icmplt end_label (jump if left < right)
-                                self.generate_expression(&bin_expr.left)?;
-                                self.generate_expression(&bin_expr.right)?;
-                                let l = self.label_str(end_label);
-                                Self::map_stack(self.bytecode_builder.if_icmplt(&l))?;
-                            }
-                        } else {
-                            // Generate: left >= right -> if_icmplt end_label (jump if left < right)
-                            self.generate_expression(&bin_expr.left)?;
-                            self.generate_expression(&bin_expr.right)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.if_icmplt(&l))?;
-                        }
-                    }
-                    BinaryOp::Eq => {
-                        // Check for null comparison optimization
-                        if self.is_null_literal(&bin_expr.right) {
-                            // left == null -> ifnonnull end_label (jump if left != null)
-                            self.generate_expression(&bin_expr.left)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.ifnonnull(&l))?;
-                        } else if self.is_null_literal(&bin_expr.left) {
-                            // null == right -> ifnonnull end_label (jump if right != null)
-                            self.generate_expression(&bin_expr.right)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.ifnonnull(&l))?;
-                        } else {
-                            // Generate: left == right -> if_icmpne end_label (jump if left != right)
-                            self.generate_expression(&bin_expr.left)?;
-                            self.generate_expression(&bin_expr.right)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.if_icmpne(&l))?;
-                        }
-                    }
-                    BinaryOp::Ne => {
-                        // Check for null comparison optimization
-                        if self.is_null_literal(&bin_expr.right) {
-                            // left != null -> ifnull end_label (jump if left == null)
-                            self.generate_expression(&bin_expr.left)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.ifnull(&l))?;
-                        } else if self.is_null_literal(&bin_expr.left) {
-                            // null != right -> ifnull end_label (jump if right == null)
-                            self.generate_expression(&bin_expr.right)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.ifnull(&l))?;
-                        } else {
-                            // Generate: left != right -> if_icmpeq end_label (jump if left == right)
-                            self.generate_expression(&bin_expr.left)?;
-                            self.generate_expression(&bin_expr.right)?;
-                            let l = self.label_str(end_label);
-                            Self::map_stack(self.bytecode_builder.if_icmpeq(&l))?;
-                        }
-                    }
-                    _ => {
-                        // Fall back to the old approach for non-comparison operators
-            self.generate_expression(cond)?;
-            let l = self.label_str(end_label);
+        if cond_item.is_false() {
+            eprintln!("🔍 DEBUG: generate_if_statement: Condition is always false, only generating else branch if present");
+            if let Some(ref else_branch) = if_stmt.else_branch {
+                self.generate_statement(else_branch)?;
+            }
+            return Ok(());
+        }
+        
+        // Create labels for the if statement
+        let else_label = self.create_label();
+        let end_label = if if_stmt.else_branch.is_some() {
+            self.create_label() // Separate end label if there's an else branch
+        } else {
+            else_label // Use the same label if no else branch
+        };
+        
+        // Generate the condition using GenCond result
+        // First, generate the condition expression to get the boolean result on stack
+        eprintln!("🔍 DEBUG: generate_if_statement: Generating condition expression");
+        self.generate_expression(&if_stmt.condition)?;
+        
+        // Then use the GenCond result to determine the jump logic
+        if let Some(jump_chain) = cond_item.jump_false() {
+            // Use the jump chain from GenCond for optimized conditional jumps
+            eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond jump chain for false branch with opcode: {}", cond_item.opcode);
+            // Generate the conditional jump based on the opcode from GenCond
+            let l = self.label_str(else_label);
+            match cond_item.opcode {
+                opcodes::IFEQ => {
+                    // Jump to else if condition is false (0)
+                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                }
+                opcodes::IFNE => {
+                    // Jump to else if condition is true (non-zero) - this is inverted logic
+                    Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                }
+                _ => {
+                    // Default fallback
+                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                }
+            }
+        } else {
+            // Fallback: generate the condition expression and use ifeq
+            eprintln!("🔍 DEBUG: generate_if_statement: Fallback to traditional condition generation");
+            let l = self.label_str(else_label);
             Self::map_stack(self.bytecode_builder.ifeq(&l))?;
-                    }
-                }
-            } else {
-                // Fall back to the old approach for non-binary expressions
-                self.generate_expression(cond)?;
-                let l = self.label_str(end_label);
-                Self::map_stack(self.bytecode_builder.ifeq(&l))?;
-            }
-
         }
         
-        // Generate loop body
-        println!("🔍 DEBUG: generate_for_statement: About to generate loop body");
-        self.generate_statement(&for_stmt.body)?;
-        println!("🔍 DEBUG: generate_for_statement: Loop body generated");
+        // Generate then branch
+        eprintln!("🔍 DEBUG: generate_if_statement: Generating then branch");
+        self.generate_statement(&if_stmt.then_branch)?;
         
-        // Mark continue label at the increment location
-        {
-            let l = self.label_str(continue_label);
-
-            self.bytecode_builder.mark_label(&l);
-        }
-        
-        // Generate updates (increment) with enhanced increment_optimizer integration
-        for upd in &for_stmt.update {
-            println!("🔧 INCREMENT OPT: Processing for loop update: {:?}", upd.expr);
-            
-            // Try to optimize increment operations using increment_optimizer
-            if let Expr::Assignment(assign_expr) = &upd.expr {
-                if let (Expr::Identifier(ident), AssignmentOp::AddAssign) = (&*assign_expr.target, &assign_expr.operator) {
-                    // Check if this is a simple constant increment: i += constant
-                    if let Expr::Literal(lit) = &*assign_expr.value {
-                        if let Some(local_var) = self.find_local_variable(&ident.name) {
-                            if let LocalType::Int = local_var.var_type {
-                                // Try to extract the constant value
-                                if let Some(constant_value) = self.extract_int_literal(lit) {
-                                    println!("🔧 INCREMENT OPT: For loop constant increment: {} += {}", ident.name, constant_value);
-                                    // Use iinc instruction for i += constant
-                                    let iinc_bytes = self.opcode_generator.iinc(local_var.index, constant_value as i16);
-                                    for byte in iinc_bytes {
-                                        self.bytecode_builder.push_instruction(byte);
-                                    }
-                                    continue; // Skip the generic expression generation
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // Check for PreInc/PreDec operations and optimize them using increment_optimizer
-            else if let Expr::Unary(unary_expr) = &upd.expr {
-                if let Expr::Identifier(ident) = unary_expr.operand.as_ref() {
-                    if let Some(local_var) = self.find_local_variable(&ident.name) {
-                        // Create VariableInfo for increment_optimizer
-                        let variable_info = self.create_variable_info_from_local_var(local_var);
-                        
-                        // Analyze with increment_optimizer for enhanced optimization
-                        let pattern = self.increment_optimizer.analyze_unary_increment(unary_expr, &variable_info);
-                        println!("🔧 INCREMENT OPT: For loop unary increment pattern: {:?}", pattern);
-                        
-                        // Apply optimization based on pattern
-                        self.apply_increment_optimization(&pattern, &variable_info)?;
-                        continue; // Skip the generic expression generation
-                    }
-                }
-            }
-            
-            // Fall back to generic expression generation
-            // For assignments in for-loop updates, don't preserve the value
-            if let Expr::Assignment(assign_expr) = &upd.expr {
-                self.generate_assignment_with_context(assign_expr, false)?; // false = don't preserve value
-            } else {
-            self.generate_expression(&upd.expr)?;
-            Self::map_stack(self.bytecode_builder.pop())?;
-            }
-        }
-        
-        // Loop back to start
-        {
-            let l = self.label_str(start_label);
-
+        // Jump to end if there's an else branch AND the then branch doesn't end with terminal instruction
+        if if_stmt.else_branch.is_some() && !self.statement_ends_with_terminal(&if_stmt.then_branch) && self.bytecode_builder.is_alive() {
+            let l = self.label_str(end_label);
             Self::map_stack(self.bytecode_builder.goto(&l))?;
         }
         
-        // Mark end label
+        // Mark else label
         {
-            let l = self.label_str(end_label);
-
+            let l = self.label_str(else_label);
             self.bytecode_builder.mark_label(&l);
         }
         
-        // Pop loop context
-        self.loop_stack.pop();
+        // Generate else branch if present
+        if let Some(ref else_branch) = if_stmt.else_branch {
+            eprintln!("🔍 DEBUG: generate_if_statement: Generating else branch");
+            self.generate_statement(else_branch)?;
+        }
         
+        // Mark end label if needed
+        if if_stmt.else_branch.is_some() {
+            let l = self.label_str(end_label);
+            self.bytecode_builder.mark_label(&l);
+        }
+        
+        eprintln!("🔍 DEBUG: generate_if_statement: If statement completed successfully");
         Ok(())
     }
     
