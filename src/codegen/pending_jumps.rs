@@ -137,10 +137,16 @@ impl PendingJumpsManager {
             // Calculate offsets for all jumps in the chain
             for jump in &mut chain.jumps {
                 if !jump.resolved {
-                    // Calculate the offset from jump instruction's offset field to target
-                    // JVM jump offset is relative to the offset field (PC + 1), not the end of instruction
-                    let offset_field_pc = jump.pc + 1; // Skip opcode, point to offset field
-                    let offset = target_pc as i32 - offset_field_pc as i32;
+                // 🔧 FIX: Use javac's offset calculation method: target_pc - instruction_pc
+                // This differs from the JVM specification formula: target_pc - (instruction_pc + 1)
+                // javac's approach is simpler and avoids the need for the +1 adjustment
+                let instruction_pc = jump.pc; // instruction_pc is the opcode position
+                let offset = target_pc as i32 - instruction_pc as i32;
+                
+                eprintln!("🔍 DEBUG: PendingJumps: Resolving jump at PC {} to target {} (offset: {})", 
+                         jump.pc, target_pc, offset);
+                eprintln!("🔍 DEBUG: PendingJumps: instruction_pc={}, target_pc={}, calculated_offset={}", 
+                         instruction_pc, target_pc, offset);
                     
                     patch_locations.push((jump.pc, offset));
                     jump.resolved = true;

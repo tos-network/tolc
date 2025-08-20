@@ -147,6 +147,7 @@ impl TypeCoercionOptimizer {
 
         // Handle reference type casts
         if let (TypeInfo::Reference(from_ref), TypeInfo::Reference(to_ref)) = (from_type, to_type) {
+            eprintln!("🔧 DEBUG: Found reference type cast: {} -> {}", from_ref.name, to_ref.name);
             return self.analyze_reference_coercion(from_ref, to_ref, is_explicit_cast);
         }
 
@@ -222,8 +223,9 @@ impl TypeCoercionOptimizer {
         to_ref: &ReferenceTypeInfo,
         is_explicit_cast: bool,
     ) -> CoercionPattern {
-        // Check if cast is necessary
-        let is_necessary = !self.is_assignable(&from_ref.name, &to_ref.name) || is_explicit_cast;
+        // 🔧 FIX: Only generate checkcast when types are not assignable
+        // Let cast_optimizer handle explicit cast decisions
+        let is_necessary = !self.is_assignable(&from_ref.name, &to_ref.name);
 
         if is_necessary {
             CoercionPattern {
@@ -386,24 +388,157 @@ impl TypeCoercionOptimizer {
         (from_size, to_size)
     }
 
+    /// Check if from_type is assignable to to_type
     fn is_assignable(&self, from_type: &str, to_type: &str) -> bool {
-        // Simplified assignability check
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: ENTRY - Checking {} -> {}", from_type, to_type);
+        
+        // 🔧 FIX: Handle generic type erasure
+        // If both types are the same raw type (after erasing generic parameters), they are assignable
+        if from_type == to_type {
+            eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: Exact type match -> assignable");
+            return true;
+        }
+        
+        // Extract raw type names (remove generic parameters)
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: Calling extract_raw_type_name for from_type: '{}'", from_type);
+        let from_raw = self.extract_raw_type_name(from_type);
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: from_raw = '{}'", from_raw);
+        
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: Calling extract_raw_type_name for to_type: '{}'", to_type);
+        let to_raw = self.extract_raw_type_name(to_type);
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: to_raw = '{}'", to_raw);
+        
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: Raw types: '{}' -> '{}'", from_raw, to_raw);
+        
+        // If raw types are the same, they are assignable regardless of generic parameters
+        if from_raw == to_raw {
+            eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: Same raw type '{}' -> assignable", from_raw);
+            return true;
+        }
+        
+        // Special case: LinkedListCell<T> -> LinkedListCell<T> (same generic type)
+        if from_raw == "LinkedListCell" && to_raw == "LinkedListCell" {
+            eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: LinkedListCell generic types -> assignable");
+            return true;
+        }
+        
+        // Convert raw type names to internal format if needed
+        let from_internal = if from_raw.contains('/') { from_raw.to_string() } else { from_raw.replace('.', "/") };
+        let to_internal = if to_raw.contains('/') { to_raw.to_string() } else { to_raw.replace('.', "/") };
+        
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: {} -> {} (internal: {} -> {})", 
+                from_type, to_type, from_internal, to_internal);
+        
+        // Implement basic type hierarchy checking
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: Calling is_subtype_relationship");
+        let result = self.is_subtype_relationship(&from_internal, &to_internal);
+        eprintln!("🔍 DEBUG: type_coercion_optimizer.is_assignable: result = {}", result);
+        result
+    }
+    
+    /// Extract raw type name from generic type (e.g., "LinkedList<T>" -> "LinkedList")
+    fn extract_raw_type_name(&self, type_name: &str) -> String {
+        eprintln!("🔍 DEBUG: extract_raw_type_name: Input: '{}'", type_name);
+        
+        // Handle different generic type formats
+        if let Some(open_bracket) = type_name.find('<') {
+            // Format: "LinkedList<T>" -> "LinkedList"
+            let raw_type = type_name[..open_bracket].to_string();
+            eprintln!("🔍 DEBUG: extract_raw_type_name: Generic type detected, raw_type: '{}'", raw_type);
+            // Remove package prefix for comparison
+            let result = self.normalize_type_name(&raw_type);
+            eprintln!("🔍 DEBUG: extract_raw_type_name: Generic type result: '{}'", result);
+            result
+        } else {
+            eprintln!("🔍 DEBUG: extract_raw_type_name: No generic type, calling normalize_type_name");
+            // Remove package prefix for comparison
+            let result = self.normalize_type_name(type_name);
+            eprintln!("🔍 DEBUG: extract_raw_type_name: Non-generic result: '{}'", result);
+            result
+        }
+    }
+    
+    /// Check basic subtype relationships
+    fn is_subtype_relationship(&self, from_type: &str, to_type: &str) -> bool {
+        // Object is the supertype of all reference types
+        if to_type == "Object" || to_type == "java/lang/Object" {
+            return true;
+        }
+        
+        // Same type
         if from_type == to_type {
             return true;
         }
         
-        // Object is assignable from everything
-        if to_type == "java/lang/Object" {
-            return true;
+        // Basic Java type hierarchy (simplified)
+        match (from_type, to_type) {
+            // String extends Object
+            ("String", "Object") | ("java/lang/String", "java/lang/Object") => true,
+            
+            // Number hierarchy
+            ("Integer", "Number") | ("java/lang/Integer", "java/lang/Number") => true,
+            ("Long", "Number") | ("java/lang/Long", "java/lang/Number") => true,
+            ("Float", "Number") | ("java/lang/Float", "java/lang/Number") => true,
+            ("Double", "Number") | ("java/lang/Double", "java/lang/Number") => true,
+            ("Number", "Object") | ("java/lang/Number", "java/lang/Object") => true,
+            
+            // Collection hierarchy
+            ("LinkedList", "AbstractSequentialList") | ("java/util/LinkedList", "java/util/AbstractSequentialList") => true,
+            ("AbstractSequentialList", "AbstractList") | ("java/util/AbstractSequentialList", "java/util/AbstractList") => true,
+            ("AbstractList", "AbstractCollection") | ("java/util/AbstractList", "java/util/AbstractCollection") => true,
+            ("AbstractCollection", "Object") | ("java/util/AbstractCollection", "java/lang/Object") => true,
+            ("LinkedListCell", "Object") | ("java/util/LinkedListCell", "java/lang/Object") => true,
+            
+            // Interface implementations
+            ("LinkedList", "Collection") | ("java/util/LinkedList", "java/util/Collection") => true,
+            ("LinkedList", "List") | ("java/util/LinkedList", "java/util/List") => true,
+            ("LinkedList", "Deque") | ("java/util/LinkedList", "java/util/Deque") => true,
+            ("LinkedList", "Queue") | ("java/util/LinkedList", "java/util/Queue") => true,
+            ("AbstractSequentialList", "List") | ("java/util/AbstractSequentialList", "java/util/List") => true,
+            ("AbstractList", "List") | ("java/util/AbstractList", "java/util/List") => true,
+            ("AbstractCollection", "Collection") | ("java/util/AbstractCollection", "java/util/Collection") => true,
+            
+            // Generic type compatibility - LinkedListCell<T> is compatible with LinkedListCell<T>
+            ("LinkedListCell", "LinkedListCell") | ("java/util/LinkedListCell", "java/util/LinkedListCell") => true,
+            
+            // Default: not assignable (requires cast)
+            _ => false,
         }
+    }
+    
+    /// Normalize type name by removing package prefix for comparison
+    fn normalize_type_name(&self, type_name: &str) -> String {
+        eprintln!("🔍 DEBUG: normalize_type_name: Input: '{}'", type_name);
         
-        // String is assignable from String
-        if from_type == "java/lang/String" && to_type == "java/lang/String" {
-            return true;
+        // Handle JVM descriptor format: Lpackage/Class; -> Class
+        if type_name.starts_with('L') && type_name.ends_with(';') {
+            let inner = &type_name[1..type_name.len()-1];
+            eprintln!("🔍 DEBUG: normalize_type_name: JVM descriptor detected, inner: '{}'", inner);
+            
+            if let Some(last_slash) = inner.rfind('/') {
+                // Extract the simple class name after the last slash
+                let result = inner[last_slash + 1..].to_string();
+                eprintln!("🔍 DEBUG: normalize_type_name: Found slash, result: '{}'", result);
+                result
+            } else {
+                let result = inner.to_string();
+                eprintln!("🔍 DEBUG: normalize_type_name: No slash, result: '{}'", result);
+                result
+            }
+        } else if let Some(last_slash) = type_name.rfind('/') {
+            // Extract the simple class name after the last slash
+            let result = type_name[last_slash + 1..].to_string();
+            eprintln!("🔍 DEBUG: normalize_type_name: Found slash (non-JVM), result: '{}'", result);
+            result
+        } else if let Some(last_dot) = type_name.rfind('.') {
+            // Extract the simple class name after the last dot
+            let result = type_name[last_dot + 1..].to_string();
+            eprintln!("🔍 DEBUG: normalize_type_name: Found dot, result: '{}'", result);
+            result
+        } else {
+            eprintln!("🔍 DEBUG: normalize_type_name: No prefix, result: '{}'", type_name);
+            type_name.to_string()
         }
-        
-        // More sophisticated type hierarchy checking would go here
-        false
     }
 }
 

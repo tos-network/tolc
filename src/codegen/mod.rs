@@ -7,7 +7,6 @@ pub mod annotation;
 pub mod assignment_optimizer;
 pub mod attribute;
 pub mod bytecode;
-pub mod cast_optimizer;
 pub mod chain;
 pub mod class;
 pub mod complexity_analyzer;
@@ -59,6 +58,7 @@ pub mod type_coercion_optimizer;
 pub mod typed_index;
 pub mod vec;
 pub mod writer;
+
 
 
 // Re-export commonly used types

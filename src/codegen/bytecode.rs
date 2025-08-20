@@ -606,11 +606,11 @@ impl BytecodeBuilder {
         let current_pc_u16 = self.code.len() as u16;
         let current_pc = current_pc_u16 as i32;
 
-        
-
+        println!("🔍 DEBUG: mark_label: Marking label '{}' at current PC {} (code length: {})", label, current_pc, self.code.len());
         
         // Store this label as marked for backward reference resolution
         self.marked_labels.insert(label.to_string(), current_pc_u16);
+        println!("🔍 DEBUG: mark_label: Stored label '{}' at PC {} in marked_labels", label, current_pc_u16);
         
         // Update all references to this label
         let mut resolved_indices = Vec::new();
@@ -624,15 +624,21 @@ impl BytecodeBuilder {
                 let corrected_offset_i32 = current_pc - instruction_pc_i32;
                 let offset_i16 = corrected_offset_i32 as i16;
 
+                println!("🔍 DEBUG: mark_label: Resolving forward reference - label '{}' referenced at PC {}, target PC {}, offset: {} - {} = {} (i16: {})", 
+                        ref_label, instruction_pc_i32, current_pc, current_pc, instruction_pc_i32, corrected_offset_i32, offset_i16);
+
                 // Update the offset at instruction_pc + 1 (position where offset bytes start)
                 let offset_bytes = offset_i16.to_be_bytes();
                 let start = (*ref_pc + 1) as usize;
                 self.code[start] = offset_bytes[0];
                 self.code[start + 1] = offset_bytes[1];
+                println!("🔍 DEBUG: mark_label: Updated offset bytes at positions {} and {}: {:?}", start, start + 1, offset_bytes);
                 // Mark this reference as resolved
                 resolved_indices.push(i);
             }
         }
+        
+        println!("🔍 DEBUG: mark_label: Resolved {} forward references for label '{}'", resolved_indices.len(), label);
         
         // Remove resolved references (in reverse order to maintain indices)
         for &index in resolved_indices.iter().rev() {
@@ -1326,10 +1332,12 @@ impl BytecodeBuilder {
     pub fn goto(&mut self, label: &str) -> Result<(), StackError> {
         // Only process if code should be emitted (javac-style)
         if self.should_emit() {
+            println!("🔍 DEBUG: goto: Generating goto instruction to label '{}' at PC {}", label, self.code.len());
             // Emit only the opcode, add_label_reference will handle the offset
             self.code.push(crate::codegen::opcodes::GOTO);
             self.add_label_reference(label);
             self.mark_dead_after_terminal(); // Mark subsequent code as unreachable (javac-style)
+            println!("🔍 DEBUG: goto: Goto instruction generated, current code length: {}", self.code.len());
         }
         Ok(())
     }
@@ -1802,7 +1810,7 @@ impl BytecodeBuilder {
         // so the instruction pc is (current len - 1)
         let instruction_pc = (self.code.len() as u16).saturating_sub(1);
 
-
+        println!("🔍 DEBUG: add_label_reference: Adding reference to label '{}' at instruction PC {}", label, instruction_pc);
         
         // Check if this label has already been marked (backward reference)
         if let Some(&target_pc) = self.marked_labels.get(label) {
@@ -1815,12 +1823,16 @@ impl BytecodeBuilder {
             let corrected_offset_i32 = target_pc_i32 - instruction_pc_i32;
             let offset_i16 = corrected_offset_i32 as i16;
 
+            println!("🔍 DEBUG: add_label_reference: Backward reference - label '{}' already marked at PC {}, calculating offset: {} - {} = {}", 
+                    label, target_pc, target_pc_i32, instruction_pc_i32, corrected_offset_i32);
+
             // Write the offset directly
             let offset_bytes = offset_i16.to_be_bytes();
             self.code.push(offset_bytes[0]);
             self.code.push(offset_bytes[1]);
         } else {
             // Forward reference - add to pending list
+            println!("🔍 DEBUG: add_label_reference: Forward reference - label '{}' not yet marked, adding to pending list at PC {}", label, instruction_pc);
             self.labels.push((label.to_string(), instruction_pc));
             // Emit placeholder signed 16-bit offset (to be backpatched in mark_label)
             self.emit_short(0);

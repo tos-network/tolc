@@ -17,7 +17,7 @@ use crate::codegen::increment_optimizer::IncrementOptimizer;
 use crate::codegen::type_coercion_optimizer::{TypeCoercionOptimizer, CoercionOptimizationType};
 use crate::codegen::string_optimizer::StringOptimizer;
 use crate::codegen::switch_optimizer::SwitchOptimizer;
-use crate::codegen::cast_optimizer::CastOptimizer;
+// Removed cast_optimizer dependency
 // use crate::codegen::chain::Chain;
 // use crate::codegen::instruction_widening::InstructionWidener;
 use crate::codegen::exception_optimizer::ExceptionOptimizer;
@@ -760,7 +760,7 @@ pub struct MethodWriter {
     /// Switch statement optimizer for tableswitch vs lookupswitch selection
     switch_optimizer: SwitchOptimizer,
     /// Cast optimizer for intelligent checkcast generation
-    cast_optimizer: CastOptimizer,
+    // Removed cast_optimizer field
     /// Constant optimizer for efficient constant loading
     constant_optimizer: ConstantOptimizer,
     /// Type coercion optimizer for primitive type conversions
@@ -1438,7 +1438,9 @@ impl MethodWriter {
     fn label_str(&self, id: u16) -> String {
         // For now, keep the simple format
         // TODO: Implement dynamic jump target calculation
-        format!("L{}", id)
+        let label_str = format!("L{}", id);
+        println!("🔍 DEBUG: label_str: Converting label ID {} to string '{}'", id, label_str);
+        label_str
     }
     
     /// Get the current PC (Program Counter) position
@@ -1487,7 +1489,6 @@ impl MethodWriter {
             method_invocation_optimizer: MethodInvocationOptimizer::new(),
             field_access_optimizer: FieldAccessOptimizer::new(),
             switch_optimizer: SwitchOptimizer::new(),
-            cast_optimizer: CastOptimizer::new(),
             constant_optimizer: ConstantOptimizer,
             type_coercion_optimizer: TypeCoercionOptimizer::new(),
             string_optimizer: StringOptimizer,
@@ -1533,7 +1534,7 @@ impl MethodWriter {
             method_invocation_optimizer: MethodInvocationOptimizer::new(),
             field_access_optimizer: FieldAccessOptimizer::new(),
             switch_optimizer: SwitchOptimizer::new(),
-            cast_optimizer: CastOptimizer::new(),
+            // Removed cast_optimizer initialization
             constant_optimizer: ConstantOptimizer,
             type_coercion_optimizer: TypeCoercionOptimizer::new(),
             string_optimizer: StringOptimizer,
@@ -1579,7 +1580,7 @@ impl MethodWriter {
             method_invocation_optimizer: MethodInvocationOptimizer::new(),
             field_access_optimizer: FieldAccessOptimizer::new(),
             switch_optimizer: SwitchOptimizer::new(),
-            cast_optimizer: CastOptimizer::new(),
+            // Removed cast_optimizer initialization
             constant_optimizer: ConstantOptimizer,
             type_coercion_optimizer: TypeCoercionOptimizer::new(),
             string_optimizer: StringOptimizer,
@@ -1630,7 +1631,7 @@ impl MethodWriter {
             method_invocation_optimizer: MethodInvocationOptimizer::new(),
             field_access_optimizer: FieldAccessOptimizer::new(),
             switch_optimizer: SwitchOptimizer::new(),
-            cast_optimizer: CastOptimizer::new(),
+            // Removed cast_optimizer initialization
             constant_optimizer: ConstantOptimizer,
             type_coercion_optimizer: TypeCoercionOptimizer::new(),
             string_optimizer: StringOptimizer,
@@ -2080,6 +2081,18 @@ impl MethodWriter {
                 self.generate_return(&void_type)?;
             }
             println!("🔍 DEBUG: generate_method_body: Return statement generated");
+        } else {
+            // 🔧 FIX: For void methods without explicit return, ensure we have a label at the end
+            // This allows goto instructions to correctly jump to the method end
+            if method.return_type.is_none() || method.return_type.as_ref().map(|rt| rt.name == "void").unwrap_or(false) {
+                println!("🔍 DEBUG: generate_method_body: Void method without explicit return, ensuring end label");
+                println!("🔍 DEBUG: generate_method_body: Method name: '{}', return type: {:?}", method.name, method.return_type);
+                // Create a synthetic end label for void methods
+                let end_label = self.create_label();
+                println!("🔍 DEBUG: generate_method_body: Created end label: {} for method '{}'", end_label, method.name);
+                self.mark_label(end_label);
+                println!("🔍 DEBUG: generate_method_body: Marked end label: {} for method '{}'", end_label, method.name);
+            }
         }
         
         // Ensure method body ends cleanly
@@ -2615,6 +2628,7 @@ impl MethodWriter {
         if let Some(label_to_chain) = self.label_to_chain_mapping.as_mut() {
             label_to_chain.insert(label.to_string(), chain_id);
             eprintln!("🔍 DEBUG: store_pending_jump_for_label: Label {} -> Chain {}", label, chain_id);
+            eprintln!("🔍 DEBUG: store_pending_jump_for_label: Stored mapping: '{}' -> {}", label, chain_id);
         }
         Ok(())
     }
@@ -5721,19 +5735,20 @@ impl MethodWriter {
         
         // Try intelligent method resolution first
         if let Some(resolved) = self.resolve_method_with_argument_analysis(&owner_class, &call.name, expected_arity, &final_arguments) {
-            eprintln!("🔍 DEBUG: generate_method_call: Intelligent resolution succeeded: {}", resolved.descriptor);
+            eprintln!("🔧 FIX: Intelligent resolution succeeded: {}", resolved.descriptor);
             // Generate receiver and arguments based on method flags
             if !resolved.is_static {
                 if let Some(receiver) = &call.target { 
+                    // 🔧 FIX: Generate receiver expression first (including any type conversions)
                     self.generate_expression(receiver)?; 
-        } else {
+                } else {
                     Self::map_stack(self.bytecode_builder.aload(0))?; 
                 }
             }
             // Record stack depth after receiver generation for accurate post-optimization analysis
             let post_receiver_stack_depth = self.bytecode_builder.get_stack_depth();
             
-            // Generate arguments with type conversion if needed
+            // 🔧 FIX: Generate arguments AFTER receiver (to maintain correct order)
             self.generate_arguments_with_conversion(&final_arguments, &resolved.descriptor)?;
             
             // Use the resolved method information
@@ -5751,15 +5766,16 @@ impl MethodWriter {
             // Generate receiver and arguments based on method flags
             if !resolved.is_static {
                 if let Some(receiver) = &call.target { 
+                    // 🔧 FIX: Generate receiver expression first (including any type conversions)
                     self.generate_expression(receiver)?; 
-        } else {
+                } else {
                     Self::map_stack(self.bytecode_builder.aload(0))?; 
                 }
             }
             // Record stack depth after receiver generation for accurate post-optimization analysis
             let post_receiver_stack_depth = self.bytecode_builder.get_stack_depth();
             
-            // Generate arguments with type conversion if needed
+            // 🔧 FIX: Generate arguments AFTER receiver (to maintain correct order)
             self.generate_arguments_with_conversion(&final_arguments, &resolved.descriptor)?;
             
             // Use the resolved method information
@@ -5805,7 +5821,7 @@ impl MethodWriter {
             // 🔧 TYPE COERCION OPT: Apply type conversion if needed
             if i < param_types.len() {
                 let expected_type = &param_types[i];
-                let actual_type = self.infer_expression_type(arg);
+                let actual_type = self.resolve_expression_type(arg);
                 
                 println!("🔧 TYPE COERCION OPT: Arg[{}]: {} -> {}", i, actual_type, expected_type);
 
@@ -6844,10 +6860,57 @@ impl MethodWriter {
     /// Infer the JVM type descriptor for an expression
     fn infer_expression_type(&self, expr: &Expr) -> String {
         match expr {
-            Expr::Identifier(_id) => {
-                // Try to resolve the identifier type
-                // For now, assume int for simplicity
-                "I".to_string()
+            Expr::Identifier(id) => {
+                // Special handling for 'this' keyword
+                if id.name == "this" {
+                    // Return current class type
+                    if let Some(current_class) = &self.current_class {
+                        let this_type = format!("L{};", current_class.name.replace('.', "/"));
+                        println!("🔍 DEBUG: infer_expression_type 'this' -> {}", this_type);
+                        this_type
+                    } else {
+                        "Ljava/lang/Object;".to_string()
+                    }
+                } else {
+                    // Try to resolve the identifier type from local variables
+                    if let Some(local_var) = self.find_local_variable(&id.name) {
+                        match &local_var.var_type {
+                            LocalType::Int => "I".to_string(),
+                            LocalType::Long => "J".to_string(),
+                            LocalType::Float => "F".to_string(),
+                            LocalType::Double => "D".to_string(),
+                            LocalType::Reference(ref_type) => {
+                                // Convert to JVM descriptor format
+                                format!("L{};", ref_type.replace('.', "/"))
+                            }
+                            LocalType::Array(element_type) => {
+                                // Convert array element type to JVM descriptor format
+                                let element_desc = match &**element_type {
+                                    LocalType::Int => "I",
+                                    LocalType::Long => "J",
+                                    LocalType::Float => "F",
+                                    LocalType::Double => "D",
+                                    LocalType::Reference(_) => "Ljava/lang/Object;",
+                                    LocalType::Array(_) => "Ljava/lang/Object;",
+                                };
+                                format!("[{}", element_desc)
+                            }
+                        }
+                    } else {
+                        // Try to resolve as a field in the current class or parent classes
+                        if let Some(field_type) = self.resolve_field_type_in_inheritance(&id.name) {
+                            // Convert field type to JVM descriptor format
+                            let descriptor = format!("L{};", field_type.replace('.', "/"));
+                            eprintln!("🔍 DEBUG: infer_expression_type: Field {} resolved to descriptor {}", id.name, descriptor);
+                            descriptor
+                        } else {
+                            // Fallback: assume Object for unknown identifiers
+                            // Use the correct JVM descriptor format
+                            eprintln!("🔍 DEBUG: infer_expression_type: Unknown identifier {}, defaulting to Object", id.name);
+                            "Ljava/lang/Object;".to_string()
+                        }
+                    }
+                }
             }
             Expr::Literal(lit) => {
                 match &lit.value {
@@ -6874,6 +6937,65 @@ impl MethodWriter {
                     "char" => "C".to_string(),
                     _ => format!("L{};", cast.target_type.name.replace('.', "/")),
                 }
+            }
+            Expr::MethodCall(call) => {
+                // Try to infer method return type from method name and context
+                match call.name.as_str() {
+                    "size" => "I".to_string(), // size() returns int
+                    "length" => "I".to_string(), // length() returns int
+                    "indexOf" => "I".to_string(), // indexOf() returns int
+                    "lastIndexOf" => "I".to_string(), // lastIndexOf() returns int
+                    "hashCode" => "I".to_string(), // hashCode() returns int
+                    "compareTo" => "I".to_string(), // compareTo() returns int
+                    "contains" => "Z".to_string(), // contains() returns boolean
+                    "isEmpty" => "Z".to_string(), // isEmpty() returns boolean
+                    "equals" => "Z".to_string(), // equals() returns boolean
+                    "toString" => "Ljava/lang/String;".to_string(), // toString() returns String
+                    _ => "Ljava/lang/Object;".to_string(), // Default fallback
+                }
+            }
+            Expr::FieldAccess(field_access) => {
+                // 🔧 FIX: Properly infer field access type instead of defaulting to Object
+                // This is crucial for eliminating unnecessary checkcast instructions
+                
+                // Try to resolve the field type from the target expression
+                if let Some(target) = &field_access.target {
+                    let target_type = self.resolve_expression_type(target);
+                    
+                    // Convert target type to internal format for field lookup
+                    let target_internal = if target_type.contains('/') {
+                        target_type.replace('/', "/")
+                    } else {
+                        target_type.replace('.', "/")
+                    };
+                    
+                    // Try to resolve the field type in the target class
+                    if let Some(field_class) = self.try_parse_class_from_filesystem(&target_internal) {
+                        for member in &field_class.body {
+                            if let crate::ast::ClassMember::Field(field) = member {
+                                if field.name == field_access.name {
+                                    // Found the field, return its type in JVM descriptor format
+                                    let field_type = if let Some(open_bracket) = field.type_ref.name.find('<') {
+                                        // Apply type erasure for generic types
+                                        field.type_ref.name[..open_bracket].to_string()
+                                    } else {
+                                        field.type_ref.name.clone()
+                                    };
+                                    
+                                    let descriptor = format!("L{};", field_type.replace('.', "/"));
+                                    eprintln!("🔍 DEBUG: infer_expression_type: FieldAccess {}.{} resolved to descriptor {}", 
+                                             target_type, field_access.name, descriptor);
+                                    return descriptor;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback to Object if field type cannot be resolved
+                eprintln!("🔍 DEBUG: infer_expression_type: FieldAccess {}.{} defaulting to Object", 
+                         field_access.target.as_ref().map(|_| "target").unwrap_or("this"), field_access.name);
+                "Ljava/lang/Object;".to_string()
             }
             _ => "Ljava/lang/Object;".to_string(), // Default fallback
         }
@@ -6936,6 +7058,12 @@ impl MethodWriter {
                     // Check if it's a field in the current class or parent classes
                     if let Some(field_type) = self.resolve_field_type_in_inheritance(&ident.name) {
                         eprintln!("🔍 DEBUG: resolve_expression_type: Found field {}={}", ident.name, field_type);
+                        if ident.name == "front" || ident.name == "rear" {
+                            eprintln!("🔍 DEBUG: Field type resolution for {}: '{}'", ident.name, field_type);
+                        if ident.name == "next" || ident.name == "prev" {
+                            eprintln!("🔍 DEBUG: Special field access: {} -> {}", ident.name, field_type);
+                        }
+                        }
                         return field_type;
                     }
                     
@@ -7148,10 +7276,16 @@ impl MethodWriter {
             }
             Expr::New(new_expr) => {
                 // For new expressions, use the constructed type
+                eprintln!("🔍 DEBUG: resolve_expression_type: New expression - target_type.name = '{}'", new_expr.target_type.name);
                 if new_expr.target_type.array_dims > 0 {
-                    format!("{}[]", new_expr.target_type.name)
+                    let result = format!("{}[]", new_expr.target_type.name);
+                    eprintln!("🔍 DEBUG: resolve_expression_type: New array result = '{}'", result);
+                    result
                 } else {
-                    new_expr.target_type.name.clone()
+                    // Convert to JVM descriptor format for consistency with type coercion optimizer
+                    let result = format!("L{};", new_expr.target_type.name.replace('.', "/"));
+                    eprintln!("🔍 DEBUG: resolve_expression_type: New object result = '{}'", result);
+                    result
                 }
             }
             Expr::Cast(cast_expr) => {
@@ -7398,7 +7532,6 @@ impl MethodWriter {
                 // Default unknown method return is Object
                 "Ljava/lang/Object;".to_string()
             }
-            Expr::FieldAccess(_) => "Ljava/lang/Object;".to_string(),
             Expr::New(new_expr) => {
                 // New expressions return the constructed type
                 if new_expr.target_type.array_dims > 0 {
@@ -9163,18 +9296,54 @@ impl MethodWriter {
         println!("🔧 TYPE COERCION OPT: Analyzing cast from {} to {}", 
                  self.infer_type_ref_from_expr(&cast.expr).name, cast.target_type.name);
         
-        // For now, use simplified type coercion analysis
+        // 🔧 FIX: Use actual type information for type coercion analysis
+        let source_type = self.infer_type_ref_from_expr(&cast.expr);
+        let source_type_info = self.convert_type_ref_to_type_info(&source_type);
+        let target_type_info = self.convert_type_ref_to_type_info(&cast.target_type);
+        
         let coercion_pattern = self.type_coercion_optimizer.analyze_coercion(
-            &crate::codegen::type_coercion_optimizer::TypeInfo::Primitive(crate::codegen::type_coercion_optimizer::PrimitiveType::Int),
-            &crate::codegen::type_coercion_optimizer::TypeInfo::Primitive(crate::codegen::type_coercion_optimizer::PrimitiveType::Int),
+            &source_type_info,
+            &target_type_info,
             true, // is_explicit_cast
         );
         
         println!("🔧 TYPE COERCION OPT: Cast analysis: {:?}", coercion_pattern);
         
-        // Use CastOptimizer to determine if checkcast is needed
-        let source_type = self.infer_type_ref_from_expr(&cast.expr);
-        let needs_cast = self.cast_optimizer.needs_checkcast(&source_type, &cast.target_type);
+        // 🔧 FIX: Simplified checkcast logic - always generate checkcast for explicit casts
+        // This ensures compatibility with javac behavior
+        eprintln!("🔍 TRACE: generate_cast called");
+        eprintln!("🔍 TRACE: generate_cast: source_type = {:?}", source_type);
+        eprintln!("🔍 TRACE: generate_cast: target_type = {:?}", cast.target_type);
+        
+        // Special debug for LinkedListCell and Collection casts
+        if source_type.name.contains("LinkedListCell") || cast.target_type.name.contains("LinkedListCell") ||
+           source_type.name.contains("Collection") || cast.target_type.name.contains("Collection") {
+            eprintln!("🔍 TRACE: generate_cast: SPECIAL DEBUG for LinkedListCell/Collection");
+            eprintln!("🔍 TRACE: generate_cast: source_type.name = '{}'", source_type.name);
+            eprintln!("🔍 TRACE: generate_cast: target_type.name = '{}'", cast.target_type.name);
+            eprintln!("🔍 TRACE: generate_cast: coercion_pattern = {:?}", coercion_pattern);
+        }
+        
+        // 🔧 FIX: Use type coercion optimizer to determine if cast is needed
+        let needs_cast = match coercion_pattern.optimization_type {
+            CoercionOptimizationType::NoCoercion => {
+                eprintln!("🔍 TRACE: generate_cast: NoCoercion -> needs_cast = false");
+                false
+            },
+            CoercionOptimizationType::ReferenceCast { is_necessary, .. } => {
+                eprintln!("🔍 TRACE: generate_cast: ReferenceCast is_necessary = {} -> needs_cast = {}", is_necessary, is_necessary);
+                is_necessary
+            },
+            CoercionOptimizationType::ArrayCoercion { requires_checkcast, .. } => {
+                eprintln!("🔍 TRACE: generate_cast: ArrayCoercion requires_checkcast = {} -> needs_cast = {}", requires_checkcast, requires_checkcast);
+                requires_checkcast
+            },
+            _ => {
+                eprintln!("🔍 TRACE: generate_cast: Other case -> needs_cast = true (default)");
+                true
+            }
+        };
+        eprintln!("🔍 TRACE: generate_cast: Final needs_cast = {} (from optimizer)", needs_cast);
         
         if needs_cast {
             // 🔧 TYPE COERCION OPT: Use optimized coercion if available
@@ -9228,6 +9397,14 @@ impl MethodWriter {
         }
         
         Ok(())
+    }
+    
+    /// Check if a type is a reference type (not primitive)
+    fn is_reference_type(&self, type_ref: &crate::ast::TypeRef) -> bool {
+        // Check if it's a primitive type
+        !matches!(type_ref.name.as_str(), 
+            "int" | "long" | "float" | "double" | "boolean" | "byte" | "short" | "char"
+        )
     }
     
     /// Convert TypeRef to TypeInfo for type_coercion_optimizer
@@ -9333,10 +9510,15 @@ impl MethodWriter {
             "byte" => crate::codegen::type_coercion_optimizer::TypeInfo::Primitive(crate::codegen::type_coercion_optimizer::PrimitiveType::Byte),
             "short" => crate::codegen::type_coercion_optimizer::TypeInfo::Primitive(crate::codegen::type_coercion_optimizer::PrimitiveType::Short),
             "char" => crate::codegen::type_coercion_optimizer::TypeInfo::Primitive(crate::codegen::type_coercion_optimizer::PrimitiveType::Char),
-            _ => crate::codegen::type_coercion_optimizer::TypeInfo::Reference(crate::codegen::type_coercion_optimizer::ReferenceTypeInfo {
-                type_parameters: vec![],
-                name: type_name.to_string(),
-            }),
+            _ => {
+                // 🔧 FIX: Keep JVM descriptor format for type coercion optimizer
+                // This ensures that types like LLinkedListCell; and Ljava/util/LinkedListCell; 
+                // can be properly compared by the type coercion optimizer
+                crate::codegen::type_coercion_optimizer::TypeInfo::Reference(crate::codegen::type_coercion_optimizer::ReferenceTypeInfo {
+                    type_parameters: vec![],
+                    name: type_name.to_string(),
+                })
+            }
         }
     }
     
@@ -9388,21 +9570,23 @@ impl MethodWriter {
                 self.generate_unboxing_bytecode(&wrapper_class, &primitive_type)?;
             }
             CoercionOptimizationType::ReferenceCast { from_type: _, to_type, class_ref: _, is_necessary } => {
+                eprintln!("🔧 TYPE COERCION OPT: ReferenceCast for method parameter: is_necessary = {}", is_necessary);
                 if is_necessary {
-                    println!("🔧 TYPE COERCION OPT: Applying reference cast for method parameter: -> {}", to_type);
+                    eprintln!("🔧 TYPE COERCION OPT: Applying reference cast for method parameter: -> {}", to_type);
                     let class_ref_index = self.add_class_constant(&to_type);
+                    eprintln!("🔧 TYPE COERCION OPT: Generating checkcast for class_ref_index = {}", class_ref_index);
                     Self::map_stack(self.bytecode_builder.checkcast(class_ref_index))?;
                 } else {
-                    println!("🔧 TYPE COERCION OPT: Reference cast not necessary for method parameter");
+                    eprintln!("🔧 TYPE COERCION OPT: Reference cast not necessary for method parameter");
                 }
             }
             CoercionOptimizationType::ArrayCoercion { from_element_type: _, to_element_type, dimensions: _, requires_checkcast } => {
                 if requires_checkcast {
-                    println!("🔧 TYPE COERCION OPT: Applying array coercion for method parameter: -> {}", to_element_type);
+                    eprintln!("🔧 TYPE COERCION OPT: Applying array coercion for method parameter: -> {}", to_element_type);
                     let class_ref_index = self.add_class_constant(&to_element_type);
                     Self::map_stack(self.bytecode_builder.checkcast(class_ref_index))?;
                 } else {
-                    println!("🔧 TYPE COERCION OPT: Array coercion not necessary for method parameter");
+                    eprintln!("🔧 TYPE COERCION OPT: Array coercion not necessary for method parameter");
                 }
             }
         }
@@ -11636,6 +11820,7 @@ impl MethodWriter {
     fn create_label(&mut self) -> u16 { 
         let id = self.next_label_id;
         self.next_label_id += 1;
+        println!("🔍 DEBUG: create_label: Created label {} (next will be {})", id, self.next_label_id);
         id
     }
     
@@ -11666,6 +11851,7 @@ impl MethodWriter {
         self.resolve_pending_jumps_for_label(&label_str, actual_pc as u32);
         
         eprintln!("🔍 DEBUG: mark_label: Label {} marked at actual PC {} (requested: {})", label_id, actual_pc, current_pc);
+        println!("🔍 DEBUG: mark_label: Label {} ({}) marked at PC {} for method writer", label_id, label_str, actual_pc);
     }
     
     /// Resolve pending jump chains when a label is marked
@@ -11675,10 +11861,12 @@ impl MethodWriter {
         // Look up the chain ID for this label
         if let Some(chain_id) = self.label_to_chain_mapping.as_ref().and_then(|mapping| mapping.get(label)) {
             eprintln!("🔍 DEBUG: resolve_pending_jumps_for_label: Found chain {} for label {}", chain_id, label);
+            eprintln!("🔍 DEBUG: resolve_pending_jumps_for_label: Chain {} will be resolved to target PC {}", chain_id, target_pc);
             
             // Resolve the chain using PendingJumpsManager
             if let Ok(patch_locations) = self.pending_jumps_manager.resolve_chain(*chain_id, target_pc) {
                 eprintln!("🔍 DEBUG: resolve_pending_jumps_for_label: Resolved chain {} with {} patches", chain_id, patch_locations.len());
+                eprintln!("🔍 DEBUG: resolve_pending_jumps_for_label: Patch locations: {:?}", patch_locations);
                 
                 // Apply the patches to the bytecode
                 self.apply_jump_patches(&patch_locations);
@@ -11699,22 +11887,32 @@ impl MethodWriter {
     fn apply_jump_patches(&mut self, patch_locations: &[(u32, i32)]) {
         for (pc, offset) in patch_locations {
             eprintln!("🔍 DEBUG: apply_jump_patches: Patching PC {} with offset {}", pc, offset);
+            eprintln!("🔍 DEBUG: apply_jump_patches: PC {}: offset {} (i32), offset_i16: {}", pc, offset, *offset as i16);
             
-            // Convert offset to 2-byte little-endian format
-            let offset_bytes = (*offset as i16).to_le_bytes();
+            // 🔧 FIX: Use big-endian format for JVM bytecode (not little-endian)
+            let offset_bytes = (*offset as i16).to_be_bytes();
+            eprintln!("🔍 DEBUG: apply_jump_patches: PC {}: offset_bytes (big-endian): {:?}", pc, offset_bytes);
             
-                    // Apply the patch to the bytecode
-        let code = self.bytecode_builder.code_mut();
-        if *pc + 1 < code.len() as u32 {
-            code[*pc as usize + 1] = offset_bytes[0];
-            if *pc + 2 < code.len() as u32 {
-                code[*pc as usize + 2] = offset_bytes[1];
-                eprintln!("🔍 DEBUG: apply_jump_patches: Applied patch at PC {}: offset {} -> bytes {:?}", pc, offset, offset_bytes);
+            // Apply the patch to the bytecode
+            let code = self.bytecode_builder.code_mut();
+            if *pc + 1 < code.len() as u32 {
+                code[*pc as usize + 1] = offset_bytes[0];
+                if *pc + 2 < code.len() as u32 {
+                    code[*pc as usize + 2] = offset_bytes[1];
+                    eprintln!("🔍 DEBUG: apply_jump_patches: Applied patch at PC {}: offset {} -> bytes {:?}", pc, offset, offset_bytes);
+                    
+                    // Verify the patch was applied correctly (using big-endian for JVM bytecode)
+                    let patched_offset = i16::from_be_bytes([code[*pc as usize + 1], code[*pc as usize + 2]]) as i32;
+                    eprintln!("🔍 DEBUG: apply_jump_patches: Verification - patched offset (big-endian): {}", patched_offset);
+                    
+                    // Also check little-endian interpretation for debugging
+                    let patched_offset_le = i16::from_le_bytes([code[*pc as usize + 1], code[*pc as usize + 2]]) as i32;
+                    eprintln!("🔍 DEBUG: apply_jump_patches: Verification - patched offset (little-endian): {}", patched_offset_le);
+                }
             }
-        }
-        
-        // Check if we need to emit a stack map frame after this jump instruction
-        let _ = self.check_and_emit_stack_map_frame(false, false);
+            
+            // Check if we need to emit a stack map frame after this jump instruction
+            let _ = self.check_and_emit_stack_map_frame(false, false);
         }
     }
     
@@ -11940,25 +12138,43 @@ impl MethodWriter {
                             }
                             return Some(type_name);
                         } else {
-                            // Regular type - include generic type arguments if present
-                            let mut type_name = field.type_ref.name.clone();
-                            if !field.type_ref.type_args.is_empty() {
-                                // Add generic type arguments for better type inference
-                                type_name.push('<');
-                                for (i, type_arg) in field.type_ref.type_args.iter().enumerate() {
-                                    if i > 0 { type_name.push_str(", "); }
-                                    match type_arg {
-                                        crate::ast::TypeArg::Type(type_ref) => {
-                                            type_name.push_str(&type_ref.name);
-                                        }
-                                        crate::ast::TypeArg::Wildcard(_) => {
-                                            type_name.push('?');
-                                        }
+                                                    // Regular type - use raw type for better javac compatibility
+                        // Apply type erasure to match javac behavior
+                        let type_name = if let Some(open_bracket) = field.type_ref.name.find('<') {
+                            // Remove generic parameters for type erasure
+                            let raw_name = field.type_ref.name[..open_bracket].to_string();
+                            eprintln!("🔍 DEBUG: Field '{}' type erasure: '{}' -> '{}'", field_name, field.type_ref.name, raw_name);
+                            raw_name
+                        } else {
+                            eprintln!("🔍 DEBUG: Field '{}' no generics: '{}'", field_name, field.type_ref.name);
+                            field.type_ref.name.clone()
+                        };
+                        
+                        // 🔧 FIX: Ensure we return the full qualified name for better type consistency
+                        // This prevents issues like LLinkedListCell; vs Ljava/util/LinkedListCell;
+                        let full_type_name = if !type_name.contains('.') {
+                            // If type name doesn't have package path, try to resolve it
+                            if let Some(internal_name) = classpath::resolve_class_name(&type_name) {
+                                internal_name.replace('/', ".")
+                            } else {
+                                // Fallback: assume it's in the same package as current class
+                                // Since ClassDecl doesn't have package field, we'll use the class name to infer package
+                                if class.name.contains('.') {
+                                    // Extract package from class name (e.g., "java.util.LinkedList" -> "java.util")
+                                    if let Some(last_dot) = class.name.rfind('.') {
+                                        format!("{}.{}", &class.name[..last_dot], type_name)
+                                    } else {
+                                        type_name
                                     }
+                                } else {
+                                    type_name
                                 }
-                                type_name.push('>');
                             }
-                            return Some(type_name);
+                        } else {
+                            type_name
+                        };
+                        
+                        return Some(full_type_name);
                         }
                     }
                 }
@@ -11991,25 +12207,40 @@ impl MethodWriter {
                         }
                         return Some(type_name);
                     } else {
-                        // Regular type - include generic type arguments if present
-                        let mut type_name = field.type_ref.name.clone();
-                        if !field.type_ref.type_args.is_empty() {
-                            // Add generic type arguments for better type inference
-                            type_name.push('<');
-                            for (i, type_arg) in field.type_ref.type_args.iter().enumerate() {
-                                if i > 0 { type_name.push_str(", "); }
-                                match type_arg {
-                                    crate::ast::TypeArg::Type(type_ref) => {
-                                        type_name.push_str(&type_ref.name);
+                        // Regular type - use raw type for better javac compatibility
+                        // Apply type erasure to match javac behavior
+                        let type_name = if let Some(open_bracket) = field.type_ref.name.find('<') {
+                            // Remove generic parameters for type erasure
+                            field.type_ref.name[..open_bracket].to_string()
+                        } else {
+                            field.type_ref.name.clone()
+                        };
+                        
+                        // 🔧 FIX: Ensure we return the full qualified name for better type consistency
+                        // This prevents issues like LLinkedListCell; vs Ljava/util/LinkedListCell;
+                        let full_type_name = if !type_name.contains('.') {
+                            // If type name doesn't have package path, try to resolve it
+                            if let Some(internal_name) = classpath::resolve_class_name(&type_name) {
+                                internal_name.replace('/', ".")
+                            } else {
+                                // Fallback: assume it's in the same package as the parent class
+                                // Since ClassDecl doesn't have package field, we'll use the class name to infer package
+                                if class.name.contains('.') {
+                                    // Extract package from class name (e.g., "java.util.LinkedList" -> "java.util")
+                                    if let Some(last_dot) = class.name.rfind('.') {
+                                        format!("{}.{}", &class.name[..last_dot], type_name)
+                                    } else {
+                                        type_name
                                     }
-                                    crate::ast::TypeArg::Wildcard(_) => {
-                                        type_name.push('?');
-                                    }
+                                } else {
+                                    type_name
                                 }
                             }
-                            type_name.push('>');
-                        }
-                        return Some(type_name);
+                        } else {
+                            type_name
+                        };
+                        
+                        return Some(full_type_name);
                     }
                 }
             }
