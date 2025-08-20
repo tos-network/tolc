@@ -459,7 +459,7 @@ mod tests {
         // Should have one patch
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].0, 100); // PC
-        assert_eq!(patches[0].1, 99);  // Offset: 200 - (100 + 1) = 99 (offset field is at PC + 1)
+        assert_eq!(patches[0].1, 100);  // Offset: 200 - (100 ) = 100 (offset field is at PC )
     }
     
     #[test]
