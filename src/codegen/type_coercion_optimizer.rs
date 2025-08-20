@@ -94,8 +94,12 @@ impl TypeCoercionOptimizer {
         to_type: &TypeInfo,
         is_explicit_cast: bool,
     ) -> CoercionPattern {
+        eprintln!("🔍 DEBUG: analyze_coercion: ENTRY - from_type: {:?}, to_type: {:?}, is_explicit_cast: {}", 
+                 from_type, to_type, is_explicit_cast);
+        
         // Handle same types
         if self.types_equal(from_type, to_type) {
+            eprintln!("🔍 DEBUG: analyze_coercion: Same types -> NoCoercion");
             return CoercionPattern {
                 optimization_type: CoercionOptimizationType::NoCoercion,
                 stack_effect: (0, 0),
@@ -105,6 +109,7 @@ impl TypeCoercionOptimizer {
 
         // Handle primitive type conversions
         if let (TypeInfo::Primitive(from_prim), TypeInfo::Primitive(to_prim)) = (from_type, to_type) {
+            eprintln!("🔍 DEBUG: analyze_coercion: Primitive types -> analyze_primitive_coercion");
             return self.analyze_primitive_coercion(from_prim, to_prim, is_explicit_cast);
         }
 
@@ -226,6 +231,24 @@ impl TypeCoercionOptimizer {
         // 🔧 FIX: Only generate checkcast when types are not assignable
         // Let cast_optimizer handle explicit cast decisions
         let is_necessary = !self.is_assignable(&from_ref.name, &to_ref.name);
+
+        // 🔧 FIX: Special handling for primitive types to avoid unnecessary checkcast
+        // Only check for actual primitive type descriptors, not type names
+        if from_ref.name == "I" || from_ref.name == "J" || 
+           from_ref.name == "F" || from_ref.name == "D" ||
+           from_ref.name == "Z" || from_ref.name == "B" ||
+           from_ref.name == "S" || from_ref.name == "C" ||
+           to_ref.name == "I" || to_ref.name == "J" ||
+           to_ref.name == "F" || to_ref.name == "D" ||
+           to_ref.name == "Z" || to_ref.name == "B" ||
+           to_ref.name == "S" || to_ref.name == "C" {
+            eprintln!("🔍 DEBUG: analyze_reference_coercion: Primitive type descriptor detected, no checkcast needed");
+            return CoercionPattern {
+                optimization_type: CoercionOptimizationType::NoCoercion,
+                stack_effect: (0, 0),
+                estimated_cost: 0,
+            };
+        }
 
         if is_necessary {
             CoercionPattern {

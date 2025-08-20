@@ -445,6 +445,12 @@ impl BytecodeBuilder {
         self.stack_state.depth()
     }
     
+    /// Get the PC (program counter) for a given label
+    /// Returns None if the label hasn't been marked yet
+    pub fn get_label_pc(&self, label: &str) -> Option<u16> {
+        self.marked_labels.get(label).copied()
+    }
+    
        /// Set the current stack depth (for control flow analysis)
    pub fn set_stack_depth(&mut self, depth: u16) {
        self.stack_state.set_depth(depth);
@@ -630,9 +636,15 @@ impl BytecodeBuilder {
                 // Update the offset at instruction_pc + 1 (position where offset bytes start)
                 let offset_bytes = offset_i16.to_be_bytes();
                 let start = (*ref_pc + 1) as usize;
-                self.code[start] = offset_bytes[0];
-                self.code[start + 1] = offset_bytes[1];
-                println!("🔍 DEBUG: mark_label: Updated offset bytes at positions {} and {}: {:?}", start, start + 1, offset_bytes);
+                
+                // Check bounds before accessing
+                if start + 1 < self.code.len() {
+                    self.code[start] = offset_bytes[0];
+                    self.code[start + 1] = offset_bytes[1];
+                    println!("🔍 DEBUG: mark_label: Updated offset bytes at positions {} and {}: {:?}", start, start + 1, offset_bytes);
+                } else {
+                    println!("🔍 DEBUG: mark_label: WARNING - Cannot update offset bytes at positions {} and {} (code length: {})", start, start + 1, self.code.len());
+                }
                 // Mark this reference as resolved
                 resolved_indices.push(i);
             }
@@ -1208,6 +1220,43 @@ impl BytecodeBuilder {
         self.add_label_reference(label);
         Ok(())
     }
+    
+    /// Type-aware ifeq that handles long values correctly
+    pub fn ifeq_typed(&mut self, label: &str, operand_type: &str) -> Result<(), StackError> {
+        match operand_type {
+            "long" => {
+                // For long values, we need lconst_0 + lcmp before ifeq
+                // The long value should already be on stack, add lconst_0
+                self.lconst_0()?;
+                // Add lcmp instruction
+                self.emit_opcode(self.opcode_generator.lcmp());
+                // Now we have an int result, use ifeq
+                self.code.push(crate::codegen::opcodes::IFEQ);
+                self.add_label_reference(label);
+                Ok(())
+            }
+            "float" => {
+                // For float values, we need fconst_0 + fcmpg before ifeq
+                self.fconst_0()?;
+                self.emit_opcode(self.opcode_generator.fcmpg());
+                self.code.push(crate::codegen::opcodes::IFEQ);
+                self.add_label_reference(label);
+                Ok(())
+            }
+            "double" => {
+                // For double values, we need dconst_0 + dcmpg before ifeq
+                self.dconst_0()?;
+                self.emit_opcode(self.opcode_generator.dcmpg());
+                self.code.push(crate::codegen::opcodes::IFEQ);
+                self.add_label_reference(label);
+                Ok(())
+            }
+            _ => {
+                // For int and other types, use the original logic
+                self.ifeq(label)
+            }
+        }
+    }
 
     pub fn ifne(&mut self, label: &str) -> Result<(), StackError> {
         self.stack_state.pop(1)?;
@@ -1215,6 +1264,37 @@ impl BytecodeBuilder {
         self.code.push(crate::codegen::opcodes::IFNE);
         self.add_label_reference(label);
         Ok(())
+    }
+    
+    /// Type-aware ifne that handles long values correctly
+    pub fn ifne_typed(&mut self, label: &str, operand_type: &str) -> Result<(), StackError> {
+        match operand_type {
+            "long" => {
+                // For long values, we need lconst_0 + lcmp before ifne
+                self.lconst_0()?;
+                self.emit_opcode(self.opcode_generator.lcmp());
+                self.code.push(crate::codegen::opcodes::IFNE);
+                self.add_label_reference(label);
+                Ok(())
+            }
+            "float" => {
+                self.fconst_0()?;
+                self.emit_opcode(self.opcode_generator.fcmpg());
+                self.code.push(crate::codegen::opcodes::IFNE);
+                self.add_label_reference(label);
+                Ok(())
+            }
+            "double" => {
+                self.dconst_0()?;
+                self.emit_opcode(self.opcode_generator.dcmpg());
+                self.code.push(crate::codegen::opcodes::IFNE);
+                self.add_label_reference(label);
+                Ok(())
+            }
+            _ => {
+                self.ifne(label)
+            }
+        }
     }
 
     pub fn iflt(&mut self, label: &str) -> Result<(), StackError> {

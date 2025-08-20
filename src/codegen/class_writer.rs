@@ -2010,15 +2010,9 @@ impl ClassWriter {
         // Generate constructor bytecode manually
         let mut code_bytes = Vec::new();
         
-        // ALOAD_0 (load this)
-        code_bytes.push(opcodes::ALOAD_0);
-        
-        // INVOKESPECIAL java/lang/Object.<init>()V
-        let super_class_name = "java/lang/Object";
-        let method_ref_index = { let mut cp = self.cp_shared.as_ref().unwrap().borrow_mut(); cp.try_add_method_ref(super_class_name, "<init>", "()V") }
-            .map_err(|e| crate::error::Error::CodeGen { message: format!("const pool: {}", e) })?;
-        code_bytes.push(opcodes::INVOKESPECIAL);
-        code_bytes.extend_from_slice(&method_ref_index.to_be_bytes());
+        // 🔧 FIX: Don't manually add super constructor call
+        // Let BodyWriter handle the complete constructor generation including super call
+        // This ensures we get the complete logic including conditionals
         
         // Generate constructor body statements using BodyWriter
         let constant_pool_rc = self.cp_shared.as_ref().unwrap().clone();
@@ -2054,25 +2048,22 @@ impl ClassWriter {
         
         // Check if the constructor body has any statements beyond just return
         if full_body_bytes.len() > 1 { // More than just RETURN
-            // Find the end of the super constructor call (after invokespecial)
-            let mut skip_bytes = 0;
-            if full_body_bytes.len() > 4 && full_body_bytes[0] == opcodes::ALOAD_0 && full_body_bytes[1] == opcodes::INVOKESPECIAL {
-                skip_bytes = 4; // aload_0 + invokespecial + 2 bytes for method ref
-                eprintln!("🔍 DEBUG: Found super constructor call, skipping {} bytes", skip_bytes);
-            }
-            // Find the return instruction at the end and exclude it
+            // 🔧 FIX: Extract the entire constructor body (including all logic)
+            // The generated method body contains the complete constructor logic
+            // We want to extract everything except the return instruction
             let mut end_pos = full_body_bytes.len();
             if full_body_bytes.len() > 0 && full_body_bytes[full_body_bytes.len() - 1] == opcodes::RETURN {
                 end_pos -= 1;
                 eprintln!("🔍 DEBUG: Found return instruction, ending at byte {}", end_pos);
             }
-            // Append the body statements (excluding super call and return)
-            if end_pos > skip_bytes {
-                let body_statements = &full_body_bytes[skip_bytes..end_pos];
-                eprintln!("🔍 DEBUG: Extracting body statements: {:?}", body_statements);
+            
+            // Extract the complete constructor body (including super call and all logic)
+            if end_pos > 0 {
+                let body_statements = &full_body_bytes[0..end_pos];
+                eprintln!("🔍 DEBUG: Extracting complete constructor body: {:?}", body_statements);
                 code_bytes.extend_from_slice(body_statements);
             } else {
-                eprintln!("🔍 DEBUG: No body statements to extract (end_pos={}, skip_bytes={})", end_pos, skip_bytes);
+                eprintln!("🔍 DEBUG: No constructor body to extract");
             }
         } else {
             eprintln!("🔍 DEBUG: Empty constructor body, only super() call needed");
