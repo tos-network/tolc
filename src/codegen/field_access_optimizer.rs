@@ -347,6 +347,11 @@ impl FieldAccessOptimizer {
                 match *value {
                     0 => bytecode_builder.lconst_0()?,
                     1 => bytecode_builder.lconst_1()?,
+                    -1 => {
+                        // For MASK = -1L, use ldc2_w -1l (matches javac exactly)
+                        // This requires constant pool integration, but we'll handle it in the caller
+                        return Err("Long -1 constant should use ldc2_w".into());
+                    }
                     _ => {
                         // Use ldc2_w for other long values
                         // This would need constant pool integration

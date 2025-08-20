@@ -410,6 +410,11 @@ impl BytecodeBuilder {
         &self.code
     }
     
+    /// Get mutable reference to current code for patching
+    pub fn code_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.code
+    }
+    
     /// Get current locals
     pub fn locals(&self) -> &Vec<LocalSlot> {
         &self.stack_state.frame.locals
