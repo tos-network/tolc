@@ -11,6 +11,16 @@ use crate::error::Result;
 pub struct GenCond;
 
 impl GenCond {
+    /// Check if an expression is a null literal
+    fn is_null_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(lit) => {
+                matches!(lit.value, crate::ast::Literal::Null)
+            }
+            _ => false
+        }
+    }
+    
     /// Generate optimized conditional code (javac genCond equivalent)
     /// 
     /// This method analyzes conditional expressions and generates efficient
@@ -900,13 +910,52 @@ impl GenCond {
         // Create a chain with the actual PC value
         let jump_chain = Chain::new(jump_pc.into(), None, StackState::new());
         
-        // Generate the comparison expression
-        // This will generate the actual comparison bytecode
-        // For now, we'll create a placeholder, but in a full implementation,
-        // this would generate the comparison instructions
+        // Analyze the comparison operator and generate appropriate opcode
+        let opcode = match binary.operator {
+            BinaryOp::Eq => {
+                // Check if this is a null comparison
+                if Self::is_null_literal(&binary.right) || Self::is_null_literal(&binary.left) {
+                    eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Detected null equality comparison, using IFNULL");
+                    opcodes::IFNULL // Jump to else if NOT null (inverted logic for == null)
+                } else {
+                    eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using IFEQ for equality comparison");
+                    opcodes::IFEQ // Jump to else if equal
+                }
+            }
+            BinaryOp::Ne => {
+                // Check if this is a null comparison
+                if Self::is_null_literal(&binary.right) || Self::is_null_literal(&binary.left) {
+                    eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Detected null inequality comparison, using IFNONNULL");
+                    opcodes::IFNONNULL // Jump to else if null (inverted logic for != null)
+                } else {
+                    eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using IFNE for inequality comparison");
+                    opcodes::IFNE // Jump to else if not equal
+                }
+            }
+            BinaryOp::Lt => {
+                eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using IFLT for less than comparison");
+                opcodes::IFLT // Jump to else if >=
+            }
+            BinaryOp::Le => {
+                eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using IFLE for less than or equal comparison");
+                opcodes::IFLE // Jump to else if >
+            }
+            BinaryOp::Gt => {
+                eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using IFGT for greater than comparison");
+                opcodes::IFGT // Jump to else if <=
+            }
+            BinaryOp::Ge => {
+                eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using IFGE for greater than or equal comparison");
+                opcodes::IFGE // Jump to else if <
+            }
+            _ => {
+                eprintln!("🔍 DEBUG: gen_comparison_cond_with_bytecode: Using default IFEQ for unknown comparison");
+                opcodes::IFEQ // Default fallback
+            }
+        };
         
         Ok(CondItem::new(
-            opcodes::IFNE, // Default opcode for comparison result
+            opcode,
             Some(jump_chain),
             None,
         ))

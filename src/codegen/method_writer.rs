@@ -1149,6 +1149,35 @@ impl MethodWriter {
         }
     }
     
+    /// Generate reference comparison using if_acmp* instructions
+    fn generate_reference_comparison(&mut self, comparison_op: &str) -> Result<()> {
+        // At this point, both operands are on the stack: [left, right]
+        // We need to generate: if_acmp* true_label -> iconst_1 -> goto end_label -> true_label: iconst_0 -> end_label:
+        
+        let true_label = self.create_label();
+        let end_label = self.create_label();
+        
+        // Generate the comparison instruction
+        let true_label_str = self.label_str(true_label);
+        match comparison_op {
+            "if_acmpeq" => Self::map_stack(self.bytecode_builder.if_acmpeq(&true_label_str))?,
+            "if_acmpne" => Self::map_stack(self.bytecode_builder.if_acmpne(&true_label_str))?,
+            _ => return Err(Error::codegen_error(&format!("Unknown reference comparison operator: {}", comparison_op))),
+        }
+        
+        // False case: push false (0)
+        Self::map_stack(self.bytecode_builder.iconst_0())?;
+        let end_label_str = self.label_str(end_label);
+        Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+        
+        // True case: push true (1)
+        self.bytecode_builder.mark_label(&true_label_str);
+        Self::map_stack(self.bytecode_builder.iconst_1())?;
+        
+        self.bytecode_builder.mark_label(&end_label_str);
+        Ok(())
+    }
+    
     /// Generate integer comparison using if_icmp* instructions
     fn generate_integer_comparison(&mut self, comparison_op: &str) -> Result<()> {
         // At this point, both operands are on the stack: [left, right]
@@ -1292,48 +1321,27 @@ impl MethodWriter {
         eprintln!("🔍 DEBUG: generate_null_comparison: operator={:?}, left_is_null={}", operator, left_is_null);
         
         // At this point, the non-null operand is on the stack
-        // Generate optimized null check without intermediate jumps
+        // We need to generate the correct conditional jump instruction
+        // For if statements, this will be followed by the appropriate jump
         
         match operator {
             BinaryOp::Eq => {
-                // == null: use ifnull for direct comparison
-                // Stack: [value] -> ifnull pushes 1 if null, 0 if not null
-                let true_label = self.create_label();
-                let end_label = self.create_label();
-                
-                let true_label_str = self.label_str(true_label);
-                Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
-                
-                // Not null case: push false (0)
-                Self::map_stack(self.bytecode_builder.iconst_0())?;
-                let end_label_str = self.label_str(end_label);
-                Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
-                
-                // Null case: push true (1)
-                self.bytecode_builder.mark_label(&true_label_str);
-                Self::map_stack(self.bytecode_builder.iconst_1())?;
-                
-                self.bytecode_builder.mark_label(&end_label_str);
+                // == null: the operand is already on the stack
+                // For if statements, this will be followed by ifnull
+                // We need to generate a special marker that the caller can recognize
+                eprintln!("🔍 DEBUG: generate_null_comparison: == null, operand ready for ifnull");
+                // Generate a special instruction that indicates this is a null equality check
+                // The caller will replace this with the appropriate jump
+                self.bytecode_builder.push_instruction(0xFF); // Special marker for null equality
             }
             BinaryOp::Ne => {
-                // != null: javac-style - use ifnull to jump to false case
-                // Stack: [value] -> ifnull jumps to false if null, continues to true if not null
-                let false_label = self.create_label();
-                let end_label = self.create_label();
-                
-                let false_label_str = self.label_str(false_label);
-                Self::map_stack(self.bytecode_builder.ifnull(&false_label_str))?;
-                
-                // Not null case: push true (1)
-                Self::map_stack(self.bytecode_builder.iconst_1())?;
-                let end_label_str = self.label_str(end_label);
-                Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
-                
-                // Null case: push false (0)
-                self.bytecode_builder.mark_label(&false_label_str);
-                Self::map_stack(self.bytecode_builder.iconst_0())?;
-                
-                self.bytecode_builder.mark_label(&end_label_str);
+                // != null: the operand is already on the stack
+                // For if statements, this will be followed by ifnonnull
+                // We need to generate a special marker that the caller can recognize
+                eprintln!("🔍 DEBUG: generate_null_comparison: != null, operand ready for ifnonnull");
+                // Generate a special instruction that indicates this is a null inequality check
+                // The caller will replace this with the appropriate jump
+                self.bytecode_builder.push_instruction(0xFE); // Special marker for null inequality
             }
             _ => {
                 return Err(Error::codegen_error("Invalid operator for null comparison"));
@@ -1357,6 +1365,23 @@ impl MethodWriter {
             false
         }
     }
+    
+    /// Check if a binary expression is a reference type comparison
+    fn is_reference_type_comparison(&self, left: &Expr, right: &Expr) -> bool {
+        // Check if either operand is a null literal
+        if self.is_null_literal(left) || self.is_null_literal(right) {
+            return true;
+        }
+        
+        // Check if either operand is a reference type
+        let left_type = self.resolve_expression_type(left);
+        let right_type = self.resolve_expression_type(right);
+        
+        // Reference types are not primitive types
+        !self.is_primitive_type(&left_type) || !self.is_primitive_type(&right_type)
+    }
+    
+
     
     /// Check if a method call result should be popped when used as a statement
     fn should_pop_method_call_result(&self, method_call: &MethodCallExpr) -> bool {
@@ -4212,27 +4237,27 @@ impl MethodWriter {
     fn generate_binary_expression(&mut self, binary: &BinaryExpr) -> Result<()> {
         eprintln!("🔍 DEBUG: Binary expression: Starting, operator={:?}, stack_depth={}", binary.operator, self.bytecode_builder.stack_depth());
         
+        // TEMP: Disable special null comparison handling for now
         // Special handling for null comparisons - don't generate null operand
-        match binary.operator {
-            BinaryOp::Eq | BinaryOp::Ne => {
-                if self.is_null_literal(&binary.right) {
-                    // left == null or left != null
-                    eprintln!("🔍 DEBUG: Binary expression: Detected null comparison (right operand is null)");
-                    self.generate_expression(&binary.left)?;
-                    // Don't generate right operand (null)
-                    self.generate_null_comparison(&binary.operator, false)?; // false = right is null
-                    return Ok(());
-                } else if self.is_null_literal(&binary.left) {
-                    // null == right or null != right
-                    eprintln!("🔍 DEBUG: Binary expression: Detected null comparison (left operand is null)");
-                    self.generate_expression(&binary.right)?;
-                    // Don't generate left operand (null)
-                    self.generate_null_comparison(&binary.operator, true)?; // true = left is null
-                    return Ok(());
-                }
-            }
-            _ => {}
-        }
+        // match binary.operator {
+        //     BinaryOp::Eq | BinaryOp::Ne => {
+        //         if self.is_null_literal(&binary.right) {
+        //             // left == null or left != null
+        //             eprintln!("🔍 DEBUG: Binary expression: Detected null comparison (right operand is null)");
+        //             self.generate_expression(&binary.left)?;
+        //             // Don't generate right operand (null)
+        //             self.generate_null_comparison(&binary.operator, false)?; // false = right is null
+        //             return Ok(());
+        //         } else if self.is_null_literal(&binary.left) {
+        //             // null == right or null != right
+        //             eprintln!("🔍 DEBUG: Binary expression: Detected null comparison (left operand is null)");
+        //             self.generate_expression(&binary.right)?;
+        //             self.generate_null_comparison(&binary.operator, true)?; // true = left is null
+        //             return Ok(());
+        //         }
+        //     }
+        //     _ => {}
+        // }
         
         // Special handling for comparisons with zero - optimize to single operand instructions
         match binary.operator {
@@ -4338,45 +4363,136 @@ impl MethodWriter {
             _ => {}
         }
         
-        // Regular binary expression - generate both operands
-        eprintln!("🔍 DEBUG: Binary expression: Generating left operand");
-        self.generate_expression(&binary.left)?;
-        eprintln!("🔍 DEBUG: Binary expression: After left operand, stack_depth={}", self.bytecode_builder.stack_depth());
+        // Check if this is a null comparison that we handle specially
+        let is_null_comparison = (binary.operator == BinaryOp::Eq || binary.operator == BinaryOp::Ne) && 
+                                (self.is_null_literal(&binary.left) || self.is_null_literal(&binary.right));
         
-        // 🔧 TYPE COERCION OPT: Check if left operand needs type coercion
-        let left_type = self.resolve_expression_type(&binary.left);
-        let right_type = self.resolve_expression_type(&binary.right);
+
         
-        if left_type != right_type {
-            println!("🔧 TYPE COERCION OPT: Binary operation type mismatch: {} vs {}", left_type, right_type);
+        if !is_null_comparison {
+            // Regular binary expression - generate both operands
+            eprintln!("🔍 DEBUG: Binary expression: Generating left operand");
+            self.generate_expression(&binary.left)?;
+            eprintln!("🔍 DEBUG: Binary expression: After left operand, stack_depth={}", self.bytecode_builder.stack_depth());
             
-            // Determine target type for binary operation
-            let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
-            println!("🔧 TYPE COERCION OPT: Target type for binary operation: {}", target_type);
+            // 🔧 TYPE COERCION OPT: Check if left operand needs type coercion
+            let left_type = self.resolve_expression_type(&binary.left);
+            let right_type = self.resolve_expression_type(&binary.right);
             
-            // Apply left operand coercion if needed
-            if left_type != target_type {
-                self.apply_implicit_type_coercion(&left_type, &target_type)?;
+            if left_type != right_type {
+                println!("🔧 TYPE COERCION OPT: Binary operation type mismatch: {} vs {}", left_type, right_type);
+                
+                // Determine target type for binary operation
+                let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
+                println!("🔧 TYPE COERCION OPT: Target type for binary operation: {}", target_type);
+                
+                // Apply left operand coercion if needed
+                if left_type != target_type {
+                    self.apply_implicit_type_coercion(&left_type, &target_type)?;
+                }
             }
-        }
-        
-        eprintln!("🔍 DEBUG: Binary expression: Generating right operand");
-        self.generate_expression(&binary.right)?;
-        eprintln!("🔍 DEBUG: Binary expression: After right operand, stack_depth={}", self.bytecode_builder.stack_depth());
-        
-        // 🔧 FIX: For long type comparisons, ensure we use proper comparison instructions
-        if left_type == "long" || right_type == "long" {
-            eprintln!("🔍 DEBUG: Binary expression: Detected long type in binary operation, ensuring proper comparison");
-        }
-        
-        // 🔧 TYPE COERCION OPT: Apply right operand coercion if needed
-        if left_type != right_type {
-            let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
             
-            // Apply right operand coercion if needed
-            if right_type != target_type {
-                self.apply_implicit_type_coercion(&right_type, &target_type)?;
+            eprintln!("🔍 DEBUG: Binary expression: Generating right operand");
+            self.generate_expression(&binary.right)?;
+            eprintln!("🔍 DEBUG: Binary expression: After right operand, stack_depth={}", self.bytecode_builder.stack_depth());
+            
+            // 🔧 FIX: For long type comparisons, ensure we use proper comparison instructions
+            if left_type == "long" || right_type == "long" {
+                eprintln!("🔍 DEBUG: Binary expression: Detected long type in binary operation, ensuring proper comparison");
             }
+            
+            // 🔧 TYPE COERCION OPT: Apply right operand coercion if needed
+            if left_type != right_type {
+                let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
+                
+                // Apply right operand coercion if needed
+                if right_type != target_type {
+                    self.apply_implicit_type_coercion(&right_type, &target_type)?;
+                }
+            }
+        } else {
+            // Null comparison - only generate the non-null operand
+            eprintln!("🔍 DEBUG: Binary expression: Detected null comparison, generating only non-null operand");
+            if self.is_null_literal(&binary.left) {
+                // null op right -> generate right operand only
+                self.generate_expression(&binary.right)?;
+            } else {
+                // left op null -> generate left operand only
+                self.generate_expression(&binary.left)?;
+            }
+            
+            // Now handle the null comparison operator
+            match binary.operator {
+                BinaryOp::Eq => {
+                    // For null comparisons, we need to generate the appropriate boolean expression
+                    if self.is_null_literal(&binary.right) {
+                        // left == null -> generate ifnull -> iconst_0 -> goto -> iconst_1
+                        let true_label = self.create_label();
+                        let end_label = self.create_label();
+                        let true_label_str = self.label_str(true_label);
+                        let end_label_str = self.label_str(end_label);
+                        
+                        // ifnull true_label -> iconst_0 -> goto end_label -> true_label: iconst_1 -> end_label:
+                        Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
+                        Self::map_stack(self.bytecode_builder.iconst_0())?;
+                        Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                        self.bytecode_builder.mark_label(&true_label_str);
+                        Self::map_stack(self.bytecode_builder.iconst_1())?;
+                        self.bytecode_builder.mark_label(&end_label_str);
+                    } else {
+                        // null == right -> generate ifnull -> iconst_0 -> goto -> iconst_1
+                        let true_label = self.create_label();
+                        let end_label = self.create_label();
+                        let true_label_str = self.label_str(true_label);
+                        let end_label_str = self.label_str(end_label);
+                        
+                        // ifnull true_label -> iconst_0 -> goto end_label -> true_label: iconst_1 -> end_label:
+                        Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
+                        Self::map_stack(self.bytecode_builder.iconst_0())?;
+                        Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                        self.bytecode_builder.mark_label(&true_label_str);
+                        Self::map_stack(self.bytecode_builder.iconst_1())?;
+                        self.bytecode_builder.mark_label(&end_label_str);
+                    }
+                }
+                BinaryOp::Ne => {
+                    // For null comparisons, we need to generate the appropriate boolean expression
+                    if self.is_null_literal(&binary.right) {
+                        // left != null -> generate ifnull -> iconst_1 -> goto -> iconst_0
+                        let true_label = self.create_label();
+                        let end_label = self.create_label();
+                        let true_label_str = self.label_str(true_label);
+                        let end_label_str = self.label_str(end_label);
+                        
+                        // ifnull true_label -> iconst_1 -> goto end_label -> true_label: iconst_0 -> end_label:
+                        Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
+                        Self::map_stack(self.bytecode_builder.iconst_1())?;
+                        Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                        self.bytecode_builder.mark_label(&true_label_str);
+                        Self::map_stack(self.bytecode_builder.iconst_0())?;
+                        self.bytecode_builder.mark_label(&end_label_str);
+                    } else {
+                        // null != right -> generate ifnull -> iconst_1 -> goto -> iconst_0
+                        let true_label = self.create_label();
+                        let end_label = self.create_label();
+                        let true_label_str = self.label_str(true_label);
+                        let end_label_str = self.label_str(end_label);
+                        
+                        // ifnull true_label -> iconst_1 -> goto end_label -> true_label: iconst_0 -> end_label:
+                        Self::map_stack(self.bytecode_builder.ifnull(&true_label_str))?;
+                        Self::map_stack(self.bytecode_builder.iconst_1())?;
+                        Self::map_stack(self.bytecode_builder.goto(&end_label_str))?;
+                        self.bytecode_builder.mark_label(&true_label_str);
+                        Self::map_stack(self.bytecode_builder.iconst_0())?;
+                        self.bytecode_builder.mark_label(&end_label_str);
+                    }
+                }
+                _ => {
+                    return Err(Error::codegen_error(&format!("Unexpected operator {:?} for null comparison", binary.operator)));
+                }
+            }
+            
+            return Ok(());
         }
         
         // Generate operation
@@ -4487,11 +4603,23 @@ impl MethodWriter {
             }
             BinaryOp::Eq => {
                 // Regular equality comparison (null comparisons handled above)
-                self.generate_integer_comparison("if_icmpeq")?;
+                // Check if this is a reference type comparison
+                if self.is_reference_type_comparison(&binary.left, &binary.right) {
+                    // Regular reference comparison
+                    self.generate_reference_comparison("if_acmpeq")?;
+                } else {
+                    self.generate_integer_comparison("if_icmpeq")?;
+                }
             }
             BinaryOp::Ne => {
                 // Regular inequality comparison (null comparisons handled above)
-                self.generate_integer_comparison("if_icmpne")?;
+                // Check if this is a reference type comparison
+                if self.is_reference_type_comparison(&binary.left, &binary.right) {
+                    // Regular reference comparison
+                    self.generate_reference_comparison("if_acmpne")?;
+                } else {
+                    self.generate_integer_comparison("if_icmpne")?;
+                }
             }
             BinaryOp::And => { 
                 eprintln!("🔍 DEBUG: Binary expression: Executing And branch, stack_depth={}", self.bytecode_builder.stack_depth());
@@ -10714,12 +10842,12 @@ impl MethodWriter {
     fn generate_if_statement_old(&mut self, if_stmt: &IfStmt) -> Result<()> {
         // Use javac-style genCond for advanced conditional optimization
         // 🔧 FIX: Use the enhanced version that can generate actual bytecode and record real PC values
-        // TEMP: Skip this to avoid duplicate generation
-        // let cond_item = crate::codegen::gen_cond::GenCond::gen_cond_with_bytecode(
-        //     &if_stmt.condition, 
-        //     true, 
-        //     &mut self.bytecode_builder
-        // )?;
+        // TEMP: Disable GenCond for now to test traditional approach
+        let cond_item = crate::codegen::gen_cond::GenCond::gen_cond_with_bytecode(
+            &if_stmt.condition, 
+            true, 
+            &mut self.bytecode_builder
+        )?;
         
         // TEMP: Skip constant condition optimization
         // if cond_item.is_true() {
@@ -11455,34 +11583,100 @@ impl MethodWriter {
             else_label // Use the same label if no else branch
         };
         
-        // Generate the condition using GenCond result
-        // First, generate the condition expression to get the boolean result on stack
-        eprintln!("🔍 DEBUG: generate_if_statement: Generating condition expression");
-        self.generate_expression(&if_stmt.condition)?;
-        
-        // Then use the GenCond result to determine the jump logic
-        if let Some(jump_chain) = cond_item.jump_false() {
-            // Use the jump chain from GenCond for optimized conditional jumps
-            eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond jump chain for false branch with opcode: {}", cond_item.opcode);
-            // Generate the conditional jump based on the opcode from GenCond
-            let l = self.label_str(else_label);
-            match cond_item.opcode {
-                opcodes::IFEQ => {
-                    // Jump to else if condition is false (0)
-                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+        // Special handling for null comparisons to generate optimized bytecode
+        if let Expr::Binary(binary) = &if_stmt.condition {
+            if (binary.operator == BinaryOp::Eq || binary.operator == BinaryOp::Ne) && 
+               (self.is_null_literal(&binary.left) || self.is_null_literal(&binary.right)) {
+                
+                eprintln!("🔍 DEBUG: generate_if_statement: Detected null comparison, generating optimized bytecode");
+                
+                // Determine which operand is the variable and which is null
+                let (var_expr, is_left_null) = if self.is_null_literal(&binary.left) {
+                    (&binary.right, true)
+                } else {
+                    (&binary.left, false)
+                };
+                
+                // Generate the variable operand (e.g., getfield next)
+                self.generate_expression(var_expr)?;
+                
+                // Generate the appropriate conditional jump
+                let l = self.label_str(else_label);
+                match (binary.operator.clone(), is_left_null) {
+                    (BinaryOp::Eq, _) => {
+                        // x == null -> ifnonnull else_label (jump if NOT null)
+                        Self::map_stack(self.bytecode_builder.ifnonnull(&l))?;
+                    }
+                    (BinaryOp::Ne, _) => {
+                        // x != null -> ifnull else_label (jump if null)
+                        Self::map_stack(self.bytecode_builder.ifnull(&l))?;
+                    }
+                    _ => unreachable!(),
                 }
-                opcodes::IFNE => {
-                    // Jump to else if condition is true (non-zero) - this is inverted logic
-                    Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                
+                // Skip normal expression generation since we handled it specially
+                eprintln!("🔍 DEBUG: generate_if_statement: Null comparison handled, skipping normal expression generation");
+                    } else {
+            // Regular condition - check if it's a simple comparison that we can optimize
+            if let Expr::Binary(binary) = &if_stmt.condition {
+                if self.is_simple_comparison(binary) {
+                    // For simple comparisons like index == 0, generate optimized bytecode directly
+                    eprintln!("🔍 DEBUG: generate_if_statement: Detected simple comparison, generating optimized bytecode");
+                    self.generate_simple_comparison_for_if(binary, else_label)?;
+                } else {
+                    // Complex condition - generate the condition expression to get the boolean result on stack
+                    eprintln!("🔍 DEBUG: generate_if_statement: Generating complex condition expression");
+                    self.generate_expression(&if_stmt.condition)?;
+                    
+                    // Use GenCond's opcode for optimized conditional jumps
+                    eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond opcode: {}", cond_item.opcode);
+                    let l = self.label_str(else_label);
+                    match cond_item.opcode {
+                        opcodes::IFEQ => { Self::map_stack(self.bytecode_builder.ifeq(&l))?; }
+                        opcodes::IFNE => { Self::map_stack(self.bytecode_builder.ifne(&l))?; }
+                        opcodes::IFLT => { Self::map_stack(self.bytecode_builder.iflt(&l))?; }
+                        opcodes::IFLE => { Self::map_stack(self.bytecode_builder.ifle(&l))?; }
+                        opcodes::IFGT => { Self::map_stack(self.bytecode_builder.ifgt(&l))?; }
+                        opcodes::IFGE => { Self::map_stack(self.bytecode_builder.ifge(&l))?; }
+                        opcodes::IFNULL => { Self::map_stack(self.bytecode_builder.ifnull(&l))?; }
+                        opcodes::IFNONNULL => { Self::map_stack(self.bytecode_builder.ifnonnull(&l))?; }
+                        _ => { 
+                            eprintln!("🔍 DEBUG: generate_if_statement: Unknown opcode {}, falling back to ifeq", cond_item.opcode);
+                            Self::map_stack(self.bytecode_builder.ifeq(&l))?; 
+                        }
+                    }
                 }
-                _ => {
-                    // Default fallback
-                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            } else {
+                // Non-binary condition - generate the condition expression to get the boolean result on stack
+                eprintln!("🔍 DEBUG: generate_if_statement: Generating non-binary condition expression");
+                self.generate_expression(&if_stmt.condition)?;
+                
+                // Use GenCond's opcode for optimized conditional jumps
+                eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond opcode: {}", cond_item.opcode);
+                let l = self.label_str(else_label);
+                match cond_item.opcode {
+                    opcodes::IFEQ => { Self::map_stack(self.bytecode_builder.ifeq(&l))?; }
+                    opcodes::IFNE => { Self::map_stack(self.bytecode_builder.ifne(&l))?; }
+                    opcodes::IFLT => { Self::map_stack(self.bytecode_builder.iflt(&l))?; }
+                    opcodes::IFLE => { Self::map_stack(self.bytecode_builder.ifle(&l))?; }
+                    opcodes::IFGT => { Self::map_stack(self.bytecode_builder.ifgt(&l))?; }
+                    opcodes::IFGE => { Self::map_stack(self.bytecode_builder.ifge(&l))?; }
+                    opcodes::IFNULL => { Self::map_stack(self.bytecode_builder.ifnull(&l))?; }
+                    opcodes::IFNONNULL => { Self::map_stack(self.bytecode_builder.ifnonnull(&l))?; }
+                    _ => { 
+                        eprintln!("🔍 DEBUG: generate_if_statement: Unknown opcode {}, falling back to ifeq", cond_item.opcode);
+                        Self::map_stack(self.bytecode_builder.ifeq(&l))?; 
+                    }
                 }
             }
+        }
         } else {
-            // Fallback: generate the condition expression and use ifeq
-            eprintln!("🔍 DEBUG: generate_if_statement: Fallback to traditional condition generation");
+            // Non-binary condition - generate the condition expression to get the boolean result on stack
+            eprintln!("🔍 DEBUG: generate_if_statement: Generating non-binary condition expression");
+            self.generate_expression(&if_stmt.condition)?;
+            
+            // Use traditional approach for now
+            eprintln!("🔍 DEBUG: generate_if_statement: Using traditional condition generation");
             let l = self.label_str(else_label);
             Self::map_stack(self.bytecode_builder.ifeq(&l))?;
         }
@@ -11516,6 +11710,121 @@ impl MethodWriter {
         }
         
         eprintln!("🔍 DEBUG: generate_if_statement: If statement completed successfully");
+        Ok(())
+    }
+    
+    /// Check if a binary expression is a simple comparison that can be optimized
+    fn is_simple_comparison(&self, binary: &BinaryExpr) -> bool {
+        // Simple comparisons are those that can be directly converted to conditional jumps
+        // without generating boolean expressions
+        matches!(binary.operator, BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge)
+    }
+    
+    /// Generate optimized bytecode for simple comparisons in if statements
+    fn generate_simple_comparison_for_if(&mut self, binary: &BinaryExpr, else_label: u16) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_simple_comparison_for_if: Generating optimized comparison for if statement");
+        
+        // Generate the left operand
+        self.generate_expression(&binary.left)?;
+        
+        // For zero comparisons, we can optimize further
+        if self.is_zero_literal(&binary.right) {
+            // left == 0, left != 0, left < 0, etc.
+            let l = self.label_str(else_label);
+            match binary.operator {
+                BinaryOp::Eq => {
+                    // left == 0 -> ifne else_label (jump if NOT zero)
+                    Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                }
+                BinaryOp::Ne => {
+                    // left != 0 -> ifeq else_label (jump if zero)
+                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                }
+                BinaryOp::Lt => {
+                    // left < 0 -> ifge else_label (jump if >= zero)
+                    Self::map_stack(self.bytecode_builder.ifge(&l))?;
+                }
+                BinaryOp::Le => {
+                    // left <= 0 -> ifgt else_label (jump if > zero)
+                    Self::map_stack(self.bytecode_builder.ifgt(&l))?;
+                }
+                BinaryOp::Gt => {
+                    // left > 0 -> ifle else_label (jump if <= zero)
+                    Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                }
+                BinaryOp::Ge => {
+                    // left >= 0 -> iflt else_label (jump if < zero)
+                    Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                }
+                _ => unreachable!(),
+            }
+        } else if self.is_zero_literal(&binary.left) {
+            // 0 == right, 0 != right, 0 < right, etc.
+            // Generate the right operand
+            self.generate_expression(&binary.right)?;
+            
+            let l = self.label_str(else_label);
+            match binary.operator {
+                BinaryOp::Eq => {
+                    // 0 == right -> ifne else_label (jump if NOT zero)
+                    Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                }
+                BinaryOp::Ne => {
+                    // 0 != right -> ifeq else_label (jump if zero)
+                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                }
+                BinaryOp::Lt => {
+                    // 0 < right -> ifle else_label (jump if <= zero)
+                    Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                }
+                BinaryOp::Le => {
+                    // 0 <= right -> iflt else_label (jump if < zero)
+                    Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                }
+                BinaryOp::Gt => {
+                    // 0 > right -> ifge else_label (jump if >= zero)
+                    Self::map_stack(self.bytecode_builder.ifge(&l))?;
+                }
+                BinaryOp::Ge => {
+                    // 0 >= right -> ifgt else_label (jump if > zero)
+                    Self::map_stack(self.bytecode_builder.ifgt(&l))?;
+                }
+                _ => unreachable!(),
+            }
+        } else {
+            // General comparison - generate both operands and use appropriate conditional jump
+            self.generate_expression(&binary.right)?;
+            
+            let l = self.label_str(else_label);
+            match binary.operator {
+                BinaryOp::Eq => {
+                    // left == right -> if_icmpne else_label (jump if NOT equal)
+                    Self::map_stack(self.bytecode_builder.if_icmpne(&l))?;
+                }
+                BinaryOp::Ne => {
+                    // left != right -> if_icmpeq else_label (jump if equal)
+                    Self::map_stack(self.bytecode_builder.if_icmpeq(&l))?;
+                }
+                BinaryOp::Lt => {
+                    // left < right -> if_icmpge else_label (jump if >=)
+                    Self::map_stack(self.bytecode_builder.if_icmpge(&l))?;
+                }
+                BinaryOp::Le => {
+                    // left <= right -> if_icmpgt else_label (jump if >)
+                    Self::map_stack(self.bytecode_builder.if_icmpgt(&l))?;
+                }
+                BinaryOp::Gt => {
+                    // left > right -> if_icmple else_label (jump if <=)
+                    Self::map_stack(self.bytecode_builder.if_icmple(&l))?;
+                }
+                BinaryOp::Ge => {
+                    // left >= right -> if_icmplt else_label (jump if <)
+                    Self::map_stack(self.bytecode_builder.if_icmplt(&l))?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        
         Ok(())
     }
     
