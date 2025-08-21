@@ -10,19 +10,65 @@ use super::items_javac::{Item};
 use super::opcodes;
 
 impl Gen {
-    /// Visit literal expression - simplified version
+    /// Visit literal expression - JavaC Gen.visitLiteral equivalent
     pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<Item> {
-        self.with_items(|items| {
+        if let Some(code) = self.code_mut() {
             match &tree.value {
                 Literal::Null => {
-                    items.code.emitop(opcodes::ACONST_NULL);
-                    Ok(items.make_stack_item_for_type(&TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string()))))
+                    code.emitop(super::opcodes::ACONST_NULL);
+                    code.state.push(super::code::Type::Null); // Push null reference on stack
+                }
+                Literal::Integer(val) => {
+                    // Generate appropriate constant instruction
+                    match *val {
+                        -1 => code.emitop(super::opcodes::ICONST_M1),
+                        0 => code.emitop(super::opcodes::ICONST_0),
+                        1 => code.emitop(super::opcodes::ICONST_1),
+                        2 => code.emitop(super::opcodes::ICONST_2),
+                        3 => code.emitop(super::opcodes::ICONST_3),
+                        4 => code.emitop(super::opcodes::ICONST_4),
+                        5 => code.emitop(super::opcodes::ICONST_5),
+                        -128..=127 => {
+                            code.emitop(super::opcodes::BIPUSH);
+                            code.emit1(*val as u8);
+                        }
+                        -32768..=32767 => {
+                            code.emitop(super::opcodes::SIPUSH);
+                            code.emit2(*val as u16);
+                        }
+                        _ => {
+                            // Use LDC for larger constants
+                            // TODO: Add to constant pool
+                            code.emitop(super::opcodes::LDC);
+                            code.emit1(0); // Placeholder constant pool index
+                        }
+                    }
+                    code.state.push(super::code::Type::Int); // Push int on stack
+                }
+                Literal::Boolean(val) => {
+                    if *val {
+                        code.emitop(super::opcodes::ICONST_1);
+                    } else {
+                        code.emitop(super::opcodes::ICONST_0);
+                    }
+                    code.state.push(super::code::Type::Int); // Push int on stack
                 }
                 _ => {
-                    let typ = Self::literal_to_type_enum(&tree.value);
-                    Ok(items.make_immediate_item(&typ, tree.value.clone()))
+                    // TODO: Implement other literal types
                 }
             }
+        }
+        
+        // Return appropriate item type based on literal type
+        use super::items_javac::{Item, typecodes};
+        Ok(Item::Immediate { 
+            typecode: match &tree.value {
+                Literal::Integer(_) => typecodes::INT,
+                Literal::Boolean(_) => typecodes::INT,
+                Literal::Null => typecodes::OBJECT,
+                _ => typecodes::OBJECT,
+            },
+            value: tree.value.clone(),
         })
     }
     
@@ -254,10 +300,25 @@ impl Gen {
         Ok(())
     }
     
-    /// Visit return statement - simplified version
+    /// Visit return statement - JavaC Gen.visitReturn equivalent
     pub fn visit_return(&mut self, tree: &ReturnStmt, env: &GenContext) -> Result<()> {
         if let Some(ref expr) = tree.value {
+            // Generate expression for return value
             let _result = self.visit_expr(expr, env)?;
+            
+            // Determine return instruction based on expression type
+            // TODO: Get actual expression type for proper return instruction
+            // For now, assume int return
+            if let Some(code) = self.code_mut() {
+                code.emitop(super::opcodes::IRETURN);
+                code.alive = false;
+            }
+        } else {
+            // Void return
+            if let Some(code) = self.code_mut() {
+                code.emitop(super::opcodes::RETURN);
+                code.alive = false;
+            }
         }
         Ok(())
     }

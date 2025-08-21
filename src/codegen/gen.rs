@@ -17,6 +17,9 @@ use super::types::Types;
 use super::type_inference::TypeInference;
 use super::class::ClassFile;
 use super::optimization_manager::{OptimizationManager, OptimizationLevel};
+use super::flag::access_flags;
+use super::method::MethodInfo;
+use super::field::FieldInfo;
 use std::collections::HashMap;
 
 /// Main bytecode generator - corresponds to javac's Gen class
@@ -30,6 +33,9 @@ pub struct Gen {
     
     /// Constant pool - JavaC Pool equivalent
     pool: ConstantPool,
+    
+    /// Class file being generated - JavaC ClassFile equivalent
+    class_file: ClassFile,
     
     /// Generation environment - JavaC Env<GenContext> equivalent
     env: Option<GenContext>,
@@ -67,6 +73,17 @@ pub struct GenContext {
     pub debug_code: bool,
 }
 
+impl Default for GenContext {
+    fn default() -> Self {
+        Self {
+            method: None,
+            clazz: None,
+            fatcode: false,
+            debug_code: false,
+        }
+    }
+}
+
 /// Class-level generation context (transitional)
 pub struct ClassContext {
     /// Current class being compiled
@@ -79,6 +96,16 @@ pub struct ClassContext {
     pub imports: Vec<String>,
 }
 
+impl ClassContext {
+    pub fn new() -> Self {
+        Self {
+            class: None,
+            all_types: Vec::new(),
+            imports: Vec::new(),
+        }
+    }
+}
+
 
 impl Gen {
     /// Create new generator instance - JavaC style
@@ -89,6 +116,7 @@ impl Gen {
         Self {
             code: None,                              // Created per method
             pool: ConstantPool::new(),               // JavaC Pool equivalent
+            class_file: ClassFile::new(),            // JavaC ClassFile equivalent
             env: None,                               // Set per compilation unit
             method_context: MethodContext::new(),    // Transitional
             class_context: ClassContext::new(),      // Transitional
@@ -654,27 +682,35 @@ impl Gen {
             self.gen_stmt(&Stmt::Block(body.clone()))?;
         }
         
-        // Ensure proper return for void methods
-        if let Some(ref code) = self.code {
+        // Ensure proper return instruction - JavaC pattern from Gen.visitMethodDef
+        if let Some(ref mut code) = self.code {
             if code.alive {
                 match &method.return_type {
                     None => {
                         // Void method - emit return instruction
-                        self.with_items(|items| {
-                            items.code.emitop(opcodes::RETURN);
-                            items.code.alive = false;
-                            Ok(())
-                        })?;
+                        code.emitop(opcodes::RETURN);
+                        code.alive = false;
                     }
-                    Some(_) => {
-                        // Non-void method should have explicit return
-                        return Err(Error::CodeGen { 
-                            message: format!("Missing return statement in method '{}'", method.name)
-                        });
+                    Some(return_type) => {
+                        // Check if return type is void
+                        let return_type_enum = TypeEnum::from(return_type.clone());
+                        if matches!(return_type_enum, TypeEnum::Void) {
+                            // Void method - emit return instruction
+                            code.emitop(opcodes::RETURN);
+                            code.alive = false;
+                        } else {
+                            // Non-void method must have explicit return
+                            return Err(Error::CodeGen { 
+                                message: format!("Missing return statement in method '{}'", method.name)
+                            });
+                        }
                     }
                 }
             }
         }
+        
+        // Create method info and add to class file
+        self.create_method_info_from_code(method)?;
         
         // JavaC pattern: endScopes and cleanup
         self.type_inference.exit_method();
@@ -744,31 +780,38 @@ impl Gen {
     }
     
     /// Generate field definition - 100% JavaC genDef equivalent
-    pub fn gen_def_field(&mut self, field: &FieldDecl, env: &GenContext) -> Result<()> {
-        // JavaC pattern for field initialization:
-        // if (tree.init != null) {
-        //     VarSymbol v = tree.sym;
-        //     if (v.getConstValue() == null) {
-        //         genExpr(tree.init, tree.type);
-        //         items.makeStaticItem(v).store();
-        //     }
-        // }
+    pub fn gen_def_field(&mut self, field: &FieldDecl, _env: &GenContext) -> Result<()> {
+        // Create field info and add to class file
+        self.create_field_info(field)?;
         
         // Handle field initialization if present
-        if let Some(ref init) = field.initializer {
+        if let Some(ref _init) = field.initializer {
             // Check if field is static
-            let is_static = field.modifiers.iter().any(|m| matches!(m, Modifier::Static));
+            let _is_static = field.modifiers.iter().any(|m| matches!(m, Modifier::Static));
             
-            if is_static {
-                // Static field initialization - generate in <clinit>
-                // For now, we'll defer this to class initialization
-                // TODO: Implement static initializer generation
-            } else {
-                // Instance field initialization - generate in constructor
-                // For now, we'll defer this to constructor generation
-                // TODO: Implement instance field initialization in constructor
-            }
+            // TODO: Field initialization will be handled in constructor generation
+            // Static fields: generate in <clinit>
+            // Instance fields: generate in constructor
         }
+        
+        Ok(())
+    }
+    
+    /// Create field info from field declaration and add to class file
+    fn create_field_info(&mut self, field: &FieldDecl) -> Result<()> {
+        // Add field name and descriptor to constant pool
+        let name_idx = self.pool.add_utf8(&field.name);
+        let descriptor = self.type_ref_to_descriptor(&field.type_ref)?;
+        let descriptor_idx = self.pool.add_utf8(&descriptor);
+        
+        // Convert modifiers to access flags
+        let access_flags = super::modifiers_to_flags(&field.modifiers);
+        
+        // Create field info
+        let field_info = super::field::FieldInfo::new(access_flags, name_idx, descriptor_idx);
+        
+        // Add field to class file
+        self.class_file.fields.push(field_info);
         
         Ok(())
     }
@@ -979,8 +1022,59 @@ impl Gen {
     
     /// Generate class declaration using JavaC patterns
     pub fn generate_class_decl(&mut self, class: &ClassDecl) -> Result<()> {
-        // TODO: Implement class generation using JavaC Gen patterns
-        // This will use the visitor methods and genDef patterns we've implemented
+        // 1. Set class name in constant pool and get index
+        let class_name = if let Some(package) = &self.class_context.imports.get(0) {
+            format!("{}/{}", package.replace(".", "/"), class.name)
+        } else {
+            class.name.clone()
+        };
+        let this_class_idx = self.pool.add_class(&class_name);
+        self.class_file.this_class = this_class_idx;
+        
+        // 2. Set super class (default to Object if not specified)
+        let super_class_name = if let Some(ref extends) = class.extends {
+            // TODO: Convert TypeRef to string properly
+            "java/lang/Object"
+        } else {
+            "java/lang/Object"
+        };
+        let super_class_idx = self.pool.add_class(super_class_name);
+        self.class_file.super_class = super_class_idx;
+        
+        // 3. Set access flags (convert modifiers to bytecode flags)
+        let mut access_flags = super::modifiers_to_flags(&class.modifiers);
+        // Always add ACC_SUPER for classes (javac behavior)
+        access_flags |= access_flags::ACC_SUPER;
+        self.class_file.access_flags = access_flags;
+        
+        // 4. Process interfaces
+        for interface_ref in &class.implements {
+            // TODO: Convert TypeRef to string properly
+            let interface_name = "java/lang/Comparator"; // Placeholder
+            let interface_idx = self.pool.add_class(interface_name);
+            self.class_file.interfaces.push(interface_idx);
+        }
+        
+        // 5. Generate default constructor if no explicit constructor exists
+        if !self.has_explicit_constructor(class) {
+            self.generate_default_constructor(class)?;
+        }
+        
+        // 6. Generate all methods
+        for member in &class.body {
+            match member {
+                ClassMember::Method(method) => {
+                    self.gen_def_method(method, &GenContext::default())?;
+                }
+                ClassMember::Field(field) => {
+                    self.gen_def_field(field, &GenContext::default())?;
+                }
+                _ => {
+                    // TODO: Handle other member types (constructors, inner classes, etc.)
+                }
+            }
+        }
+        
         Ok(())
     }
     
@@ -1002,16 +1096,188 @@ impl Gen {
         Ok(())
     }
     
+    /// Create method info from current code buffer and add to class file  
+    fn create_method_info_from_code(&mut self, method: &MethodDecl) -> Result<()> {
+        let code = self.code.as_ref().ok_or_else(|| Error::CodeGen { 
+            message: "No code buffer for method".to_string() 
+        })?;
+        
+        // Add method name and descriptor to constant pool
+        let name_idx = self.pool.add_utf8(&method.name);
+        let descriptor = self.create_method_descriptor(method)?;
+        let descriptor_idx = self.pool.add_utf8(&descriptor);
+        
+        // Convert modifiers to access flags
+        let access_flags = super::modifiers_to_flags(&method.modifiers);
+        
+        // Create method info
+        let mut method_info = super::method::MethodInfo::new(access_flags, name_idx, descriptor_idx);
+        
+        // Create code attribute if method has body
+        if method.body.is_some() {
+            use super::attribute::{CodeAttribute, NamedAttribute, AttributeInfo};
+            
+            let code_attr = CodeAttribute {
+                max_stack: code.state.max_stacksize,
+                max_locals: code.max_locals,
+                code: code.code.clone(),
+                exception_table: Vec::new(), // TODO: Implement exception table
+                attributes: Vec::new(), // TODO: Add StackMapTable if needed
+            };
+            
+            let code_attr_name_idx = self.pool.add_utf8("Code");
+            let code_named_attr = NamedAttribute::new(
+                super::typed_index::ConstPoolIndex::from(code_attr_name_idx),
+                AttributeInfo::Code(code_attr)
+            );
+            
+            method_info.attributes.push(code_named_attr);
+        }
+        
+        // Add method to class file
+        self.class_file.methods.push(method_info);
+        
+        Ok(())
+    }
+    
+    /// Create method descriptor string from method declaration
+    fn create_method_descriptor(&self, method: &MethodDecl) -> Result<String> {
+        let mut descriptor = "(".to_string();
+        
+        // Add parameter types
+        for param in &method.parameters {
+            let param_type_desc = self.type_ref_to_descriptor(&param.type_ref)?;
+            descriptor.push_str(&param_type_desc);
+        }
+        
+        descriptor.push(')');
+        
+        // Add return type
+        if let Some(ref return_type) = method.return_type {
+            let return_type_desc = self.type_ref_to_descriptor(return_type)?;
+            descriptor.push_str(&return_type_desc);
+        } else {
+            descriptor.push('V'); // void
+        }
+        
+        Ok(descriptor)
+    }
+    
+    /// Convert TypeRef to JVM descriptor string
+    fn type_ref_to_descriptor(&self, type_ref: &TypeRef) -> Result<String> {
+        // Check if this is an array type
+        if type_ref.array_dims > 0 {
+            let element_desc = self.type_ref_to_base_descriptor(&type_ref.name)?;
+            let array_prefix = "[".repeat(type_ref.array_dims);
+            return Ok(format!("{}{}", array_prefix, element_desc));
+        }
+        
+        // Handle base types
+        self.type_ref_to_base_descriptor(&type_ref.name)
+    }
+    
+    /// Convert base type name to JVM descriptor string  
+    fn type_ref_to_base_descriptor(&self, name: &str) -> Result<String> {
+        match name {
+            // Primitive types
+            "boolean" => Ok("Z".to_string()),
+            "byte" => Ok("B".to_string()),
+            "short" => Ok("S".to_string()),
+            "int" => Ok("I".to_string()),
+            "long" => Ok("J".to_string()),
+            "float" => Ok("F".to_string()),
+            "double" => Ok("D".to_string()),
+            "char" => Ok("C".to_string()),
+            "void" => Ok("V".to_string()),
+            // Reference types
+            "String" => Ok("Ljava/lang/String;".to_string()),
+            "Object" => Ok("Ljava/lang/Object;".to_string()),
+            // Other class types
+            _ => {
+                // TODO: Proper class name resolution with package info
+                Ok(format!("L{};", name.replace(".", "/")))
+            }
+        }
+    }
+    
     /// Get the generated class file
-    pub fn get_class_file(self) -> ClassFile {
-        // TODO: Convert the Gen state into a ClassFile
-        // For now, return a minimal ClassFile
-        ClassFile::new()
+    pub fn get_class_file(mut self) -> ClassFile {
+        // Sync constant pool with class file
+        self.class_file.constant_pool = self.pool;
+        self.class_file
     }
     
     /// Access to the optimization manager for external configuration
     pub fn optimizer_mut(&mut self) -> &mut OptimizationManager {
         &mut self.optimizer
+    }
+    
+    /// Get mutable reference to code buffer for visitor methods
+    pub fn code_mut(&mut self) -> Option<&mut Code> {
+        self.code.as_mut()
+    }
+    
+    /// Get immutable reference to code buffer for visitor methods
+    pub fn code(&self) -> Option<&Code> {
+        self.code.as_ref()
+    }
+    
+    /// Check if class has explicit constructor
+    fn has_explicit_constructor(&self, class: &ClassDecl) -> bool {
+        class.body.iter().any(|member| {
+            matches!(member, ClassMember::Constructor(_))
+        })
+    }
+    
+    /// Generate default constructor: public ClassName() { super(); }
+    fn generate_default_constructor(&mut self, class: &ClassDecl) -> Result<()> {
+        use super::attribute::CodeAttribute;
+        
+        // Create method info for default constructor
+        let constructor_name_idx = self.pool.add_utf8("<init>");
+        let constructor_descriptor_idx = self.pool.add_utf8("()V");
+        
+        // Constructor access flags (public)
+        let access_flags = access_flags::ACC_PUBLIC;
+        
+        // Generate constructor bytecode: aload_0, invokespecial Object.<init>, return
+        let mut code_bytes = Vec::new();
+        code_bytes.push(opcodes::ALOAD_0);  // Load 'this'
+        code_bytes.push(opcodes::INVOKESPECIAL);
+        
+        // Add Object.<init> method reference to constant pool
+        let object_init_idx = self.pool.add_method_ref("java/lang/Object", "<init>", "()V");
+        
+        // Add methodref index to bytecode
+        code_bytes.extend_from_slice(&object_init_idx.to_be_bytes());
+        code_bytes.push(opcodes::RETURN);
+        
+        // Create code attribute
+        let code_attr = CodeAttribute {
+            max_stack: 1,
+            max_locals: 1,
+            code: code_bytes,
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        
+        // Create named attribute from code attribute
+        let code_attr_name_idx = self.pool.add_utf8("Code");
+        let named_code_attr = super::attribute::NamedAttribute::new(
+            super::typed_index::ConstPoolIndex::from(code_attr_name_idx),
+            super::attribute::AttributeInfo::Code(code_attr),
+        );
+        
+        // Create method info
+        let method_info = MethodInfo {
+            access_flags,
+            name_index: constructor_name_idx,
+            descriptor_index: constructor_descriptor_idx,
+            attributes: vec![named_code_attr],
+        };
+        
+        self.class_file.methods.push(method_info);
+        Ok(())
     }
     
     /// Get optimization statistics
@@ -1061,17 +1327,6 @@ impl Gen {
                 eprintln!("⚠️  WARNING: Statement type not implemented: {:?}", stmt);
                 Ok(())
             }
-        }
-    }
-}
-
-
-impl ClassContext {
-    pub fn new() -> Self {
-        Self {
-            class: None,
-            all_types: Vec::new(),
-            imports: Vec::new(),
         }
     }
 }
