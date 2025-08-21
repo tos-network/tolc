@@ -54,14 +54,15 @@ public class StackMapIfElse {
     let class_file = cw.get_class_file();
     let bytes = class_file_to_bytes(&class_file);
     
-    // Write to file for inspection
-    std::fs::write("StackMapIfElse.class", &bytes).expect("Failed to write class file");
+    // Write to file for inspection in /tmp/ directory
+    let class_file_path = "/tmp/StackMapIfElse.class";
+    std::fs::write(class_file_path, &bytes).expect("Failed to write class file");
     
     // Run javap to see the StackMapTable
     let output = Command::new("javap")
         .arg("-c")
         .arg("-verbose")
-        .arg("StackMapIfElse.class")
+        .arg(class_file_path)
         .output()
         .expect("Failed to run javap");
     
@@ -107,8 +108,8 @@ public class StackMapIfElse {
         println!("✅ JVM verification passed");
     }
     
-    // Clean up
-    std::fs::remove_file("StackMapIfElse.class").ok();
+    // Clean up - remove the temporary file
+    std::fs::remove_file(class_file_path).ok();
 }
 
 #[test]
@@ -166,14 +167,15 @@ public class StackMapLoop {
     let class_file = cw.get_class_file();
     let bytes = class_file_to_bytes(&class_file);
     
-    // Write to file for inspection
-    std::fs::write("StackMapLoop.class", &bytes).expect("Failed to write class file");
+    // Write to file for inspection in /tmp/ directory
+    let class_file_path = "/tmp/StackMapLoop.class";
+    std::fs::write(class_file_path, &bytes).expect("Failed to write class file");
     
     // Run javap to see the StackMapTable
     let output = Command::new("javap")
         .arg("-c")
         .arg("-verbose")
-        .arg("StackMapLoop.class")
+        .arg(class_file_path)
         .output()
         .expect("Failed to run javap");
     
@@ -214,8 +216,8 @@ public class StackMapLoop {
         println!("✅ Loop JVM verification passed");
     }
     
-    // Clean up
-    std::fs::remove_file("StackMapLoop.class").ok();
+    // Clean up - remove the temporary file
+    std::fs::remove_file(class_file_path).ok();
 }
 
 #[test] 
@@ -286,14 +288,15 @@ public class StackMapException {
     let class_file = cw.get_class_file();
     let bytes = class_file_to_bytes(&class_file);
     
-    // Write to file for inspection
-    std::fs::write("StackMapException.class", &bytes).expect("Failed to write class file");
+    // Write to file for inspection in /tmp/ directory
+    let class_file_path = "/tmp/StackMapException.class";
+    std::fs::write(class_file_path, &bytes).expect("Failed to write class file");
     
     // Run javap to see the StackMapTable and exception table
     let output = Command::new("javap")
         .arg("-c")
         .arg("-verbose")
-        .arg("StackMapException.class")
+        .arg(class_file_path)
         .output()
         .expect("Failed to run javap");
     
@@ -338,8 +341,8 @@ public class StackMapException {
         println!("✅ Exception JVM verification passed");
     }
     
-    // Clean up  
-    std::fs::remove_file("StackMapException.class").ok();
+    // Clean up - remove the temporary file
+    std::fs::remove_file(class_file_path).ok();
 }
 
 #[test]
@@ -395,14 +398,15 @@ public class StackMapExpressions {
     let class_file = cw.get_class_file();
     let bytes = class_file_to_bytes(&class_file);
     
-    // Write to file for inspection
-    std::fs::write("StackMapExpressions.class", &bytes).expect("Failed to write class file");
+    // Write to file for inspection in /tmp/ directory
+    let class_file_path = "/tmp/StackMapExpressions.class";
+    std::fs::write(class_file_path, &bytes).expect("Failed to write class file");
     
     // Run javap to see the StackMapTable
     let output = Command::new("javap")
         .arg("-c")
         .arg("-verbose")
-        .arg("StackMapExpressions.class")
+        .arg(class_file_path)
         .output()
         .expect("Failed to run javap");
     
@@ -449,6 +453,6 @@ public class StackMapExpressions {
         println!("✅ Complex expressions JVM verification passed");
     }
     
-    // Clean up
-    std::fs::remove_file("StackMapExpressions.class").ok();
+    // Clean up - remove the temporary file
+    std::fs::remove_file(class_file_path).ok();
 }
