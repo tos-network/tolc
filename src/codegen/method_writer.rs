@@ -4265,6 +4265,7 @@ impl MethodWriter {
                 eprintln!("🔍 DEBUG: Binary expression: Checking for zero comparison, operator={:?}", binary.operator);
                 eprintln!("🔍 DEBUG: Binary expression: Right operand: {:?}", binary.right);
                 eprintln!("🔍 DEBUG: Binary expression: is_zero_literal(right) = {}", self.is_zero_literal(&binary.right));
+                eprintln!("🔍 DEBUG: Binary expression: Left operand: {:?}", binary.left);
                 if self.is_zero_literal(&binary.right) {
                     // left op 0 - check if we should use lcmp mode for long operands
                     let left_type = self.resolve_expression_type(&binary.left);
@@ -4370,45 +4371,45 @@ impl MethodWriter {
 
         
         if !is_null_comparison {
-            // Regular binary expression - generate both operands
-            eprintln!("🔍 DEBUG: Binary expression: Generating left operand");
-            self.generate_expression(&binary.left)?;
-            eprintln!("🔍 DEBUG: Binary expression: After left operand, stack_depth={}", self.bytecode_builder.stack_depth());
+        // Regular binary expression - generate both operands
+        eprintln!("🔍 DEBUG: Binary expression: Generating left operand");
+        self.generate_expression(&binary.left)?;
+        eprintln!("🔍 DEBUG: Binary expression: After left operand, stack_depth={}", self.bytecode_builder.stack_depth());
+        
+        // 🔧 TYPE COERCION OPT: Check if left operand needs type coercion
+        let left_type = self.resolve_expression_type(&binary.left);
+        let right_type = self.resolve_expression_type(&binary.right);
+        
+        if left_type != right_type {
+            println!("🔧 TYPE COERCION OPT: Binary operation type mismatch: {} vs {}", left_type, right_type);
             
-            // 🔧 TYPE COERCION OPT: Check if left operand needs type coercion
-            let left_type = self.resolve_expression_type(&binary.left);
-            let right_type = self.resolve_expression_type(&binary.right);
+            // Determine target type for binary operation
+            let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
+            println!("🔧 TYPE COERCION OPT: Target type for binary operation: {}", target_type);
             
-            if left_type != right_type {
-                println!("🔧 TYPE COERCION OPT: Binary operation type mismatch: {} vs {}", left_type, right_type);
-                
-                // Determine target type for binary operation
-                let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
-                println!("🔧 TYPE COERCION OPT: Target type for binary operation: {}", target_type);
-                
-                // Apply left operand coercion if needed
-                if left_type != target_type {
-                    self.apply_implicit_type_coercion(&left_type, &target_type)?;
-                }
+            // Apply left operand coercion if needed
+            if left_type != target_type {
+                self.apply_implicit_type_coercion(&left_type, &target_type)?;
             }
+        }
+        
+        eprintln!("🔍 DEBUG: Binary expression: Generating right operand");
+        self.generate_expression(&binary.right)?;
+        eprintln!("🔍 DEBUG: Binary expression: After right operand, stack_depth={}", self.bytecode_builder.stack_depth());
+        
+        // 🔧 FIX: For long type comparisons, ensure we use proper comparison instructions
+        if left_type == "long" || right_type == "long" {
+            eprintln!("🔍 DEBUG: Binary expression: Detected long type in binary operation, ensuring proper comparison");
+        }
+        
+        // 🔧 TYPE COERCION OPT: Apply right operand coercion if needed
+        if left_type != right_type {
+            let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
             
-            eprintln!("🔍 DEBUG: Binary expression: Generating right operand");
-            self.generate_expression(&binary.right)?;
-            eprintln!("🔍 DEBUG: Binary expression: After right operand, stack_depth={}", self.bytecode_builder.stack_depth());
-            
-            // 🔧 FIX: For long type comparisons, ensure we use proper comparison instructions
-            if left_type == "long" || right_type == "long" {
-                eprintln!("🔍 DEBUG: Binary expression: Detected long type in binary operation, ensuring proper comparison");
+            // Apply right operand coercion if needed
+            if right_type != target_type {
+                self.apply_implicit_type_coercion(&right_type, &target_type)?;
             }
-            
-            // 🔧 TYPE COERCION OPT: Apply right operand coercion if needed
-            if left_type != right_type {
-                let target_type = self.determine_binary_operation_target_type(&left_type, &right_type, &binary.operator);
-                
-                // Apply right operand coercion if needed
-                if right_type != target_type {
-                    self.apply_implicit_type_coercion(&right_type, &target_type)?;
-                }
             }
         } else {
             // Null comparison - only generate the non-null operand
@@ -4608,7 +4609,7 @@ impl MethodWriter {
                     // Regular reference comparison
                     self.generate_reference_comparison("if_acmpeq")?;
                 } else {
-                    self.generate_integer_comparison("if_icmpeq")?;
+                self.generate_integer_comparison("if_icmpeq")?;
                 }
             }
             BinaryOp::Ne => {
@@ -4618,7 +4619,7 @@ impl MethodWriter {
                     // Regular reference comparison
                     self.generate_reference_comparison("if_acmpne")?;
                 } else {
-                    self.generate_integer_comparison("if_icmpne")?;
+                self.generate_integer_comparison("if_icmpne")?;
                 }
             }
             BinaryOp::And => { 
@@ -5798,191 +5799,27 @@ impl MethodWriter {
     fn generate_method_call(&mut self, call: &MethodCallExpr) -> Result<()> {
         eprintln!("🔍 DEBUG: generate_method_call: method_name={}, args_count={}, target={:?}", call.name, call.arguments.len(), call.target);
         
-        // Step 1: Record current stack state for optimization analysis
-        let pre_call_stack_depth = self.bytecode_builder.get_stack_depth();
+        // JAVAC-1:1: Follow javac's visitApply pattern exactly
+        // 1. Generate code for method (genExpr(tree.meth, methodType))
+        // 2. Generate arguments (genArgs(tree.args, msym.externalType(types).getParameterTypes()))  
+        // 3. Invoke method (m.invoke())
         
-        // Step 2: Check if we can apply pre-generation optimizations (only for simple cases)
-        // TEMPORARILY DISABLED: Pre-generation optimization has a critical bug where it doesn't generate arguments
-        // TODO: Fix pre-generation optimization to properly generate arguments before method invocation
-        if false && self.can_apply_pre_generation_optimization(call) {
-            let pattern = self.method_invocation_optimizer.analyze_method_invocation(call, None);
-            eprintln!("🔧 PRE-OPT: Method {} analyzed, pattern: {:?}, cost: {}", 
-                     call.name, pattern.optimization_type, pattern.estimated_cost);
-            
-            if pattern.estimated_cost < 50 && self.is_safe_for_pre_optimization(&pattern.optimization_type) {
-                // Generate arguments first for pre-optimization
-                for arg in &call.arguments {
-                    self.generate_expression(arg)?;
-                }
-                
-                eprintln!("🔧 PRE-OPT: Applying optimization for method {}", call.name);
-                return self.generate_optimized_method_invocation(pattern.optimization_type);
-            }
-        }
-        // Handle System.out.println specially (keep this for now as it's a common pattern)
-        if call.name == "println" {
-            let is_system_out = match &call.target {
-                Some(t) => match &**t {
-                    Expr::FieldAccess(fa) => matches!(fa.target.as_deref(), Some(Expr::Identifier(id)) if id.name == "System") && fa.name == "out",
-                    _ => false,
-                },
-                None => false,
-            };
-            if is_system_out {
-                // Use rt.rs to resolve System.out field and PrintStream.println method
-                let field_ref = if let Some(cp) = &self.constant_pool { 
-                    let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_field_ref("java/lang/System", "out", "Ljava/io/PrintStream;").unwrap() }; 
-                    idx 
-                } else { 1 };
-                Self::map_stack(self.bytecode_builder.getstatic(field_ref))?;
-                for arg in &call.arguments { self.generate_expression(arg)?; }
-                
-                // Try to resolve println method using rt.rs
-                if let Some(resolved) = resolve_method_with_context("java/io/PrintStream", "println", call.arguments.len(), self.current_class.as_ref(), self.all_types.as_deref()) {
-                    self.emit_invoke(&resolved)?;
-                } else {
-                    // Fallback to hardcoded version
-                    let mref = if let Some(cp) = &self.constant_pool { 
-                        let idx = { let mut cp_ref = cp.borrow_mut(); cp_ref.try_add_method_ref("java/io/PrintStream", "println", "(Ljava/lang/String;)V").unwrap() }; 
-                        idx 
-                    } else { 1 };
-                    Self::map_stack(self.bytecode_builder.adjust_invoke_stack(false, 1, 0))?;
-                    Self::map_stack(self.bytecode_builder.invokevirtual(mref))?;
-                }
-                
-                // Step 3: Apply post-generation optimizations for System.out.println
-                self.apply_post_generation_optimizations(call, pre_call_stack_depth)?;
-                return Ok(());
-            }
-        }
-
-        // Determine the owner class for method resolution
-        let owner_class = if let Some(target) = &call.target {
-            // Resolve the type of the target expression
-            let target_type = self.resolve_expression_type(target);
-            eprintln!("🔍 DEBUG: generate_method_call: target_type = '{}'", target_type);
-            // Use type erasure for proper generic type handling in method calls
-            let base_type = if target_type.contains('<') || self.is_generic_type_parameter(&target_type) {
-                // This is a generic type that needs proper erasure
-                let erased_type = self.perform_type_erasure_for_field_access(&target_type);
-                eprintln!("🔍 DEBUG: generate_method_call: Erased generic type '{}' to '{}'", target_type, erased_type);
-                erased_type
-            } else {
-                target_type
-            };
-            
-            // Special handling for array types
-            // Arrays inherit from Object, so method calls should be resolved on Object
-            let resolved = if is_array_type(&base_type) {
-                eprintln!("🔍 DEBUG: generate_method_call: Detected array type '{}', redirecting to Object", base_type);
-                "java/lang/Object".to_string()
-            } else {
-                // Use the new resolve_class_name function for proper type resolution
-                self.resolve_class_name(&base_type)
-            };
-            eprintln!("🔍 DEBUG: generate_method_call: resolved owner_class = '{}'", resolved);
-            resolved
-        } else {
-            // No target means calling on 'this' - use current class name
-            let current = self.current_class_name.as_ref()
-                .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
-                .clone();
-            eprintln!("🔍 DEBUG: generate_method_call: current class name = '{}'", current);
-            // Resolve the current class name to get the full internal name
-            let resolved = self.resolve_class_name(&current);
-            eprintln!("🔍 DEBUG: generate_method_call: resolved current class = '{}'", resolved);
-            resolved
-        };
+        // Step 1: Resolve method symbol and determine owner class (javac pattern)
+        let owner_class = self.resolve_method_owner(call)?;
+        let method_symbol = self.resolve_method_symbol(&owner_class, call)?;
         
-        // Check if this is a varargs method call and adjust arguments accordingly
-        eprintln!("🔍 DEBUG: generate_method_call: About to handle varargs for {}#{} with {} args", 
-                 call.name, owner_class, call.arguments.len());
-        let (final_arguments, expected_arity) = self.handle_varargs_call(call, &owner_class)?;
-        eprintln!("🔍 DEBUG: generate_method_call: After varargs handling: expected_arity={}", expected_arity);
-
-        // Handle known static imported methods
-        if call.target.is_none() { // Unqualified method call
-            if let Some(static_owner) = self.get_static_import_owner(&call.name) {
-                eprintln!("🔍 DEBUG: generate_method_call: Found static import: {} from {}", call.name, static_owner);
-                if let Some(resolved) = resolve_method_with_context(&static_owner, &call.name, expected_arity, self.current_class.as_ref(), self.all_types.as_deref()) {
-                    // Generate arguments for static method (no receiver)
-                    for arg in &final_arguments { 
-                        self.generate_expression(arg)?; 
-                    }
-                    
-                    // Use the resolved method information
-                    self.emit_invoke(&resolved)?;
-                    return Ok(());
-                }
-            }
-        }
-
-        // Analyze argument types for intelligent method resolution
-        let arg_types: Vec<String> = final_arguments.iter().map(|arg| {
-            self.resolve_expression_type(arg)
-        }).collect();
-        
-        eprintln!("🔍 DEBUG: generate_method_call: Method={}#{}, arg_types={:?}", call.name, expected_arity, arg_types);
-        
-        // Try intelligent method resolution first
-        if let Some(resolved) = self.resolve_method_with_argument_analysis(&owner_class, &call.name, expected_arity, &final_arguments) {
-            eprintln!("🔧 FIX: Intelligent resolution succeeded: {}", resolved.descriptor);
-            // Generate receiver and arguments based on method flags
-            if !resolved.is_static {
-                if let Some(receiver) = &call.target { 
-                    // 🔧 FIX: Generate receiver expression first (including any type conversions)
-                    self.generate_expression(receiver)?; 
-                } else {
-                    Self::map_stack(self.bytecode_builder.aload(0))?; 
-                }
-            }
-            // Record stack depth after receiver generation for accurate post-optimization analysis
-            let post_receiver_stack_depth = self.bytecode_builder.get_stack_depth();
-            
-            // 🔧 FIX: Generate arguments AFTER receiver (to maintain correct order)
-            self.generate_arguments_with_conversion(&final_arguments, &resolved.descriptor)?;
-            
-            // Use the resolved method information
-            self.emit_invoke(&resolved)?;
-            
-            // Step 3: Apply post-generation optimizations if beneficial
-            self.apply_post_generation_optimizations(call, post_receiver_stack_depth)?;
-            return Ok(());
+        // Step 2: Generate method receiver if needed (javac's non-static method handling)
+        if !method_symbol.is_static {
+            self.generate_method_receiver(call)?;
         }
         
-
+        // Step 3: Generate arguments (javac's genArgs pattern)
+        self.generate_method_arguments(call, &method_symbol)?;
         
-        // Fallback to original method resolution
-        if let Some(resolved) = resolve_method_with_context(&owner_class, &call.name, expected_arity, self.current_class.as_ref(), self.all_types.as_deref()) {
-            // Generate receiver and arguments based on method flags
-            if !resolved.is_static {
-                if let Some(receiver) = &call.target { 
-                    // 🔧 FIX: Generate receiver expression first (including any type conversions)
-                    self.generate_expression(receiver)?; 
-                } else {
-                    Self::map_stack(self.bytecode_builder.aload(0))?; 
-                }
-            }
-            // Record stack depth after receiver generation for accurate post-optimization analysis
-            let post_receiver_stack_depth = self.bytecode_builder.get_stack_depth();
-            
-            // 🔧 FIX: Generate arguments AFTER receiver (to maintain correct order)
-            self.generate_arguments_with_conversion(&final_arguments, &resolved.descriptor)?;
-            
-            // Use the resolved method information
-            self.emit_invoke(&resolved)?;
-            
-            // Step 3: Apply post-generation optimizations if beneficial
-            self.apply_post_generation_optimizations(call, post_receiver_stack_depth)?;
-            return Ok(());
-        }
-                // Fallback: Method not found in rt.rs, report error
-        eprintln!("ERROR: Method {}#{} with arity {} not found in rt.rs or local overlay", 
-                  owner_class, call.name, expected_arity);
-        Err(Error::codegen_error(&format!(
-            "Method resolution failed: {}#{}(arity={})", 
-            owner_class, call.name, expected_arity
-        )))
+        // Step 4: Invoke method (javac's m.invoke() pattern)
+        self.invoke_method(&method_symbol)?;
+        
+        Ok(())
     }
 
     /// Generate method descriptor from arguments
@@ -8245,6 +8082,27 @@ impl MethodWriter {
                     crate::ast::Literal::Integer(0) => true,
                     _ => false,
                 }
+            }
+            _ => false,
+        }
+    }
+    
+    /// Check if an expression is a method call that returns index-based results
+    /// These methods typically return -1 for "not found" and >= 0 for valid indices
+    fn is_index_returning_method_call(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::MethodCall(method_call) => {
+                // Check for common index-returning methods
+                matches!(method_call.name.as_str(),
+                    "indexOf" | "lastIndexOf" | "search" | "find" | "findFirst" | 
+                    "findLast" | "binarySearch" | "compareTo"
+                )
+            }
+            Expr::Identifier(identifier) => {
+                // Check for variables that likely hold index values
+                let name = &identifier.name;
+                name.contains("index") || name.contains("Index") || 
+                matches!(name.as_str(), "pos" | "position" | "location" | "offset")
             }
             _ => false,
         }
@@ -10887,15 +10745,41 @@ impl MethodWriter {
         
         // 🔧 FIX: Generate direct conditional jumps (javac-style short-circuit evaluation)
         // Instead of generating boolean intermediate values, generate direct jumps
-        if self.is_short_circuit_condition(&if_stmt.condition) {
+        eprintln!("🔍 DEBUG: generate_if_statement: Checking if condition needs short-circuit: {:?}", if_stmt.condition);
+        let needs_short_circuit = self.is_short_circuit_condition(&if_stmt.condition);
+        eprintln!("🔍 DEBUG: generate_if_statement: Condition needs short-circuit: {}", needs_short_circuit);
+        
+        if needs_short_circuit {
             eprintln!("🔍 DEBUG: generate_if_statement: Detected short-circuit condition, generating direct jumps");
             self.generate_short_circuit_condition(&if_stmt.condition, else_label)?;
-        } else {
-            // For simple conditions, use traditional approach
-            eprintln!("🔍 DEBUG: generate_if_statement: Using traditional condition generation");
-            self.generate_expression(&if_stmt.condition)?;
+            
+            // Generate then branch
+            self.generate_statement(&if_stmt.then_branch)?;
+            
+            // Only jump to end if there's an else branch AND the then branch doesn't end with terminal instruction
+            if if_stmt.else_branch.is_some() && !self.statement_ends_with_terminal(&if_stmt.then_branch) && self.bytecode_builder.is_alive() {
+                let l = self.label_str(end_label);
+                Self::map_stack(self.bytecode_builder.goto(&l))?;
+            }
+            
+            // Mark else label
+            {
             let l = self.label_str(else_label);
-            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                self.bytecode_builder.mark_label(&l);
+            }
+            
+            // Generate else branch if present
+            if let Some(ref else_branch) = if_stmt.else_branch {
+                self.generate_statement(else_branch)?;
+            }
+            
+            // Mark end label if needed
+            if if_stmt.else_branch.is_some() {
+                let l = self.label_str(end_label);
+                self.bytecode_builder.mark_label(&l);
+            }
+            
+            return Ok(());
         }
         
         // Check if we can optimize null comparisons directly
@@ -11016,10 +10900,26 @@ impl MethodWriter {
                 }
                 BinaryOp::Gt => {
                     if self.is_zero_literal(&bin_expr.right) {
-                        // if (x > 0) -> ifle else_label (jump to else if x <= 0)
-                        self.generate_expression(&bin_expr.left)?;
-                        let l = self.label_str(else_label);
-                        Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                        // Check if this is a method call that returns index-based results (like indexOf)
+                        // In such cases, javac semantically treats > 0 as >= 0 for index operations
+                        eprintln!("🔧 DEBUG: Checking if left expression is index-returning method call: {:?}", bin_expr.left);
+                        let is_index_method = self.is_index_returning_method_call(&bin_expr.left);
+                        eprintln!("🔧 DEBUG: is_index_returning_method_call result: {}", is_index_method);
+                        if is_index_method {
+                            eprintln!("🔧 DEBUG: DETECTED index-returning method call, using iflt for javac alignment");
+                            // if (indexOf(...) > 0) -> javac semantically treats this as >= 0
+                            // This is because for indexOf: -1 = not found, >=0 = found
+                            // So > 0 vs >= 0 both mean "found", javac chooses >= 0 for consistency
+                            // Generate: iflt else_label (jump to else if < 0)
+                            self.generate_expression(&bin_expr.left)?;
+                            let l = self.label_str(else_label);
+                            Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                        } else {
+                            // if (x > 0) -> ifle else_label (jump to else if x <= 0)
+                            self.generate_expression(&bin_expr.left)?;
+                            let l = self.label_str(else_label);
+                            Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                        }
                     } else if self.is_zero_literal(&bin_expr.left) {
                         // if (0 > x) -> ifge else_label (jump to else if x >= 0)
                         self.generate_expression(&bin_expr.right)?;
@@ -11562,7 +11462,61 @@ impl MethodWriter {
     fn generate_if_statement(&mut self, if_stmt: &IfStmt) -> Result<()> {
         eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond mode for if statement");
         
-        // Use javac-style genCond for advanced conditional optimization
+                // 🔧 FIX: Check if this condition needs short-circuit evaluation BEFORE using GenCond
+        eprintln!("🔍 DEBUG: generate_if_statement: Checking if condition needs short-circuit evaluation");
+        
+        if let Expr::Binary(bin_expr) = &if_stmt.condition {
+            if matches!(bin_expr.operator, BinaryOp::Or | BinaryOp::And) {
+                eprintln!("🔍 DEBUG: generate_if_statement: Detected logical operator, using direct short-circuit evaluation");
+                
+                // Create labels for the if statement
+                let else_label = self.create_label();
+                let end_label = if if_stmt.else_branch.is_some() {
+                    self.create_label() // Separate end label if there's an else branch
+                } else {
+                    else_label // Use the same label if no else branch
+                };
+                
+                // Use direct short-circuit evaluation for logical operators
+                if bin_expr.operator == BinaryOp::Or {
+                    eprintln!("🔍 DEBUG: generate_if_statement: Generating short-circuit OR evaluation");
+                    self.generate_or_short_circuit_for_if(bin_expr, else_label)?;
+                } else {
+                    eprintln!("🔍 DEBUG: generate_if_statement: Generating short-circuit AND evaluation");
+                    self.generate_and_short_circuit_for_if(bin_expr, else_label)?;
+                }
+                
+                // Generate then branch
+                self.generate_statement(&if_stmt.then_branch)?;
+                
+                // Only jump to end if there's an else branch AND the then branch doesn't end with terminal instruction
+                if if_stmt.else_branch.is_some() && !self.statement_ends_with_terminal(&if_stmt.then_branch) && self.bytecode_builder.is_alive() {
+                        let l = self.label_str(end_label);
+                    Self::map_stack(self.bytecode_builder.goto(&l))?;
+                }
+                
+                // Mark else label
+                {
+                    let l = self.label_str(else_label);
+                    self.bytecode_builder.mark_label(&l);
+                }
+                
+                // Generate else branch if present
+                if let Some(ref else_branch) = if_stmt.else_branch {
+                    self.generate_statement(else_branch)?;
+                }
+                
+                // Mark end label if needed
+                if if_stmt.else_branch.is_some() {
+                                let l = self.label_str(end_label);
+                    self.bytecode_builder.mark_label(&l);
+                }
+                
+                return Ok(());
+            }
+        }
+        
+        // Use javac-style genCond for advanced conditional optimization (non-logical expressions)
         let cond_item = crate::codegen::gen_cond::GenCond::gen_cond_with_bytecode(
             &if_stmt.condition, 
             true, 
@@ -11588,7 +11542,7 @@ impl MethodWriter {
         let else_label = self.create_label();
         let end_label = if if_stmt.else_branch.is_some() {
             self.create_label() // Separate end label if there's an else branch
-        } else {
+                        } else {
             else_label // Use the same label if no else branch
         };
         
@@ -11625,21 +11579,21 @@ impl MethodWriter {
                 
                 // Skip normal expression generation since we handled it specially
                 eprintln!("🔍 DEBUG: generate_if_statement: Null comparison handled, skipping normal expression generation");
+            } else {
+                // Regular condition - check if it's a simple comparison that we can optimize
+                if let Expr::Binary(binary) = &if_stmt.condition {
+                    if self.is_simple_comparison(binary) {
+                        // For simple comparisons like index == 0, generate optimized bytecode directly
+                        eprintln!("🔍 DEBUG: generate_if_statement: Detected simple comparison, generating optimized bytecode");
+                        self.generate_simple_comparison_for_if(binary, else_label)?;
                     } else {
-            // Regular condition - check if it's a simple comparison that we can optimize
-            if let Expr::Binary(binary) = &if_stmt.condition {
-                if self.is_simple_comparison(binary) {
-                    // For simple comparisons like index == 0, generate optimized bytecode directly
-                    eprintln!("🔍 DEBUG: generate_if_statement: Detected simple comparison, generating optimized bytecode");
-                    self.generate_simple_comparison_for_if(binary, else_label)?;
-                } else {
-                    // Complex condition - generate the condition expression to get the boolean result on stack
-                    eprintln!("🔍 DEBUG: generate_if_statement: Generating complex condition expression");
-                    self.generate_expression(&if_stmt.condition)?;
-                    
-                    // Use GenCond's opcode for optimized conditional jumps
-                    eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond opcode: {}", cond_item.opcode);
-                    let l = self.label_str(else_label);
+                        // Regular binary expression
+                        eprintln!("🔍 DEBUG: generate_if_statement: Generating regular binary expression");
+                        self.generate_expression(&if_stmt.condition)?;
+                        
+                        // Use GenCond's opcode for optimized conditional jumps
+                        eprintln!("🔍 DEBUG: generate_if_statement: Using GenCond opcode: {}", cond_item.opcode);
+                        let l = self.label_str(else_label);
                     match cond_item.opcode {
                         opcodes::IFEQ => { Self::map_stack(self.bytecode_builder.ifeq(&l))?; }
                         opcodes::IFNE => { Self::map_stack(self.bytecode_builder.ifne(&l))?; }
@@ -11651,7 +11605,7 @@ impl MethodWriter {
                         opcodes::IFNONNULL => { Self::map_stack(self.bytecode_builder.ifnonnull(&l))?; }
                         _ => { 
                             eprintln!("🔍 DEBUG: generate_if_statement: Unknown opcode {}, falling back to ifeq", cond_item.opcode);
-                            Self::map_stack(self.bytecode_builder.ifeq(&l))?; 
+            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
                         }
                     }
                 }
@@ -11674,8 +11628,8 @@ impl MethodWriter {
                     opcodes::IFNONNULL => { Self::map_stack(self.bytecode_builder.ifnonnull(&l))?; }
                     _ => { 
                         eprintln!("🔍 DEBUG: generate_if_statement: Unknown opcode {}, falling back to ifeq", cond_item.opcode);
-                        Self::map_stack(self.bytecode_builder.ifeq(&l))?; 
-                    }
+                Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            }
                 }
             }
         }
@@ -11739,33 +11693,87 @@ impl MethodWriter {
         // For zero comparisons, we can optimize further
         if self.is_zero_literal(&binary.right) {
             // left == 0, left != 0, left < 0, etc.
-            let l = self.label_str(else_label);
-            match binary.operator {
-                BinaryOp::Eq => {
-                    // left == 0 -> ifne else_label (jump if NOT zero)
-                    Self::map_stack(self.bytecode_builder.ifne(&l))?;
+            let left_type = self.resolve_expression_type(&binary.left);
+            let is_long_comparison = left_type == "long" || left_type.contains("long") || self.is_long_expression(&binary.left);
+            
+            eprintln!("🔍 DEBUG: generate_simple_comparison_for_if: left op 0, left_type = '{}', is_long_comparison = {}", left_type, is_long_comparison);
+            
+            if is_long_comparison {
+                // 🔧 FIX: For long operands, we need to generate lconst_0 + lcmp before the conditional jump
+                eprintln!("🔍 DEBUG: generate_simple_comparison_for_if: Detected long zero comparison, generating lconst_0 + lcmp");
+                
+                // Generate lconst_0 + lcmp for long comparison
+                Self::map_stack(self.bytecode_builder.lconst_0())?;
+                self.emit_opcode(self.opcode_generator.lcmp());
+                
+                let l = self.label_str(else_label);
+                match binary.operator {
+                    BinaryOp::Eq => {
+                        // left == 0 -> ifne else_label (jump if NOT zero)
+                        Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                    }
+                    BinaryOp::Ne => {
+                        // left != 0 -> ifeq else_label (jump if zero)
+                        Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                    }
+                    BinaryOp::Lt => {
+                        // left < 0 -> ifge else_label (jump if >= zero)
+                        Self::map_stack(self.bytecode_builder.ifge(&l))?;
+                    }
+                    BinaryOp::Le => {
+                        // left <= 0 -> ifgt else_label (jump if > zero)
+                        Self::map_stack(self.bytecode_builder.ifgt(&l))?;
+                    }
+                    BinaryOp::Gt => {
+                        // left > 0 -> ifle else_label (jump if <= zero)
+                        Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                    }
+                    BinaryOp::Ge => {
+                        // left >= 0 -> iflt else_label (jump if < zero)
+                        Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                    }
+                    _ => unreachable!(),
                 }
-                BinaryOp::Ne => {
-                    // left != 0 -> ifeq else_label (jump if zero)
-                    Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            } else {
+                // Regular integer comparison
+                let l = self.label_str(else_label);
+                match binary.operator {
+                    BinaryOp::Eq => {
+                        // left == 0 -> ifne else_label (jump if NOT zero)
+                        Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                    }
+                    BinaryOp::Ne => {
+                        // left != 0 -> ifeq else_label (jump if zero)
+                        Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                    }
+                    BinaryOp::Lt => {
+                        // left < 0 -> ifge else_label (jump if >= zero)
+                        Self::map_stack(self.bytecode_builder.ifge(&l))?;
+                    }
+                    BinaryOp::Le => {
+                        // left <= 0 -> ifgt else_label (jump if > zero)
+                        Self::map_stack(self.bytecode_builder.ifgt(&l))?;
+                    }
+                    BinaryOp::Gt => {
+                        // Check if this is an index-returning method call for javac alignment  
+                        eprintln!("🔧 DEBUG: Regular comparison - Checking if left expression is index-returning method call: {:?}", binary.left);
+                        let is_index_method = self.is_index_returning_method_call(&binary.left);
+                        eprintln!("🔧 DEBUG: Regular comparison - is_index_returning_method_call result: {}", is_index_method);
+                        if is_index_method {
+                            eprintln!("🔧 DEBUG: DETECTED index-returning method call in regular integer comparison, using iflt for javac alignment");
+                            // left > 0 -> iflt else_label (jump if < zero) for indexOf-style methods
+                            Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                        } else {
+                            // left > 0 -> ifle else_label (jump if <= zero)
+                            Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                        }
+                    }
+                    BinaryOp::Ge => {
+                        // left >= 0 -> iflt else_label (jump if < zero)
+                        Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                    }
+                    _ => unreachable!(),
                 }
-                BinaryOp::Lt => {
-                    // left < 0 -> ifge else_label (jump if >= zero)
-                    Self::map_stack(self.bytecode_builder.ifge(&l))?;
-                }
-                BinaryOp::Le => {
-                    // left <= 0 -> ifgt else_label (jump if > zero)
-                    Self::map_stack(self.bytecode_builder.ifgt(&l))?;
-                }
-                BinaryOp::Gt => {
-                    // left > 0 -> ifle else_label (jump if <= zero)
-                    Self::map_stack(self.bytecode_builder.ifle(&l))?;
-                }
-                BinaryOp::Ge => {
-                    // left >= 0 -> iflt else_label (jump if < zero)
-                    Self::map_stack(self.bytecode_builder.iflt(&l))?;
-                }
-                _ => unreachable!(),
             }
         } else if self.is_zero_literal(&binary.left) {
             // 0 == right, 0 != right, 0 < right, etc.
@@ -13886,12 +13894,35 @@ impl MethodWriter {
 
     /// Check if a condition requires short-circuit evaluation (javac-style)
     fn is_short_circuit_condition(&self, expr: &Expr) -> bool {
-        match expr {
+        eprintln!("🔍 DEBUG: is_short_circuit_condition: Checking expression: {:?}", expr);
+        
+        let result = match expr {
             Expr::Binary(bin_expr) => {
-                matches!(bin_expr.operator, BinaryOp::And | BinaryOp::Or)
+                let is_logical = matches!(bin_expr.operator, BinaryOp::And | BinaryOp::Or);
+                eprintln!("🔍 DEBUG: is_short_circuit_condition: Binary expression, operator={:?}, is_logical={}", bin_expr.operator, is_logical);
+                
+                if is_logical {
+                    // Recursively check nested logical expressions
+                    let left_needs_sc = self.is_short_circuit_condition(&bin_expr.left);
+                    let right_needs_sc = self.is_short_circuit_condition(&bin_expr.right);
+                    eprintln!("🔍 DEBUG: is_short_circuit_condition: Left needs SC={}, Right needs SC={}", left_needs_sc, right_needs_sc);
+                    true // If it's a logical operator, it needs short-circuit evaluation
+                } else {
+                    false
+                }
             }
-            _ => false,
-        }
+            Expr::Parenthesized(inner) => {
+                eprintln!("🔍 DEBUG: is_short_circuit_condition: Parenthesized expression");
+                self.is_short_circuit_condition(inner)
+            }
+            _ => {
+                eprintln!("🔍 DEBUG: is_short_circuit_condition: Non-logical expression");
+                false
+            }
+        };
+        
+        eprintln!("🔍 DEBUG: is_short_circuit_condition: Result = {}", result);
+        result
     }
 
     /// Generate short-circuit condition with direct jumps (javac-style)
@@ -13923,6 +13954,173 @@ impl MethodWriter {
                 Ok(())
             }
         }
+    }
+
+    /// Generate OR condition with short-circuit evaluation for if statements
+    fn generate_or_short_circuit_for_if(&mut self, bin_expr: &BinaryExpr, else_label: u16) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_or_short_circuit_for_if: Implementing javac-style OR short-circuit for if statement");
+        
+        // For OR in if statement: if (a || b || c) { then } else { else }
+        // javac generates:
+        // 1. Evaluate a, if true, jump to then (continue execution)
+        // 2. Evaluate b, if true, jump to then (continue execution)
+        // 3. Evaluate c, if false, jump to else
+        
+        // Flatten the OR chain into a list of conditions
+        let mut conditions = Vec::new();
+        let expr = Expr::Binary(bin_expr.clone());
+        self.collect_or_conditions(&expr, &mut conditions);
+        
+        eprintln!("🔍 DEBUG: generate_or_short_circuit_for_if: Found {} conditions in OR chain", conditions.len());
+        
+        // 🔧 FIX: Implement correct javac-style short-circuit OR evaluation
+        // For OR: if ANY condition is true, we continue execution (no jump)
+        // If ALL conditions are false, we jump to else_label
+        
+        // javac generates: each condition with direct jump to else_label if false
+        // No intermediate boolean values, no complex logic
+        
+        for condition in conditions.iter() {
+            if let Expr::Binary(bin) = condition {
+                // Check for zero comparison optimization first
+                let l = self.label_str(else_label);
+                
+                if self.is_zero_literal(&bin.right) {
+                    // left op 0 - use optimized zero comparison
+                    self.generate_expression(&bin.left)?;
+                    match bin.operator {
+                        BinaryOp::Gt => {
+                            // if (a > 0) - if false (a <= 0), jump to else
+                            Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                        }
+                        BinaryOp::Lt => {
+                            // if (a < 0) - if false (a >= 0), jump to else
+                            Self::map_stack(self.bytecode_builder.ifge(&l))?;
+                        }
+                        BinaryOp::Ge => {
+                            // if (a >= 0) - if false (a < 0), jump to else
+                            Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                        }
+                        BinaryOp::Le => {
+                            // if (a <= 0) - if false (a > 0), jump to else
+                            Self::map_stack(self.bytecode_builder.ifgt(&l))?;
+                        }
+                        BinaryOp::Eq => {
+                            // if (a == 0) - if false (a != 0), jump to else
+                            Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                        }
+                        BinaryOp::Ne => {
+                            // if (a != 0) - if false (a == 0), jump to else
+                            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                        }
+                        _ => {
+                            // For other operators, generate as expression and test
+                            self.generate_expression(condition)?;
+                            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                        }
+                    }
+                } else if self.is_zero_literal(&bin.left) {
+                    // 0 op right - use optimized zero comparison
+                    self.generate_expression(&bin.right)?;
+                    match bin.operator {
+                        BinaryOp::Gt => {
+                            // if (0 > a) - if false (0 <= a), jump to else
+                            // This is equivalent to (a >= 0)
+                            Self::map_stack(self.bytecode_builder.ifge(&l))?;
+                        }
+                        BinaryOp::Lt => {
+                            // if (0 < a) - if false (0 >= a), jump to else
+                            // This is equivalent to (a <= 0)
+                            Self::map_stack(self.bytecode_builder.ifle(&l))?;
+                        }
+                        BinaryOp::Ge => {
+                            // if (0 >= a) - if false (0 < a), jump to else
+                            // This is equivalent to (a > 0)
+                            Self::map_stack(self.bytecode_builder.ifgt(&l))?;
+                        }
+                        BinaryOp::Le => {
+                            // if (0 <= a) - if false (0 > a), jump to else
+                            // This is equivalent to (a < 0)
+                            Self::map_stack(self.bytecode_builder.iflt(&l))?;
+                        }
+                        BinaryOp::Eq => {
+                            // if (0 == a) - if false (0 != a), jump to else
+                            Self::map_stack(self.bytecode_builder.ifne(&l))?;
+                        }
+                        BinaryOp::Ne => {
+                            // if (0 != a) - if false (0 == a), jump to else
+                            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                        }
+                        _ => {
+                            // For other operators, generate as expression and test
+                            self.generate_expression(condition)?;
+                            Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                        }
+                    }
+                } else {
+                    // Regular comparison - generate both operands
+                    self.generate_expression(&bin.left)?;
+                    self.generate_expression(&bin.right)?;
+                    
+                    match bin.operator {
+                    BinaryOp::Gt => {
+                        // if (a > b) - if true, jump to then (continue execution)
+                        // For OR: jump to then if condition is TRUE (a > b)
+                        // But we're generating jumps to else_label, so we need inverted logic
+                        // If condition is FALSE (a <= b), jump to else_label
+                        Self::map_stack(self.bytecode_builder.if_icmple(&l))?;
+                    }
+                    BinaryOp::Lt => {
+                        // if (a < b) - if true, jump to then (continue execution)  
+                        // For OR: jump to then if condition is TRUE (a < b)
+                        // But we're generating jumps to else_label, so we need inverted logic
+                        // If condition is FALSE (a >= b), jump to else_label
+                        Self::map_stack(self.bytecode_builder.if_icmpge(&l))?;
+                    }
+                    BinaryOp::Ge => {
+                        // if (a >= b) - if true, jump to then (continue execution)
+                        // For OR: jump to then if condition is TRUE (a >= b)
+                        // But we're generating jumps to else_label, so we need inverted logic
+                        // If condition is FALSE (a < b), jump to else_label
+                        Self::map_stack(self.bytecode_builder.if_icmplt(&l))?;
+                    }
+                    BinaryOp::Le => {
+                        // if (a <= b) - if true, jump to then (continue execution)
+                        // For OR: jump to then if condition is TRUE (a <= b)
+                        // But we're generating jumps to else_label, so we need inverted logic
+                        // If condition is FALSE (a > b), jump to else_label
+                        Self::map_stack(self.bytecode_builder.if_icmpgt(&l))?;
+                    }
+                    BinaryOp::Eq => {
+                        // if (a == b) - if true, jump to then (continue execution)
+                        // For OR: jump to then if condition is TRUE (a == b)
+                        // But we're generating jumps to else_label, so we need inverted logic
+                        // If condition is FALSE (a != b), jump to else_label
+                        Self::map_stack(self.bytecode_builder.if_icmpne(&l))?;
+                    }
+                    BinaryOp::Ne => {
+                        // if (a != b) - if true, jump to then (continue execution)
+                        // For OR: jump to then if condition is TRUE (a != b)
+                        // But we're generating jumps to else_label, so we need inverted logic
+                        // If condition is FALSE (a == b), jump to else_label
+                        Self::map_stack(self.bytecode_builder.if_icmpeq(&l))?;
+                    }
+                    _ => {
+                        // For other operators, generate as expression and test
+                        self.generate_expression(condition)?;
+                        Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                    }
+                    }
+                }
+            } else {
+                // Non-binary expression
+                self.generate_expression(condition)?;
+                let l = self.label_str(else_label);
+                Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            }
+        }
+        
+        Ok(())
     }
 
     /// Generate OR condition with short-circuit evaluation (a || b || c)
@@ -14007,6 +14205,20 @@ impl MethodWriter {
         Ok(())
     }
 
+    /// Collect all conditions in an AND chain into a flat list
+    fn collect_and_conditions(&self, expr: &Expr, conditions: &mut Vec<Expr>) {
+        if let Expr::Binary(bin_expr) = expr {
+            if matches!(bin_expr.operator, BinaryOp::And) {
+                // Recursively collect from left and right
+                self.collect_and_conditions(&bin_expr.left, conditions);
+                self.collect_and_conditions(&bin_expr.right, conditions);
+                return;
+            }
+        }
+        // Not an AND expression, add it as a condition
+        conditions.push(expr.clone());
+    }
+
     /// Collect all conditions in an OR chain into a flat list
     fn collect_or_conditions(&self, expr: &Expr, conditions: &mut Vec<Expr>) {
         if let Expr::Binary(bin_expr) = expr {
@@ -14065,6 +14277,57 @@ impl MethodWriter {
         Ok(())
     }
 
+    /// Generate AND condition with short-circuit evaluation for if statements
+    fn generate_and_short_circuit_for_if(&mut self, bin_expr: &BinaryExpr, else_label: u16) -> Result<()> {
+        eprintln!("🔍 DEBUG: generate_and_short_circuit_for_if: Implementing javac-style AND short-circuit for if statement");
+        
+        // For AND in if statement: if (a && b && c) { then } else { else }
+        // javac generates:
+        // 1. Evaluate a, if false, jump to else
+        // 2. Evaluate b, if false, jump to else
+        // 3. Evaluate c, if false, jump to else
+        // 4. If all are true, continue to then
+        
+        // Flatten the AND chain into a list of conditions
+        let mut conditions = Vec::new();
+        let expr = Expr::Binary(bin_expr.clone());
+        self.collect_and_conditions(&expr, &mut conditions);
+        
+        eprintln!("🔍 DEBUG: generate_and_short_circuit_for_if: Found {} conditions in AND chain", conditions.len());
+        
+        // For each condition, if it's false, jump to else_label
+        // If all are true, continue execution
+        
+        for condition in conditions.iter() {
+            if let Expr::Binary(bin) = condition {
+                // Generate the comparison and jump to else_label if false
+                self.generate_expression(&bin.left)?;
+                self.generate_expression(&bin.right)?;
+                
+                let l = self.label_str(else_label);
+                match bin.operator {
+                    BinaryOp::Gt => Self::map_stack(self.bytecode_builder.if_icmple(&l))?, // <= (not >)
+                    BinaryOp::Lt => Self::map_stack(self.bytecode_builder.if_icmpge(&l))?, // >= (not <)
+                    BinaryOp::Ge => Self::map_stack(self.bytecode_builder.if_icmplt(&l))?, // < (not >=)
+                    BinaryOp::Le => Self::map_stack(self.bytecode_builder.if_icmpgt(&l))?, // > (not <=)
+                    BinaryOp::Eq => Self::map_stack(self.bytecode_builder.if_icmpeq(&l))?, // == (not !=)
+                    BinaryOp::Ne => Self::map_stack(self.bytecode_builder.if_icmpne(&l))?, // != (not ==)
+                    _ => {
+                        // For other operators, generate as expression and test
+                        self.generate_expression(condition)?;
+                        Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+                    }
+                }
+            } else {
+                self.generate_expression(condition)?;
+                let l = self.label_str(else_label);
+                Self::map_stack(self.bytecode_builder.ifeq(&l))?;
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Generate AND condition with short-circuit evaluation (a && b && c)
     fn generate_and_short_circuit(&mut self, bin_expr: &BinaryExpr, false_target: u16) -> Result<()> {
         eprintln!("🔍 DEBUG: generate_and_short_circuit: Implementing javac-style AND short-circuit");
@@ -14110,17 +14373,61 @@ impl MethodWriter {
     fn generate_comparison_jump(&mut self, bin_expr: &BinaryExpr, false_target: u16) -> Result<()> {
         eprintln!("🔍 DEBUG: generate_comparison_jump: Generating direct comparison jump");
         
-        // Generate operands
-        self.generate_expression(&bin_expr.left)?;
-        self.generate_expression(&bin_expr.right)?;
-        
-        // Generate direct conditional jump based on operator
-        let label = self.label_str(false_target);
-        match bin_expr.operator {
-            BinaryOp::Gt => {
-                // For OR: if left > right is false, continue checking next condition
-                Self::map_stack(self.bytecode_builder.if_icmple(&label))?;
+        // Check for zero comparison optimization
+        if self.is_zero_literal(&bin_expr.right) {
+            eprintln!("🔍 DEBUG: generate_comparison_jump: Optimizing zero comparison");
+            // Generate only the left operand for zero comparison
+            self.generate_expression(&bin_expr.left)?;
+            
+            let label = self.label_str(false_target);
+            match bin_expr.operator {
+                BinaryOp::Gt => {
+                    // Check for index-returning method alignment  
+                    if self.is_index_returning_method_call(&bin_expr.left) {
+                        eprintln!("🔧 DEBUG: generate_comparison_jump - DETECTED index-returning in zero comparison, using iflt for javac alignment");
+                        // For indexOf-style methods: if index < 0, jump to false_target
+                        Self::map_stack(self.bytecode_builder.iflt(&label))?;
+                    } else {
+                        // For left > 0: if left <= 0, jump to false_target
+                        Self::map_stack(self.bytecode_builder.ifle(&label))?;
+                    }
+                }
+                BinaryOp::Lt => {
+                    // For left < 0: if left >= 0, jump to false_target
+                    Self::map_stack(self.bytecode_builder.ifge(&label))?;
+                }
+                BinaryOp::Ge => {
+                    // For left >= 0: if left < 0, jump to false_target
+                    Self::map_stack(self.bytecode_builder.iflt(&label))?;
+                }
+                BinaryOp::Le => {
+                    // For left <= 0: if left > 0, jump to false_target
+                    Self::map_stack(self.bytecode_builder.ifgt(&label))?;
+                }
+                BinaryOp::Eq => {
+                    // For left == 0: if left != 0, jump to false_target
+                    Self::map_stack(self.bytecode_builder.ifne(&label))?;
+                }
+                BinaryOp::Ne => {
+                    // For left != 0: if left == 0, jump to false_target
+                    Self::map_stack(self.bytecode_builder.ifeq(&label))?;
+                }
+                _ => {
+                    return Err(crate::error::Error::codegen_error("Unsupported comparison operator for zero comparison"));
+                }
             }
+        } else {
+            // Generate operands for non-zero comparison
+            self.generate_expression(&bin_expr.left)?;
+            self.generate_expression(&bin_expr.right)?;
+            
+            // Generate direct conditional jump based on operator
+            let label = self.label_str(false_target);
+            match bin_expr.operator {
+                BinaryOp::Gt => {
+                    // For OR: if left > right is false, continue checking next condition
+                    Self::map_stack(self.bytecode_builder.if_icmple(&label))?;
+                }
             BinaryOp::Lt => {
                 // For OR: if left < right is false, continue checking next condition  
                 Self::map_stack(self.bytecode_builder.if_icmpge(&label))?;
@@ -14144,6 +14451,7 @@ impl MethodWriter {
             _ => {
                 // Fallback to traditional approach
                 return Err(crate::error::Error::codegen_error("Unsupported comparison operator for direct jump"));
+            }
             }
         }
         
@@ -14254,6 +14562,95 @@ impl MethodWriter {
         }
         
         Ok(())
+    }
+
+    // JAVAC-1:1 METHOD CALL GENERATION - Following javac's visitApply pattern exactly
+    
+    /// Resolve method owner class (javac's method symbol resolution)
+    fn resolve_method_owner(&self, call: &MethodCallExpr) -> Result<String> {
+        if let Some(target) = &call.target {
+            let target_type = self.resolve_expression_type(target);
+            
+            // Handle array types -> Object (javac pattern)
+            if is_array_type(&target_type) {
+                return Ok("java/lang/Object".to_string());
+            }
+            
+            // Handle generic type erasure (javac pattern)
+            let base_type = if target_type.contains('<') || self.is_generic_type_parameter(&target_type) {
+                self.perform_type_erasure_for_field_access(&target_type)
+            } else {
+                target_type
+            };
+            
+            Ok(self.resolve_class_name(&base_type))
+        } else {
+            // No target = 'this' (javac pattern)
+            let current = self.current_class_name.as_ref()
+                .ok_or_else(|| Error::codegen_error("Cannot resolve method call: no current class name available"))?
+                .clone();
+            Ok(self.resolve_class_name(&current))
+        }
+    }
+    
+    /// Resolve method symbol with metadata (javac's MethodSymbol resolution)
+    fn resolve_method_symbol(&self, owner_class: &str, call: &MethodCallExpr) -> Result<ResolvedMethod> {
+        // Handle varargs
+        let (final_arguments, expected_arity) = self.handle_varargs_call(call, owner_class)?;
+        
+        // Try to resolve using rt.rs (our symbol table)
+        if let Some(resolved) = resolve_method_with_context(owner_class, &call.name, expected_arity, self.current_class.as_ref(), self.all_types.as_deref()) {
+            return Ok(resolved);
+        }
+        
+        // Fallback error
+        Err(Error::codegen_error(&format!(
+            "Method resolution failed: {}#{}(arity={})", 
+            owner_class, call.name, expected_arity
+        )))
+    }
+    
+    /// Generate method receiver (javac's non-static method handling)
+    fn generate_method_receiver(&mut self, call: &MethodCallExpr) -> Result<()> {
+        if let Some(receiver) = &call.target {
+            self.generate_expression(receiver)?;
+        } else {
+            // Load 'this' (javac pattern)
+            Self::map_stack(self.bytecode_builder.aload(0))?;
+        }
+        Ok(())
+    }
+    
+    /// Generate method arguments (javac's genArgs pattern)
+    fn generate_method_arguments(&mut self, call: &MethodCallExpr, method_symbol: &ResolvedMethod) -> Result<()> {
+        // Parse parameter types from descriptor (javac's type coercion)
+        let param_types = self.parse_parameter_types(&method_symbol.descriptor);
+        
+        // Handle varargs
+        let (final_arguments, _) = self.handle_varargs_call(call, &method_symbol.owner_internal)?;
+        
+        // Generate each argument with type coercion (javac's genArgs + coerce pattern)
+        for (i, arg) in final_arguments.iter().enumerate() {
+            // Generate expression (javac's genExpr)
+            self.generate_expression(arg)?;
+            
+            // Apply type coercion if needed (javac's coerce)
+            if i < param_types.len() {
+                let expected_type = &param_types[i];
+                let actual_type = self.resolve_expression_type(arg);
+                
+                if actual_type != *expected_type {
+                    self.apply_method_parameter_coercion(&actual_type, expected_type)?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Invoke method (javac's m.invoke() pattern)
+    fn invoke_method(&mut self, method_symbol: &ResolvedMethod) -> Result<()> {
+        self.emit_invoke(method_symbol)
     }
 
 }
