@@ -92,6 +92,9 @@ impl ClassWriter {
             self.gen.init_class(class.clone(), all_types.clone())?;
         }
         
+        // Set configuration in Gen (for StackMapTable generation)
+        self.gen.set_config(self.config.clone());
+        
         // Set package context in Gen
         if let Some(ref package) = self.package_name {
             self.gen.set_package_context(package.clone());

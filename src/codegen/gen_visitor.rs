@@ -12,6 +12,44 @@ use super::opcodes;
 impl Gen {
     /// Visit literal expression - JavaC Gen.visitLiteral equivalent
     pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<Item> {
+        // Handle constants that need constant pool first (to avoid borrowing conflicts)
+        let pool_data = match &tree.value {
+            Literal::String(s) => {
+                Some((self.get_pool_mut().add_string(s), "string"))
+            }
+            Literal::Char(c) => {
+                let char_val = *c as u32 as i32;
+                if char_val > 32767 || char_val < -32768 {
+                    Some((self.get_pool_mut().add_integer(char_val), "char"))
+                } else {
+                    None
+                }
+            }
+            Literal::Long(val) if *val != 0 && *val != 1 => {
+                Some((self.get_pool_mut().add_long(*val), "long"))
+            }
+            Literal::Float(val) => {
+                let epsilon_check = (*val - 0.0).abs() > f64::EPSILON && 
+                                   (*val - 1.0).abs() > f64::EPSILON && 
+                                   (*val - 2.0).abs() > f64::EPSILON;
+                if epsilon_check {
+                    Some((self.get_pool_mut().add_float(*val as f32), "float"))
+                } else {
+                    None
+                }
+            }
+            Literal::Double(val) => {
+                let epsilon_check = (*val - 0.0).abs() > f64::EPSILON && 
+                                   (*val - 1.0).abs() > f64::EPSILON;
+                if epsilon_check {
+                    Some((self.get_pool_mut().add_double(*val), "double"))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        
         if let Some(code) = self.code_mut() {
             match &tree.value {
                 Literal::Null => {
@@ -53,8 +91,80 @@ impl Gen {
                     }
                     code.state.push(super::code::Type::Int); // Push int on stack
                 }
+                Literal::String(_) => {
+                    if let Some((string_idx, _)) = pool_data {
+                        code.emitop(super::opcodes::LDC);
+                        code.emit1(string_idx as u8);
+                        code.state.push(super::code::Type::Object("java/lang/String".to_string()));
+                    }
+                }
+                Literal::Char(c) => {
+                    let char_val = *c as u32 as i32;
+                    if char_val >= 0 && char_val <= 5 {
+                        match char_val {
+                            0 => code.emitop(super::opcodes::ICONST_0),
+                            1 => code.emitop(super::opcodes::ICONST_1),
+                            2 => code.emitop(super::opcodes::ICONST_2),
+                            3 => code.emitop(super::opcodes::ICONST_3),
+                            4 => code.emitop(super::opcodes::ICONST_4),
+                            5 => code.emitop(super::opcodes::ICONST_5),
+                            _ => unreachable!(),
+                        }
+                    } else if char_val >= -128 && char_val <= 127 {
+                        code.emitop(super::opcodes::BIPUSH);
+                        code.emit1(char_val as u8);
+                    } else if char_val >= -32768 && char_val <= 32767 {
+                        code.emitop(super::opcodes::SIPUSH);
+                        code.emit2(char_val as u16);
+                    } else if let Some((int_idx, _)) = pool_data {
+                        code.emitop(super::opcodes::LDC);
+                        code.emit1(int_idx as u8);
+                    }
+                    code.state.push(super::code::Type::Int);
+                }
+                Literal::Long(val) => {
+                    match *val {
+                        0 => code.emitop(super::opcodes::LCONST_0),
+                        1 => code.emitop(super::opcodes::LCONST_1),
+                        _ => {
+                            if let Some((long_idx, _)) = pool_data {
+                                code.emitop(super::opcodes::LDC2_W);
+                                code.emit2(long_idx);
+                            }
+                        }
+                    }
+                    code.state.push(super::code::Type::Long);
+                }
+                Literal::Float(val) => {
+                    match val {
+                        v if (*v - 0.0).abs() < f64::EPSILON => code.emitop(super::opcodes::FCONST_0),
+                        v if (*v - 1.0).abs() < f64::EPSILON => code.emitop(super::opcodes::FCONST_1),
+                        v if (*v - 2.0).abs() < f64::EPSILON => code.emitop(super::opcodes::FCONST_2),
+                        _ => {
+                            if let Some((float_idx, _)) = pool_data {
+                                code.emitop(super::opcodes::LDC);
+                                code.emit1(float_idx as u8);
+                            }
+                        }
+                    }
+                    code.state.push(super::code::Type::Float);
+                }
+                Literal::Double(val) => {
+                    match val {
+                        v if (*v - 0.0).abs() < f64::EPSILON => code.emitop(super::opcodes::DCONST_0),
+                        v if (*v - 1.0).abs() < f64::EPSILON => code.emitop(super::opcodes::DCONST_1),
+                        _ => {
+                            if let Some((double_idx, _)) = pool_data {
+                                code.emitop(super::opcodes::LDC2_W);
+                                code.emit2(double_idx);
+                            }
+                        }
+                    }
+                    code.state.push(super::code::Type::Double);
+                }
                 _ => {
-                    // TODO: Implement other literal types
+                    // Fallback for any unhandled literal types
+                    eprintln!("⚠️  WARNING: Unhandled literal type: {:?}", tree.value);
                 }
             }
         }
@@ -65,6 +175,11 @@ impl Gen {
             typecode: match &tree.value {
                 Literal::Integer(_) => typecodes::INT,
                 Literal::Boolean(_) => typecodes::INT,
+                Literal::Char(_) => typecodes::INT,
+                Literal::Long(_) => typecodes::LONG,
+                Literal::Float(_) => typecodes::FLOAT,
+                Literal::Double(_) => typecodes::DOUBLE,
+                Literal::String(_) => typecodes::OBJECT,
                 Literal::Null => typecodes::OBJECT,
                 _ => typecodes::OBJECT,
             },
@@ -143,74 +258,323 @@ impl Gen {
         })
     }
     
-    /// Visit binary expression - simplified version
+    /// Visit binary expression - JavaC-aligned implementation
     pub fn visit_binary(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
-        // Generate operands
-        let _left_item = self.visit_expr(&tree.left, env)?;
-        let _right_item = self.visit_expr(&tree.right, env)?;
+        use crate::ast::BinaryOp;
         
-        // Generate operation
+        // Generate operands
+        let left_item = self.visit_expr(&tree.left, env)?;
+        let right_item = self.visit_expr(&tree.right, env)?;
+        
+        // Determine result type based on operands and operator
+        let result_type = self.infer_binary_result_type(&left_item, &right_item, &tree.operator);
+        
+        // Generate operation bytecode
         self.with_items(|items| {
             match tree.operator {
+                // Arithmetic operators
                 BinaryOp::Add => {
-                    items.code.emitop(opcodes::IADD); // Default to int add
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Int) => items.code.emitop(opcodes::IADD),
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LADD),
+                        TypeEnum::Primitive(PrimitiveType::Float) => items.code.emitop(opcodes::FADD),
+                        TypeEnum::Primitive(PrimitiveType::Double) => items.code.emitop(opcodes::DADD),
+                        _ => items.code.emitop(opcodes::IADD), // Default to int
+                    }
                 }
                 BinaryOp::Sub => {
-                    items.code.emitop(opcodes::ISUB);
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Int) => items.code.emitop(opcodes::ISUB),
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LSUB),
+                        TypeEnum::Primitive(PrimitiveType::Float) => items.code.emitop(opcodes::FSUB),
+                        TypeEnum::Primitive(PrimitiveType::Double) => items.code.emitop(opcodes::DSUB),
+                        _ => items.code.emitop(opcodes::ISUB),
+                    }
                 }
                 BinaryOp::Mul => {
-                    items.code.emitop(opcodes::IMUL);
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Int) => items.code.emitop(opcodes::IMUL),
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LMUL),
+                        TypeEnum::Primitive(PrimitiveType::Float) => items.code.emitop(opcodes::FMUL),
+                        TypeEnum::Primitive(PrimitiveType::Double) => items.code.emitop(opcodes::DMUL),
+                        _ => items.code.emitop(opcodes::IMUL),
+                    }
                 }
                 BinaryOp::Div => {
-                    items.code.emitop(opcodes::IDIV);
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Int) => items.code.emitop(opcodes::IDIV),
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LDIV),
+                        TypeEnum::Primitive(PrimitiveType::Float) => items.code.emitop(opcodes::FDIV),
+                        TypeEnum::Primitive(PrimitiveType::Double) => items.code.emitop(opcodes::DDIV),
+                        _ => items.code.emitop(opcodes::IDIV),
+                    }
                 }
+                BinaryOp::Mod => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Int) => items.code.emitop(opcodes::IREM),
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LREM),
+                        TypeEnum::Primitive(PrimitiveType::Float) => items.code.emitop(opcodes::FREM),
+                        TypeEnum::Primitive(PrimitiveType::Double) => items.code.emitop(opcodes::DREM),
+                        _ => items.code.emitop(opcodes::IREM),
+                    }
+                }
+                
+                // Bitwise operators (integer types only)
+                BinaryOp::And => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LAND),
+                        _ => items.code.emitop(opcodes::IAND),
+                    }
+                }
+                BinaryOp::Or => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LOR),
+                        _ => items.code.emitop(opcodes::IOR),
+                    }
+                }
+                BinaryOp::Xor => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LXOR),
+                        _ => items.code.emitop(opcodes::IXOR),
+                    }
+                }
+                BinaryOp::LShift => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LSHL),
+                        _ => items.code.emitop(opcodes::ISHL),
+                    }
+                }
+                BinaryOp::RShift => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LSHR),
+                        _ => items.code.emitop(opcodes::ISHR),
+                    }
+                }
+                BinaryOp::URShift => {
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LUSHR),
+                        _ => items.code.emitop(opcodes::IUSHR),
+                    }
+                }
+                
+                // Comparison operators
+                BinaryOp::Eq | BinaryOp::Ne | 
+                BinaryOp::Lt | BinaryOp::Le |
+                BinaryOp::Gt | BinaryOp::Ge => {
+                    // Generate comparison instructions
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Float) => {
+                            items.code.emitop(opcodes::FCMPL);
+                        }
+                        TypeEnum::Primitive(PrimitiveType::Double) => {
+                            items.code.emitop(opcodes::DCMPL);
+                        }
+                        TypeEnum::Primitive(PrimitiveType::Long) => {
+                            items.code.emitop(opcodes::LCMP);
+                        }
+                        _ => {
+                            // For integers, use subtract for basic comparison
+                            items.code.emitop(opcodes::ISUB);
+                        }
+                    }
+                    return Ok(items.make_stack_item_for_type(&TypeEnum::Primitive(PrimitiveType::Boolean)));
+                }
+                
                 _ => {
-                    // Default operation
+                    eprintln!("⚠️  WARNING: Unsupported binary operator: {:?}", tree.operator);
                     items.code.emitop(opcodes::NOP);
                 }
             }
             
-            let result_type = TypeEnum::Primitive(PrimitiveType::Int); // TODO: Type inference
             Ok(items.make_stack_item_for_type(&result_type))
         })
     }
     
-    /// Visit unary expression - simplified version
+    /// Infer binary operation result type based on operands and operator
+    fn infer_binary_result_type(&self, left_item: &Item, right_item: &Item, operator: &BinaryOp) -> TypeEnum {
+        use crate::ast::BinaryOp;
+        use super::items_javac::typecodes;
+        
+        // Get type codes from items
+        let left_type = left_item.typecode();
+        let right_type = right_item.typecode();
+        
+        // Comparison operators always return boolean
+        match operator {
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | 
+            BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or => {
+                return TypeEnum::Primitive(PrimitiveType::Boolean);
+            }
+            _ => {}
+        }
+        
+        // Type promotion rules (follow Java's rules)
+        match (left_type, right_type) {
+            // Double takes precedence
+            (typecodes::DOUBLE, _) | (_, typecodes::DOUBLE) => TypeEnum::Primitive(PrimitiveType::Double),
+            // Float takes precedence over integral types
+            (typecodes::FLOAT, _) | (_, typecodes::FLOAT) => TypeEnum::Primitive(PrimitiveType::Float),
+            // Long takes precedence over int
+            (typecodes::LONG, _) | (_, typecodes::LONG) => TypeEnum::Primitive(PrimitiveType::Long),
+            // Default to int for all integral operations
+            _ => TypeEnum::Primitive(PrimitiveType::Int),
+        }
+    }
+    
+    /// Visit unary expression - JavaC-aligned implementation
     pub fn visit_unary(&mut self, tree: &UnaryExpr, env: &GenContext) -> Result<Item> {
+        use crate::ast::UnaryOp;
+        
         // Generate operand
-        let _operand_item = self.visit_expr(&tree.operand, env)?;
+        let operand_item = self.visit_expr(&tree.operand, env)?;
+        
+        // Determine result type based on operand and operator
+        let result_type = self.infer_unary_result_type(&operand_item, &tree.operator);
         
         // Generate operation
         self.with_items(|items| {
             match tree.operator {
                 UnaryOp::Minus => {
-                    items.code.emitop(opcodes::INEG);
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Int) => items.code.emitop(opcodes::INEG),
+                        TypeEnum::Primitive(PrimitiveType::Long) => items.code.emitop(opcodes::LNEG),
+                        TypeEnum::Primitive(PrimitiveType::Float) => items.code.emitop(opcodes::FNEG),
+                        TypeEnum::Primitive(PrimitiveType::Double) => items.code.emitop(opcodes::DNEG),
+                        _ => items.code.emitop(opcodes::INEG), // Default to int
+                    }
+                }
+                UnaryOp::Plus => {
+                    // No operation needed for unary plus - just pass through
                 }
                 UnaryOp::Not => {
-                    // Boolean negation
+                    // Logical not - converts 0 to 1, non-zero to 0
+                    items.code.emitop(opcodes::ICONST_0);
+                    items.code.emitop(opcodes::IF_ICMPEQ);
+                    items.code.emit2(7); // Jump to "push 1" if equal to 0
+                    items.code.emitop(opcodes::ICONST_0); // Push 0 (false)
+                    items.code.emitop(opcodes::GOTO);
+                    items.code.emit2(4); // Jump to end
+                    items.code.emitop(opcodes::ICONST_1); // Push 1 (true)
+                }
+                UnaryOp::BitNot => {
+                    // Bitwise not - XOR with all 1s
+                    match result_type {
+                        TypeEnum::Primitive(PrimitiveType::Long) => {
+                            items.code.emitop(opcodes::LCONST_1); 
+                            items.code.emitop(opcodes::LNEG); // Load 1 and negate to get -1
+                            items.code.emitop(opcodes::LXOR);
+                        }
+                        _ => {
+                            items.code.emitop(opcodes::ICONST_M1); // -1 (all bits set)
+                            items.code.emitop(opcodes::IXOR);
+                        }
+                    }
                 }
                 _ => {
+                    eprintln!("⚠️  WARNING: Unsupported unary operator: {:?}", tree.operator);
                     items.code.emitop(opcodes::NOP);
                 }
             }
             
-            let result_type = TypeEnum::Primitive(PrimitiveType::Int);
             Ok(items.make_stack_item_for_type(&result_type))
         })
     }
     
+    /// Infer unary operation result type based on operand and operator
+    fn infer_unary_result_type(&self, operand_item: &Item, operator: &UnaryOp) -> TypeEnum {
+        use crate::ast::UnaryOp;
+        use super::items_javac::typecodes;
+        
+        let operand_type = operand_item.typecode();
+        
+        match operator {
+            UnaryOp::Not => TypeEnum::Primitive(PrimitiveType::Boolean),
+            UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot => {
+                // Preserve the operand type for arithmetic operations
+                match operand_type {
+                    typecodes::DOUBLE => TypeEnum::Primitive(PrimitiveType::Double),
+                    typecodes::FLOAT => TypeEnum::Primitive(PrimitiveType::Float),
+                    typecodes::LONG => TypeEnum::Primitive(PrimitiveType::Long),
+                    _ => TypeEnum::Primitive(PrimitiveType::Int),
+                }
+            }
+            _ => TypeEnum::Primitive(PrimitiveType::Int), // Default
+        }
+    }
+    
     /// Visit assignment expression - simplified version
     pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<Item> {
-        // Generate target and value
-        let _target = self.visit_expr(&tree.target, env)?;
-        let _value = self.visit_expr(&tree.value, env)?;
-        
-        // Generate store instruction
-        self.with_items(|items| {
-            // TODO: Generate store instruction based on target
-            let result_type = TypeEnum::Primitive(PrimitiveType::Int);
-            Ok(items.make_stack_item_for_type(&result_type))
-        })
+        // Check if target is a field access (this.field)
+        if let Expr::FieldAccess(field_access) = tree.target.as_ref() {
+            // Handle field assignment: this.field = value
+            
+            // Load 'this' reference first
+            if let Some(code) = self.code_mut() {
+                code.emitop(opcodes::ALOAD_0); // Load 'this' (parameter 0)
+                code.state.push(super::code::Type::Object("java/lang/Object".to_string())); // Push object reference
+            }
+            
+            // Generate the value to assign
+            let _value_item = self.visit_expr(&tree.value, env)?;
+            
+            // Get field name and add field reference to constant pool first
+            let field_name = &field_access.name;
+            let field_ref_idx = match &env.clazz {
+                Some(class) => {
+                    // Find field type
+                    let field_decl = class.body.iter().find_map(|member| {
+                        if let ClassMember::Field(f) = member {
+                            if f.name == *field_name {
+                                Some(f)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                    
+                    if let Some(field) = field_decl {
+                        let descriptor = self.type_ref_to_descriptor(&field.type_ref)?;
+                        self.get_pool_mut().add_field_ref(&class.name, field_name, &descriptor)
+                    } else {
+                        // Default to int field if not found
+                        self.get_pool_mut().add_field_ref(&class.name, field_name, "I")
+                    }
+                }
+                None => {
+                    // Default if no class context
+                    self.get_pool_mut().add_field_ref("Object", field_name, "I")
+                }
+            };
+            
+            // Generate putfield instruction
+            if let Some(code) = self.code_mut() {
+                code.emitop(opcodes::PUTFIELD);
+                code.emit2(field_ref_idx.into()); // Field reference index
+                
+                // Pop object reference and value from stack
+                code.state.pop(1); // value
+                code.state.pop(1); // object reference
+            }
+            
+            // Return the assigned value
+            self.with_items(|items| {
+                let result_type = TypeEnum::Primitive(PrimitiveType::Int); // TODO: Proper type
+                Ok(items.make_stack_item_for_type(&result_type))
+            })
+        } else {
+            // Handle other assignment types (local variables, arrays, etc.)
+            let _target = self.visit_expr(&tree.target, env)?;
+            let _value = self.visit_expr(&tree.value, env)?;
+            
+            // Generate store instruction
+            self.with_items(|items| {
+                // TODO: Generate store instruction based on target type
+                let result_type = TypeEnum::Primitive(PrimitiveType::Int);
+                Ok(items.make_stack_item_for_type(&result_type))
+            })
+        }
     }
     
     /// Visit type cast expression - simplified version
@@ -255,15 +619,28 @@ impl Gen {
 
 /// Statement visitor methods - simplified versions
 impl Gen {
-    /// Visit if statement - simplified version
+    /// Visit if statement - simplified implementation for now (to be enhanced with StackMapTable)
     pub fn visit_if(&mut self, tree: &IfStmt, env: &GenContext) -> Result<()> {
-        // Generate condition
+        // For now, just generate both branches without proper conditionals
+        // This is a temporary solution until we can properly integrate the branching system
+        // TODO: Implement proper conditional branching with StackMapTable integration
+        
+        // Generate condition expression (result is on stack)
         let _cond_result = self.visit_expr(&tree.condition, env)?;
+        
+        // Simple conditional using if-eq pattern - basic implementation
+        self.with_items(|items| {
+            // Pop the condition value to use it
+            // For a boolean condition, we expect 0 (false) or 1 (true)
+            // This is a simplified implementation
+            items.code.emitop(opcodes::POP); // Remove condition from stack for now
+            Ok(())
+        })?;
         
         // Generate then branch
         self.visit_stmt(&tree.then_branch, env)?;
         
-        // Generate else branch if present
+        // Generate else branch if present (without proper jumping for now)
         if let Some(ref else_branch) = tree.else_branch {
             self.visit_stmt(else_branch, env)?;
         }

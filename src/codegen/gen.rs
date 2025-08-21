@@ -7,6 +7,7 @@
 use crate::ast::*;
 use crate::ast::{TypeEnum, PrimitiveType};
 use crate::error::{Result, Error};
+use crate::Config;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
@@ -39,6 +40,9 @@ pub struct Gen {
     
     /// Generation environment - JavaC Env<GenContext> equivalent
     env: Option<GenContext>,
+    
+    /// Configuration for code generation
+    config: Config,
     
     /// Current method context (transitional)
     pub method_context: MethodContext,
@@ -118,6 +122,7 @@ impl Gen {
             pool: ConstantPool::new(),               // JavaC Pool equivalent
             class_file: ClassFile::new(),            // JavaC ClassFile equivalent
             env: None,                               // Set per compilation unit
+            config: Config::default(),               // Default configuration
             method_context: MethodContext::new(),    // Transitional
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
@@ -614,6 +619,11 @@ impl Gen {
         !matches!(expr, Expr::MethodCall(call) if self.is_void_method(call))
     }
     
+    /// Get mutable reference to constant pool
+    pub fn get_pool_mut(&mut self) -> &mut super::constpool::ConstantPool {
+        &mut self.pool
+    }
+    
     /// Helper: Check if method call is void
     fn is_void_method(&self, _call: &MethodCallExpr) -> bool {
         // TODO: Implement proper void method detection
@@ -1010,6 +1020,11 @@ impl Gen {
         Ok(())
     }
     
+    /// Set configuration for code generation
+    pub fn set_config(&mut self, config: Config) {
+        self.config = config;
+    }
+    
     /// Set package context for name resolution
     pub fn set_package_context(&mut self, package: String) {
         // TODO: Store package context
@@ -1069,8 +1084,23 @@ impl Gen {
                 ClassMember::Field(field) => {
                     self.gen_def_field(field, &GenContext::default())?;
                 }
+                ClassMember::Constructor(constructor) => {
+                    // Convert constructor to method for generation
+                    let ctor_method = MethodDecl {
+                        modifiers: constructor.modifiers.clone(),
+                        annotations: constructor.annotations.clone(),
+                        type_params: vec![], // Constructors don't have type parameters
+                        return_type: None, // Constructors return void
+                        name: "<init>".to_string(),
+                        parameters: constructor.parameters.clone(),
+                        throws: constructor.throws.clone(),
+                        body: Some(constructor.body.clone()),
+                        span: constructor.span.clone(),
+                    };
+                    self.gen_def_method(&ctor_method, &GenContext::default())?;
+                }
                 _ => {
-                    // TODO: Handle other member types (constructors, inner classes, etc.)
+                    // TODO: Handle other member types (inner classes, etc.)
                 }
             }
         }
@@ -1117,12 +1147,60 @@ impl Gen {
         if method.body.is_some() {
             use super::attribute::{CodeAttribute, NamedAttribute, AttributeInfo};
             
+            // Generate StackMapTable if enabled and for Java 6+ (version 50+)
+            let mut code_attributes = Vec::new();
+            if self.config.emit_frames && self.class_file.major_version >= 50 {
+                // Check if bytecode contains conditional branches that require StackMapTable
+                let has_conditional_branches = self.has_conditional_branches(&code.code);
+                
+                if has_conditional_branches {
+                    use super::frame::FrameBuilder;
+                    
+                    let frame_computer = FrameBuilder::new();
+                    let class_name = if self.class_file.this_class == 0 {
+                        "java/lang/Object".to_string()
+                    } else {
+                        // For now, use a placeholder since we don't have a way to retrieve class name
+                        // This would need proper constant pool lookup implementation
+                        "java/lang/Object".to_string()
+                    };
+                    
+                    let stack_map_table = frame_computer.compute_with_types(
+                        &code.code,
+                        &[], // No exception handlers for now
+                        method.modifiers.contains(&crate::ast::Modifier::Static),
+                        method.name == "<init>", // Is constructor
+                        &class_name,
+                        &self.create_method_descriptor(method)?,
+                        &mut self.pool,
+                    );
+                    
+                    if !stack_map_table.frames.is_empty() {
+                        use super::attribute::{NamedAttribute, AttributeInfo};
+                        use super::frame::make_stack_map_attribute;
+                        
+                        let stack_map_attr_info = make_stack_map_attribute(&mut self.pool, &stack_map_table);
+                        let stack_map_attr_name_idx = self.pool.add_utf8("StackMapTable");
+                        let stack_map_named_attr = NamedAttribute::new(
+                            super::typed_index::ConstPoolIndex::from(stack_map_attr_name_idx),
+                            AttributeInfo::StackMapTable(super::attribute::StackMapTableAttribute {
+                                stack_map_frames: super::vec::JvmVecU2::from_vec_checked(stack_map_table.frames)
+                                    .map_err(|e| crate::error::Error::CodeGen { 
+                                        message: format!("StackMapTable frame count overflow: {}", e) 
+                                    })?
+                            })
+                        );
+                        code_attributes.push(stack_map_named_attr);
+                    }
+                }
+            }
+
             let code_attr = CodeAttribute {
                 max_stack: code.state.max_stacksize,
                 max_locals: code.max_locals,
                 code: code.code.clone(),
                 exception_table: Vec::new(), // TODO: Implement exception table
-                attributes: Vec::new(), // TODO: Add StackMapTable if needed
+                attributes: code_attributes,
             };
             
             let code_attr_name_idx = self.pool.add_utf8("Code");
@@ -1164,7 +1242,7 @@ impl Gen {
     }
     
     /// Convert TypeRef to JVM descriptor string
-    fn type_ref_to_descriptor(&self, type_ref: &TypeRef) -> Result<String> {
+    pub fn type_ref_to_descriptor(&self, type_ref: &TypeRef) -> Result<String> {
         // Check if this is an array type
         if type_ref.array_dims > 0 {
             let element_desc = self.type_ref_to_base_descriptor(&type_ref.name)?;
@@ -1328,5 +1406,28 @@ impl Gen {
                 Ok(())
             }
         }
+    }
+    
+    /// Check if bytecode contains conditional branch instructions that require StackMapTable
+    fn has_conditional_branches(&self, bytecode: &[u8]) -> bool {
+        use super::opcodes;
+        
+        for &opcode in bytecode.iter() {
+            match opcode {
+                // Conditional branch instructions
+                opcodes::IFEQ | opcodes::IFNE | opcodes::IFLT | opcodes::IFGE | opcodes::IFGT | opcodes::IFLE |
+                opcodes::IF_ICMPEQ | opcodes::IF_ICMPNE | opcodes::IF_ICMPLT | opcodes::IF_ICMPGE | 
+                opcodes::IF_ICMPGT | opcodes::IF_ICMPLE | opcodes::IF_ACMPEQ | opcodes::IF_ACMPNE |
+                opcodes::IFNULL | opcodes::IFNONNULL |
+                // Unconditional branches also create control flow that requires StackMapTable
+                opcodes::GOTO | opcodes::GOTO_W |
+                // Switch statements and subroutines
+                opcodes::TABLESWITCH | opcodes::LOOKUPSWITCH | opcodes::JSR | opcodes::JSR_W => {
+                    return true;
+                }
+                _ => continue,
+            }
+        }
+        false
     }
 }
