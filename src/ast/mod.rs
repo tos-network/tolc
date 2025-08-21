@@ -13,7 +13,7 @@ pub use printer::*;
 use std::fmt;
 
 /// Source location information
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Location {
     pub line: usize,
     pub column: usize,
@@ -27,7 +27,7 @@ impl Location {
 }
 
 /// Span of source code (start and end locations)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: Location,
     pub end: Location,
@@ -42,6 +42,15 @@ impl Span {
         Self {
             start: Location::new(start_line, start_col, 0),
             end: Location::new(end_line, end_col, 0),
+        }
+    }
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self {
+            start: Location::new(0, 0, 0),
+            end: Location::new(0, 0, 0),
         }
     }
 }

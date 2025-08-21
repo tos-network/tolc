@@ -226,7 +226,7 @@ pub struct WildcardType {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BoundKind { Extends, Super }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -719,7 +719,7 @@ pub type BinaryOperator = BinaryOp;
 pub type UnaryOperator = UnaryOp;
 
 // Primitive type enum for codegen compatibility
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PrimitiveType {
     Boolean,
     Char,
@@ -732,7 +732,7 @@ pub enum PrimitiveType {
 }
 
 // Reference type enum for codegen compatibility  
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ReferenceType {
     Class(String),
     Interface(String),
@@ -802,7 +802,7 @@ impl fmt::Display for AnnotationDecl {
 }
 
 // Type enum for codegen compatibility
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeEnum {
     Primitive(PrimitiveType),
     Reference(ReferenceType),

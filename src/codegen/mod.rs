@@ -1,18 +1,48 @@
 //! Code generation module for Terminos Language
 //! 
 //! This module handles the conversion of AST nodes into Java bytecode (.class files).
+//! 
+//! ## JavaC-Aligned Architecture
+//! New modular architecture based on Oracle javac structure:
+//! - gen.rs: Main bytecode generator (corresponds to javac Gen.java)
+//! - gen_expr.rs: Expression generation  
+//! - gen_stmt.rs: Statement generation
+//! - gen_cond.rs: Condition handling (unified)
 
-pub mod advanced_optimizer;
-pub mod annotation;
-pub mod assignment_optimizer;
+// New javac-aligned architecture
+pub mod gen;          // Main bytecode generator (corresponds to javac Gen.java)  
+// Backed up: pub mod gen_expr;     // Expression generation
+// Backed up: pub mod gen_stmt;     // Statement generation
+pub mod gen_visitor;  // JavaC-style visitor methods (100% Gen.java aligned)
+// Backed up: pub mod gen_items;    // Legacy item system management
+// Backed up: pub mod items;        // New JavaC Items system (100% aligned)
+// Backed up: pub mod items_simple; // Simplified Items system for Phase 2
+pub mod items_javac;  // 100% JavaC-aligned Items system with direct Code manipulation
+pub mod method_context; // Method-level context management
+pub mod optimization_manager; // Unified optimization management
+pub mod symtab;      // JavaC-aligned symbol table
+pub mod types;       // JavaC-aligned type system  
+pub mod type_inference; // Type inference and checking
+
+// JavaC-aligned optimizer architecture
+pub mod const_fold_javac; // 100% JavaC ConstFold.java aligned
+pub mod attr_optimizer;   // JavaC Attr.java phase optimizations
+pub mod lower_optimizer;  // JavaC Lower.java phase optimizations
+pub mod javac_optimizer_alignment; // JavaC optimizer alignment verification
+
+// Backed up: pub mod advanced_optimizer;
+pub mod annotation;  // Needed by class_writer.rs  
+// Backed up: pub mod assignment_optimizer;
 pub mod attribute;
-pub mod bytecode;
-pub mod chain;
+pub mod bytecode; // Still needed by some existing code
+pub mod code;        // New JavaC-aligned code buffer
+// Backed up: pub mod code_builder; // High-level builder using Code
+// Backed up: pub mod chain;
 pub mod class;
-pub mod complexity_analyzer;
-pub mod cond_item;
-pub mod conditional_optimizer;
-pub mod gen_cond;
+// Backed up: pub mod complexity_analyzer;
+// Backed up: pub mod cond_item;
+// Backed up: pub mod conditional_optimizer;
+// Backed up: pub mod gen_cond;
 pub mod class_writer;
 pub mod classpath;
 pub mod constant_optimizer;
@@ -23,36 +53,36 @@ pub mod error;
 pub mod exception_optimizer;
 pub mod field;
 pub mod field_access_optimizer;
-pub mod finalizer_optimizer;
+// Backed up: pub mod finalizer_optimizer;
 pub mod flag;
 pub mod frame;
 pub mod increment_optimizer;
 pub mod instruction_optimizer;
-pub mod instruction_widening;
-pub mod item_system;
-pub mod item_manager;
-pub mod enhanced_stack_map_emitter;
-pub mod branch_marker;
-pub mod code_compactor;
-pub mod type_erasure;
-pub mod type_erasure_integration;
-pub mod fatcode_manager;
-pub mod pending_jumps;
-pub mod fixed_pc_manager;
-pub mod jsr_ret_optimizer;
-pub mod enhanced_string_optimizer;
+// Backed up: pub mod instruction_widening;
+// Backed up: pub mod item_system;
+// Backed up: pub mod item_manager;
+// Backed up: pub mod enhanced_stack_map_emitter;
+// Backed up: pub mod branch_marker;
+// Backed up: pub mod code_compactor;
+// Backed up: pub mod type_erasure;
+// Backed up: pub mod type_erasure_integration;
+// Backed up: pub mod fatcode_manager;
+pub mod pending_jumps; // Needed by JavaC code.rs
+// Backed up: pub mod fixed_pc_manager;
+// Backed up: pub mod jsr_ret_optimizer;
+// Backed up: pub mod enhanced_string_optimizer;
 pub mod loop_optimizer;
 pub mod method;
 pub mod method_invocation_optimizer;
-pub mod method_writer;
-pub mod object_optimizer;
+// Backed up: pub mod method_writer;
+// Backed up: pub mod object_optimizer;
 pub mod opcodes;
 pub mod opcode_enum;
 pub mod opcode_generator;
 pub mod signature;
 pub mod stack_map_optimizer;
 pub mod string_optimizer;
-pub mod string_buffer_optimizer;
+// Backed up: pub mod string_buffer_optimizer;
 pub mod switch_optimizer;
 pub mod type_coercion_optimizer;
 pub mod typed_index;
@@ -67,7 +97,7 @@ pub use class_writer::*;
 pub use constpool::{ConstantPool, Constant, ConstPoolError};
 pub use error::{ClassGenerationError, CodeGenResult};
 pub use method::*;
-pub use method_writer::*;
+// Backed up: pub use method_writer::*;
 pub use opcode_generator::*;
 
 pub use vec::*;
@@ -75,6 +105,7 @@ pub use writer::*;
 
 // Re-export specific types from bytecode and typed_index to avoid conflicts
 pub use bytecode::{StackState, StackFrame, LocalSlot, LocalType, StackError, BytecodeBuilder, ExceptionTableEntry};
+pub use code::{Code, Chain, State, Type as CodeType, StackMapFormat, ExceptionTableEntry as CodeExceptionTableEntry, LineNumberEntry, LocalVarEntry};
 pub use typed_index::{
     ConstPoolIndex, RawConstPoolIndex, ConstPoolEntryInfo,
     ClassIndex, StringIndex, NameAndTypeIndex, FieldRefIndex, MethodRefIndex,

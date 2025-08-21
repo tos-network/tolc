@@ -194,3 +194,28 @@ Complex frame computation with multiple algorithms:
 - **Type Checking**: `com.sun.tools.javac.comp.Attr.visitXxx` methods
 - **Symbol Resolution**: `com.sun.tools.javac.comp.Resolve`
 - **Method Invocation**: `com.sun.tools.javac.jvm.Gen.visitApply` for method call generation
+
+## Documentation and Code Comment Standards
+
+### English-Only Rule
+**IMPORTANT**: All documentation and code comments in this project must be written in English only.
+
+This includes:
+- **Code comments**: All `//` and `/* */` comments in Rust source files
+- **Documentation comments**: All `///` and `//!` rustdoc comments
+- **Markdown files**: All `.md` documentation files (README, guides, plans, etc.)
+- **Error messages**: All user-facing error messages and debug output
+- **Variable and function names**: Use descriptive English names
+- **Git commit messages**: All commit messages should be in English
+
+### Rationale
+- **International accessibility**: Enables global contributors to understand and contribute
+- **Professional standards**: Follows open-source project conventions
+- **Maintainability**: Ensures consistent documentation across the codebase
+- **JavaC alignment**: Matches the documentation style of reference implementation
+
+### Enforcement
+- All new code must include English-only comments
+- All documentation updates must be in English
+- Code reviews should verify English-only compliance
+- Translation of existing Chinese content to English is required when updating files

@@ -707,7 +707,7 @@ impl CustomAttribute {
 }
 
 // Placeholder but enriched types for annotations (carry optional retention/targets metadata for verify-time checks)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetentionPolicy { Source, Class, Runtime }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
