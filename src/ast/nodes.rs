@@ -378,6 +378,7 @@ pub enum Stmt {
     TypeDecl(TypeDecl),
     If(IfStmt),
     While(WhileStmt),
+    DoWhile(DoWhileStmt),
     For(ForStmt),
     Switch(SwitchStmt),
     Return(ReturnStmt),
@@ -426,6 +427,13 @@ pub struct IfStmt {
 pub struct WhileStmt {
     pub condition: Expr,
     pub body: Box<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DoWhileStmt {
+    pub body: Box<Stmt>,
+    pub condition: Expr,
     pub span: Span,
 }
 

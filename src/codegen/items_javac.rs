@@ -134,8 +134,8 @@ impl<'a> Items<'a> {
     pub fn make_cond_item(&self, opcode: u8) -> CondItem {
         CondItem {
             opcode,
-            true_jumps: Vec::new(),
-            false_jumps: Vec::new(),
+            true_jumps: None,
+            false_jumps: None,
         }
     }
     
@@ -262,6 +262,14 @@ impl<'a> Items<'a> {
     
     // ========== Bytecode Generation Methods ==========
     
+    /// Merge two jump chains (JavaC Chain.merge equivalent)
+    pub fn merge_chains(&mut self, chain1: Option<Box<crate::codegen::chain::Chain>>, 
+                       chain2: Option<Box<crate::codegen::chain::Chain>>) 
+                       -> Option<Box<crate::codegen::chain::Chain>> {
+        use crate::codegen::chain::ChainOps;
+        ChainOps::merge(chain1, chain2)
+    }
+
     /// Emit optimized local variable load
     fn emit_load_local(&mut self, typecode: u8, reg: u16) -> Result<()> {
         if reg <= 3 {
@@ -590,8 +598,8 @@ impl Item {
     pub fn make_cond(&self) -> CondItem {
         CondItem {
             opcode: opcodes::IFNE, // Default to ifne
-            true_jumps: Vec::new(),
-            false_jumps: Vec::new(),
+            true_jumps: None,
+            false_jumps: None,
         }
     }
 }
@@ -602,11 +610,11 @@ pub struct CondItem {
     /// Comparison opcode (ifne, ifeq, etc.)
     pub opcode: u8,
     
-    /// List of jump addresses that should jump when condition is true
-    pub true_jumps: Vec<u16>,
+    /// Chain of jumps that should execute when condition is true
+    pub true_jumps: Option<Box<crate::codegen::chain::Chain>>,
     
-    /// List of jump addresses that should jump when condition is false  
-    pub false_jumps: Vec<u16>,
+    /// Chain of jumps that should execute when condition is false  
+    pub false_jumps: Option<Box<crate::codegen::chain::Chain>>,
 }
 
 impl CondItem {
@@ -614,29 +622,110 @@ impl CondItem {
     pub fn new(opcode: u8) -> Self {
         Self {
             opcode,
-            true_jumps: Vec::new(),
-            false_jumps: Vec::new(),
+            true_jumps: None,
+            false_jumps: None,
         }
     }
     
-    /// Add true jump target
-    pub fn add_true_jump(&mut self, address: u16) {
-        self.true_jumps.push(address);
-    }
-    
-    /// Add false jump target
-    pub fn add_false_jump(&mut self, address: u16) {
-        self.false_jumps.push(address);
-    }
-    
-    /// Resolve all jumps to target address
-    pub fn resolve_jumps(&self, code: &mut Code, target: u16) {
-        // TODO: Implement jump resolution using Code's chain resolution
-        for &jump_addr in &self.true_jumps {
-            // Resolve true jumps
+    /// Create conditional item with specific jump chains
+    pub fn with_chains(opcode: u8, true_jumps: Option<Box<crate::codegen::chain::Chain>>, false_jumps: Option<Box<crate::codegen::chain::Chain>>) -> Self {
+        Self {
+            opcode,
+            true_jumps,
+            false_jumps,
         }
-        for &jump_addr in &self.false_jumps {
-            // Resolve false jumps
+    }
+    
+    /// Create always-true condition (no jumps needed)
+    pub fn always_true() -> Self {
+        Self {
+            opcode: opcodes::IFNE, // Placeholder
+            true_jumps: None,
+            false_jumps: None,
+        }
+    }
+    
+    /// Create always-false condition (immediate jump to false)
+    pub fn always_false() -> Self {
+        Self {
+            opcode: opcodes::IFEQ, // Placeholder
+            true_jumps: None,
+            false_jumps: None,
+        }
+    }
+    
+    /// Create negated condition (swap true/false jumps)
+    pub fn negate(mut cond: CondItem) -> Self {
+        Self {
+            opcode: Self::negate_opcode(cond.opcode),
+            true_jumps: cond.false_jumps,
+            false_jumps: cond.true_jumps,
+        }
+    }
+    
+    /// Check if condition is always false
+    pub fn is_false(&self) -> bool {
+        // For now, no constant folding - never consider always false
+        false
+    }
+    
+    /// Generate jump when condition is false (JavaC: jumpFalse)
+    pub fn jump_false(&self, code: &mut Code) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
+        if !code.is_alive() {
+            return Ok(None);
+        }
+        
+        // For simple conditions, emit the negated jump
+        let negated_opcode = Self::negate_opcode(self.opcode);
+        let jump_chain = code.branch(negated_opcode);
+        
+        // Merge with existing false jumps if any
+        if let Some(existing_false) = &self.false_jumps {
+            use crate::codegen::chain::ChainOps;
+            Ok(ChainOps::merge(Some(existing_false.clone()), jump_chain))
+        } else {
+            Ok(jump_chain)
+        }
+    }
+    
+    /// Generate jump when condition is true (JavaC: jumpTrue)
+    pub fn jump_true(&self, code: &mut Code) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
+        if !code.is_alive() {
+            return Ok(None);
+        }
+        
+        // For simple conditions, emit the direct jump
+        let jump_chain = code.branch(self.opcode);
+        
+        // Merge with existing true jumps if any
+        if let Some(existing_true) = &self.true_jumps {
+            use crate::codegen::chain::ChainOps;
+            Ok(ChainOps::merge(Some(existing_true.clone()), jump_chain))
+        } else {
+            Ok(jump_chain)
+        }
+    }
+    
+    /// Negate a conditional opcode
+    fn negate_opcode(opcode: u8) -> u8 {
+        match opcode {
+            opcodes::IFEQ => opcodes::IFNE,
+            opcodes::IFNE => opcodes::IFEQ,
+            opcodes::IFLT => opcodes::IFGE,
+            opcodes::IFGE => opcodes::IFLT,
+            opcodes::IFGT => opcodes::IFLE,
+            opcodes::IFLE => opcodes::IFGT,
+            opcodes::IF_ICMPEQ => opcodes::IF_ICMPNE,
+            opcodes::IF_ICMPNE => opcodes::IF_ICMPEQ,
+            opcodes::IF_ICMPLT => opcodes::IF_ICMPGE,
+            opcodes::IF_ICMPGE => opcodes::IF_ICMPLT,
+            opcodes::IF_ICMPGT => opcodes::IF_ICMPLE,
+            opcodes::IF_ICMPLE => opcodes::IF_ICMPGT,
+            opcodes::IF_ACMPEQ => opcodes::IF_ACMPNE,
+            opcodes::IF_ACMPNE => opcodes::IF_ACMPEQ,
+            opcodes::IFNULL => opcodes::IFNONNULL,
+            opcodes::IFNONNULL => opcodes::IFNULL,
+            _ => opcode, // Fallback for unknown opcodes
         }
     }
 }

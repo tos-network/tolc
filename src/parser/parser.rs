@@ -2817,11 +2817,11 @@ impl Parser {
         let body = if self.check(&Token::LBrace) { Box::new(Stmt::Block(self.parse_block()?)) } else { Box::new(self.parse_statement()?) };
         self.consume(&Token::While, "Expected 'while' after do-body")?;
         self.consume(&Token::LParen, "Expected '(' after while")?;
-        let cond = self.parse_expression()?;
+        let condition = self.parse_expression()?;
         self.consume(&Token::RParen, "Expected ')' after condition")?;
         if self.check(&Token::Semicolon) { self.advance(); }
         let span = Span::new(start.start, self.previous_span().end);
-        Ok(Stmt::While(WhileStmt { condition: cond, body, span }))
+        Ok(Stmt::DoWhile(DoWhileStmt { body, condition, span }))
     }
 
     fn parse_try_stmt(&mut self) -> Result<Stmt> {

@@ -233,6 +233,9 @@ pub const MULTIANEWARRAY: u8 = 0xc5;
 pub const IFNULL: u8 = 0xc6;
 pub const IFNONNULL: u8 = 0xc7;
 pub const GOTO_W: u8 = 0xc8;
+
+// Special opcodes for CondItem system (javac compatibility)
+pub const DONTGOTO: u8 = 0xff;  // Pseudo-opcode: never jump (used for always-false conditions)
 pub const JSR_W: u8 = 0xc9;
 
 // 0xCA - 0xFE: Reserved and future use
@@ -496,5 +499,17 @@ pub fn operand_count(opcode: u8) -> usize {
         GOTO_W | JSR_W => 4,
         _ => 0,
     }
+}
+
+/// Type codes for JVM types (javac compatibility)
+pub mod typecodes {
+    pub const BYTE: u8 = 0;
+    pub const INT: u8 = 1;
+    pub const LONG: u8 = 2;  
+    pub const FLOAT: u8 = 3;
+    pub const DOUBLE: u8 = 4;
+    pub const OBJECT: u8 = 5;
+    pub const ARRAY: u8 = 6;
+    pub const VOID: u8 = 7;
 }
 

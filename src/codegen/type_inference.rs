@@ -83,7 +83,13 @@ impl TypeInference {
         self.next_local_reg = if method.is_static { 0 } else { 1 }; // 'this' parameter for non-static
         
         for (i, param_type) in method.parameter_types.iter().enumerate() {
-            let param_name = format!("param_{}", i); // TODO: Get actual parameter names
+            // Get actual parameter name from method declaration
+            let param_name = if i < method.parameter_names.len() {
+                method.parameter_names[i].clone()
+            } else {
+                format!("param_{}", i) // Fallback if names not available
+            };
+            
             let local_var = LocalVarSymbol {
                 name: param_name.clone(),
                 typ: param_type.clone(),

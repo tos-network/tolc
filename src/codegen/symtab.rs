@@ -61,6 +61,7 @@ pub struct MethodSymbol {
     pub name: String,
     pub return_type: TypeEnum,
     pub parameter_types: Vec<TypeEnum>,
+    pub parameter_names: Vec<String>,
     pub is_static: bool,
     pub is_virtual: bool,
     pub owner_class: String,

@@ -518,6 +518,14 @@ impl AstVisitor for AstPrinter {
                 self.output.push_str(") ");
                 self.visit_stmt(&while_stmt.body);
             }
+            Stmt::DoWhile(do_while_stmt) => {
+                self.write_indent();
+                self.output.push_str("do ");
+                self.visit_stmt(&do_while_stmt.body);
+                self.output.push_str(" while (");
+                self.visit_expr(&do_while_stmt.condition);
+                self.output.push_str(");\n");
+            }
             Stmt::For(for_stmt) => {
                 self.write_indent();
                 self.output.push_str("for (");

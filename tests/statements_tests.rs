@@ -65,8 +65,8 @@ class A {
     let class = ast.type_decls.iter().find_map(|t| match t { TypeDecl::Class(c) if c.name == "A" => Some(c), _ => None }).expect("class A not found");
     let method = class.body.iter().find_map(|m| match m { ClassMember::Method(m) if m.name == "m" => Some(m), _ => None }).expect("method m not found");
     let body = method.body.as_ref().expect("method body missing");
-    let has_while = body.statements.iter().any(|s| matches!(s, Stmt::While(_)));
-    assert!(has_while);
+    let has_do_while = body.statements.iter().any(|s| matches!(s, Stmt::DoWhile(_)));
+    assert!(has_do_while);
 }
 
 #[test]

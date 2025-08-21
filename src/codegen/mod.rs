@@ -37,7 +37,8 @@ pub mod attribute;
 pub mod bytecode; // Still needed by some existing code
 pub mod code;        // New JavaC-aligned code buffer
 // Backed up: pub mod code_builder; // High-level builder using Code
-// Backed up: pub mod chain;
+pub mod chain;
+pub mod cond_item;
 pub mod class;
 // Backed up: pub mod complexity_analyzer;
 // Backed up: pub mod cond_item;
@@ -105,7 +106,7 @@ pub use writer::*;
 
 // Re-export specific types from bytecode and typed_index to avoid conflicts
 pub use bytecode::{StackState, StackFrame, LocalSlot, LocalType, StackError, BytecodeBuilder, ExceptionTableEntry};
-pub use code::{Code, Chain, State, Type as CodeType, StackMapFormat, ExceptionTableEntry as CodeExceptionTableEntry, LineNumberEntry, LocalVarEntry};
+pub use code::{Code, State, Type as CodeType, StackMapFormat, ExceptionTableEntry as CodeExceptionTableEntry, LineNumberEntry, LocalVarEntry};
 pub use typed_index::{
     ConstPoolIndex, RawConstPoolIndex, ConstPoolEntryInfo,
     ClassIndex, StringIndex, NameAndTypeIndex, FieldRefIndex, MethodRefIndex,

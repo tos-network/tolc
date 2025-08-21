@@ -99,23 +99,6 @@ impl Type {
     }
 }
 
-/// Chain structure for pending jumps (javac Chain equivalent)
-#[derive(Debug, Clone)]
-pub struct Chain {
-    /// PC of the jump instruction
-    pub pc: u16,
-    /// Next chain in the list
-    pub next: Option<Box<Chain>>,
-    /// State at the jump point
-    pub state: State,
-}
-
-impl Chain {
-    pub fn new(pc: u16, next: Option<Box<Chain>>, state: State) -> Self {
-        Self { pc, next, state }
-    }
-}
-
 /// Control flow types for enhanced alive state tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlFlowType {
@@ -183,8 +166,8 @@ pub struct Code {
     pub fatcode: bool,
     
     // Jump management (javac equivalent)
-    /// A chain for jumps to be resolved before the next opcode is emitted
-    pub pending_jumps: Option<Chain>,
+    /// A chain for jumps to be resolved before the next opcode is emitted (legacy)
+    pub pending_jumps: Option<Box<crate::codegen::chain::Chain>>,
     /// Enhanced jump management
     pub jump_manager: PendingJumpsManager,
     
@@ -371,70 +354,6 @@ impl Code {
         self.update_stack_for_op1w(op, od);
     }
     
-    /// Emit an opcode with two operands in wide format (javac emitop1w with 2 args)
-    pub fn emitop1w_2(&mut self, op: u8, od1: u16, od2: i16) {
-        if od1 > 0xFF || od2 < -128 || od2 > 127 {
-            self.emitop(opcodes::WIDE);
-            self.emitop(op);
-            self.emit2(od1);
-            self.emit2(od2 as u16);
-        } else {
-            self.emitop(op);
-            self.emit1(od1 as u8);
-            self.emit1(od2 as u8);
-        }
-        
-        if !self.alive {
-            return;
-        }
-        
-        // Update stack state for iinc
-        if op == opcodes::IINC {
-            // iinc doesn't change stack
-        }
-    }
-    
-    /// Emit opcode with local variable index, using optimal encoding (javac equivalent)
-    pub fn emitop_with_local_var(&mut self, op: u8, local_var: u16) {
-        if local_var <= 3 && Self::has_short_form(op) {
-            // Use short form like iload_0, istore_1, etc.
-            let short_op = Self::get_short_form(op, local_var as u8);
-            self.emitop(short_op);
-        } else if local_var <= 255 {
-            // Use single-byte local variable index
-            self.emitop1(op, local_var as u8);
-        } else {
-            // Use wide instruction for local variables > 255
-            self.emitop(opcodes::WIDE);
-            self.emitop2(op, local_var);
-        }
-    }
-    
-    /// Check if opcode has short form for local variables 0-3
-    fn has_short_form(op: u8) -> bool {
-        matches!(op, 
-            opcodes::ILOAD | opcodes::LLOAD | opcodes::FLOAD | opcodes::DLOAD | opcodes::ALOAD |
-            opcodes::ISTORE | opcodes::LSTORE | opcodes::FSTORE | opcodes::DSTORE | opcodes::ASTORE
-        )
-    }
-    
-    /// Get short form opcode for local variable 0-3
-    fn get_short_form(op: u8, local_var: u8) -> u8 {
-        match op {
-            opcodes::ILOAD => opcodes::ILOAD_0 + local_var,
-            opcodes::LLOAD => opcodes::LLOAD_0 + local_var,
-            opcodes::FLOAD => opcodes::FLOAD_0 + local_var,
-            opcodes::DLOAD => opcodes::DLOAD_0 + local_var,
-            opcodes::ALOAD => opcodes::ALOAD_0 + local_var,
-            opcodes::ISTORE => opcodes::ISTORE_0 + local_var,
-            opcodes::LSTORE => opcodes::LSTORE_0 + local_var,
-            opcodes::FSTORE => opcodes::FSTORE_0 + local_var,
-            opcodes::DSTORE => opcodes::DSTORE_0 + local_var,
-            opcodes::ASTORE => opcodes::ASTORE_0 + local_var,
-            _ => op, // fallback
-        }
-    }
-    
     /// Emit an opcode with variable-length operand (javac equivalent)
     pub fn emitop_with_operand(&mut self, op: u8, operands: &[u8]) {
         self.emitop(op);
@@ -457,7 +376,7 @@ impl Code {
             }
         }
     }
-
+    
     /// Emit an opcode with two-byte operand (javac emitop2)
     pub fn emitop2(&mut self, op: u8, od: u16) {
         self.emitop(op);
@@ -490,144 +409,6 @@ impl Code {
     }
     
     // ============================================================================
-    // SPECIALIZED INSTRUCTION METHODS (javac equivalents)
-    // ============================================================================
-    
-    /// Emit ldc instruction with optimal format selection (javac emitLdc)
-    pub fn emit_ldc(&mut self, od: u16) {
-        if od <= 255 {
-            self.emitop1(opcodes::LDC, od as u8);
-        } else {
-            self.emitop2(opcodes::LDC_W, od);
-        }
-    }
-    
-    /// Emit multianewarray instruction (javac emitMultianewarray)
-    pub fn emit_multianewarray(&mut self, ndims: u8, array_type: u16) {
-        self.emitop(opcodes::MULTIANEWARRAY);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(array_type);
-        self.emit1(ndims);
-        
-        // Stack effect: pop ndims, push arrayref
-        self.state.pop(ndims as u16);
-        self.state.push(Type::Object("array".to_string()));
-    }
-    
-    /// Emit newarray instruction (javac emitNewarray)
-    pub fn emit_newarray(&mut self, elemcode: u8) {
-        self.emitop(opcodes::NEWARRAY);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit1(elemcode);
-        
-        // Stack effect: pop count, push arrayref
-        self.state.pop(1);
-        self.state.push(Type::Object("array".to_string()));
-    }
-    
-    /// Emit anewarray instruction (javac emitAnewarray)
-    pub fn emit_anewarray(&mut self, class_index: u16) {
-        self.emitop(opcodes::ANEWARRAY);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(class_index);
-        
-        // Stack effect: pop count, push arrayref
-        self.state.pop(1);
-        self.state.push(Type::Object("array".to_string()));
-    }
-    
-    // ============================================================================
-    // METHOD INVOCATION INSTRUCTIONS (javac equivalents)
-    // ============================================================================
-    
-    /// Emit invokeinterface instruction (javac emitInvokeinterface)
-    pub fn emit_invokeinterface(&mut self, meth: u16, arg_size: u8) {
-        self.emitop(opcodes::INVOKEINTERFACE);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(meth);
-        self.emit1(arg_size + 1); // +1 for objectref
-        self.emit1(0); // reserved
-        
-        // Stack effect: pop args + objectref
-        self.state.pop(arg_size as u16 + 1);
-        // Push return value (simplified - would need method signature)
-        // self.state.push(return_type);
-    }
-    
-    /// Emit invokespecial instruction (javac emitInvokespecial)
-    pub fn emit_invokespecial(&mut self, meth: u16, arg_size: u8) {
-        self.emitop(opcodes::INVOKESPECIAL);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(meth);
-        
-        // Stack effect: pop args + objectref
-        self.state.pop(arg_size as u16 + 1);
-        // Push return value (simplified)
-        // self.state.push(return_type);
-    }
-    
-    /// Emit invokestatic instruction (javac emitInvokestatic)
-    pub fn emit_invokestatic(&mut self, meth: u16, arg_size: u8) {
-        self.emitop(opcodes::INVOKESTATIC);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(meth);
-        
-        // Stack effect: pop args
-        self.state.pop(arg_size as u16);
-        // Push return value (simplified)
-        // self.state.push(return_type);
-    }
-    
-    /// Emit invokevirtual instruction (javac emitInvokevirtual)
-    pub fn emit_invokevirtual(&mut self, meth: u16, arg_size: u8) {
-        self.emitop(opcodes::INVOKEVIRTUAL);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(meth);
-        
-        // Stack effect: pop args + objectref
-        self.state.pop(arg_size as u16 + 1);
-        // Push return value (simplified)
-        // self.state.push(return_type);
-    }
-    
-    /// Emit invokedynamic instruction (javac emitInvokedynamic)
-    pub fn emit_invokedynamic(&mut self, desc: u16, arg_size: u8) {
-        self.emitop(opcodes::INVOKEDYNAMIC);
-        if !self.alive {
-            return;
-        }
-        
-        self.emit2(desc);
-        self.emit2(0); // reserved
-        
-        // Stack effect: pop args
-        self.state.pop(arg_size as u16);
-        // Push return value (simplified)
-        // self.state.push(return_type);
-    }
-    
-    // ============================================================================
     // CONTROL FLOW AND POSITION MANAGEMENT (javac equivalents)
     // ============================================================================
     
@@ -647,30 +428,154 @@ impl Code {
         pc
     }
     
-    /// Create an entry point with specific state (javac entryPoint with state)
-    pub fn entry_point_with_state(&mut self, state: State) -> u16 {
-        let pc = self.cur_cp();
-        self.alive = true;
-        self.state = state;
-        self.pending_stack_map = self.need_stack_map;
-        pc
-    }
     
     /// Mark code as dead after terminal instruction (javac markDead)
     pub fn mark_dead(&mut self) {
         self.alive = false;
     }
     
-    /// Check if code generation is currently enabled
+    /// Check if code generation is currently enabled (javac isAlive)
     pub fn is_alive(&self) -> bool {
-        self.alive
+        self.alive || self.pending_jumps.is_some()
+    }
+
+    /// Declare an entry point with initial state (javac entryPoint(State))
+    pub fn entry_point_with_state(&mut self, state: State) -> u16 {
+        let pc = self.cp as u16;
+        self.alive = true;
+        let new_state = state.dup();
+        self.state = new_state;
+        self.pending_stack_map = self.need_stack_map;
+        if self.debug_code {
+            println!("entry point {} with state", pc);
+        }
+        pc
+    }
+
+    // ============================================================================
+    // SMART BRANCH MERGING (Enhanced javac pattern)
+    // ============================================================================
+
+    /// Smart branch merging - merge execution paths intelligently (javac pattern)
+    pub fn merge_state(&mut self, branch_state: &State) -> crate::error::Result<()> {
+        if !self.alive {
+            // If current path is dead, adopt the branch state
+            self.state = branch_state.dup();
+            self.alive = true;
+            return Ok(());
+        }
+
+        // Both paths are alive - need to merge carefully
+        if self.state.stacksize != branch_state.stacksize {
+            return Err(crate::error::Error::CodeGen {
+                message: format!(
+                    "Stack size mismatch: current={}, branch={}", 
+                    self.state.stacksize, 
+                    branch_state.stacksize
+                )
+            });
+        }
+
+        // Merge local variable states - use most compatible types
+        for i in 0..self.max_locals as usize {
+            if i < self.state.locals.len() && i < branch_state.locals.len() {
+                let current_type = &self.state.locals[i];
+                let branch_type = &branch_state.locals[i];
+                
+                // If types differ, find common supertype
+                if current_type != branch_type {
+                    // For now, use Object type as common supertype
+                    // In a full implementation, we'd use proper type hierarchy
+                    self.state.locals[i] = Type::Object("java/lang/Object".to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve pending jumps with smart state merging (enhanced javac pattern)
+    pub fn resolve_with_merge(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>) {
+        if let Some(chain) = chain {
+            let target = self.cp as u16;
+            
+            // Check if we need to restore alive state
+            let had_jumps = !chain.is_empty();
+            
+            // Resolve the jumps to current position
+            self.resolve_chain(chain, target);
+            
+            // If we had pending jumps and code was dead, restore aliveness
+            if had_jumps && !self.alive {
+                self.alive = true;
+                if self.debug_code {
+                    println!("Code alive restored by jump resolution at {}", target);
+                }
+            }
+        }
+    }
+
+    /// Enhanced resolve that handles goto optimization (javac pattern)
+    pub fn resolve_optimized(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>, target: u16) {
+        if let Some(chain) = chain {
+            // Advanced resolution with goto optimization
+            for mut current in chain.iter() {
+                let mut actual_target = target;
+
+                // Follow goto chains for optimization (javac behavior)
+                if actual_target < self.cp as u16 {
+                    if let Some(opcode) = self.code.get(actual_target as usize).copied() {
+                        if opcode == opcodes::GOTO {
+                            // Follow the goto target
+                            if self.fatcode {
+                                let offset = self.get4((actual_target + 1) as usize) as i32;
+                                actual_target = ((actual_target as i32) + offset) as u16;
+                            } else {
+                                let offset = self.get2((actual_target + 1) as usize) as i16;
+                                actual_target = ((actual_target as i32) + (offset as i32)) as u16;
+                            }
+                        }
+                    }
+                }
+
+                // Check for goto elimination optimization
+                if let Some(opcode) = self.code.get(current as usize).copied() {
+                    if opcode == opcodes::GOTO && 
+                       current + 3 == actual_target && 
+                       actual_target == self.cp as u16 && 
+                       !self.fixed_pc {
+                        // Eliminate unnecessary goto (javac optimization)
+                        self.cp -= 3;
+                        actual_target -= 3;
+                        if self.debug_code {
+                            println!("Eliminated goto at {}", current);
+                        }
+                        self.alive = true;
+                        break;
+                    }
+                }
+
+                // Patch the jump instruction
+                if self.fatcode {
+                    self.put4(current + 1, (actual_target as i32) - (current as i32));
+                } else {
+                    let offset = (actual_target as i32) - (current as i32);
+                    if offset < i16::MIN as i32 || offset > i16::MAX as i32 {
+                        self.fatcode = true;
+                        // Re-emit as wide instruction - simplified for now
+                    } else {
+                        self.put2(current + 1, offset as i16);
+                    }
+                }
+            }
+        }
     }
     
     // ============================================================================
     // JUMP INSTRUCTION MANAGEMENT (javac equivalents)
     // ============================================================================
     
-    /// Emit a jump instruction and return chain (javac emitJump)
+    /// Emit a jump instruction and return the PC (javac emitJump)
     pub fn emit_jump(&mut self, opcode: u8) -> u16 {
         if self.fatcode {
             if opcode == opcodes::GOTO || opcode == opcodes::JSR {
@@ -690,131 +595,103 @@ impl Code {
         }
     }
     
-    /// Branch to label with given opcode (javac branch)
-    pub fn branch(&mut self, opcode: u8) -> Chain {
-        let result = if opcode != opcodes::GOTO && self.is_alive() {
-            Some(Box::new(Chain::new(
-                self.emit_jump(opcode),
-                None,
-                self.state.dup()
-            )))
-        } else {
-            None
-        };
+    /// Create a branch instruction and return a Chain for later resolution (JavaC branch equivalent)
+    pub fn branch(&mut self, opcode: u8) -> Option<Box<crate::codegen::chain::Chain>> {
+        if !self.alive {
+            return None;
+        }
         
-        self.fixed_pc = self.fatcode;
-        
-        if opcode != opcodes::GOTO && self.is_alive() {
-            Chain::new(
-                self.emit_jump(opcode),
-                result,
-                self.state.dup()
-            )
-        } else {
-            if opcode == opcodes::GOTO {
-                self.mark_dead();
+        let pc = self.emit_jump(opcode);
+        crate::codegen::chain::ChainOps::single(pc, self.state.stacksize, self.max_locals)
+    }
+    
+    /// Resolve a chain to the current code position (JavaC resolve equivalent)
+    pub fn resolve(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>) {
+        if let Some(chain) = chain {
+            // Resolve jumps and restore alive state if needed (javac behavior)
+            let had_jumps = !chain.is_empty();
+            self.resolve_chain(chain, self.cp as u16);
+            
+            // If there were jumps targeting current position and code was dead,
+            // restore aliveness (javac pattern)
+            if had_jumps && !self.alive {
+                self.alive = true;
+                if self.debug_code {
+                    println!("Code alive restored by resolve at {}", self.cp);
+                }
             }
-            // Return empty chain
-            Chain::new(0, None, self.state.dup())
         }
     }
     
-    /// Emit a jump placeholder and return the chain for later resolution (javac equivalent)
-    pub fn emit_jump_placeholder(&mut self) -> Option<Chain> {
-        if self.is_alive() {
-            let pc = self.emit_jump(opcodes::GOTO); // Placeholder goto
-            Some(Chain::new(pc, None, self.state.dup()))
-        } else {
-            None
-        }
-    }
-    
-    /// Resolve a chain to point to given target (javac resolve with target)
-    pub fn resolve_chain(&mut self, mut chain: Option<Chain>, target: u16) {
-        let mut new_state = self.state.dup();
-        
-        while let Some(mut c) = chain {
-            // Validate state consistency
-            assert!(
-                !self.alive || 
-                target > c.pc || 
-                self.state.stacksize == 0
-            );
-            
-            let mut actual_target = target;
-            if actual_target >= self.cp as u16 {
-                actual_target = self.cp as u16;
-            } else if self.get1(actual_target as usize) == opcodes::GOTO {
-                // Follow goto chains
-                if self.fatcode {
-                    actual_target = (actual_target as i32 + self.get4(actual_target as usize + 1) as i32) as u16;
-                } else {
-                    actual_target = (actual_target as i32 + self.get2(actual_target as usize + 1) as i32) as u16;
-                }
-            }
-            
-            // Check for redundant goto optimization
-            if self.get1(c.pc as usize) == opcodes::GOTO &&
-               c.pc + 3 == actual_target && 
-               actual_target == self.cp as u16 && 
-               !self.fixed_pc {
-                // Compact code by removing unnecessary goto
-                if self.var_debug_info {
-                    self.adjust_alive_ranges(self.cp as u16, -3);
-                }
-                self.cp -= 3;
-                actual_target = self.cp as u16;
+    /// Resolve a chain to a specific target position (JavaC resolve with target)
+    pub fn resolve_chain(&mut self, chain: Box<crate::codegen::chain::Chain>, target: u16) {
+        for pc in chain.iter() {
+            // Calculate the jump offset
+            let offset = if target >= self.cp as u16 {
+                target
             } else {
-                // Write the offset
-                if self.fatcode {
-                    self.put4(c.pc as usize + 1, (actual_target as i32 - c.pc as i32) as u32);
-                } else {
-                    let offset = actual_target as i32 - c.pc as i32;
-                    if offset < i16::MIN as i32 || offset > i16::MAX as i32 {
-                        self.fatcode = true;
-                        // Would need to restart compilation with fatcode
+                // Check if target is a goto instruction for optimization
+                if self.code.get(target as usize).copied() == Some(opcodes::GOTO) {
+                    if self.fatcode {
+                        target.wrapping_add(self.get2(target as usize + 1))
                     } else {
-                        self.put2(c.pc as usize + 1, offset as u16);
+                        target.wrapping_add(self.get2(target as usize + 1))
                     }
-                }
-                
-                // Validate state consistency
-                assert!(
-                    !self.alive ||
-                    c.state.stacksize == new_state.stacksize &&
-                    c.state.nlocks == new_state.nlocks
-                );
-            }
-            
-            self.fixed_pc = true;
-            
-            // Check for state merging at target
-            if self.cp as u16 == actual_target {
-                // Merge states
-                if !self.alive {
-                    self.state = c.state;
-                    self.alive = true;
-                    self.pending_stack_map = self.need_stack_map;
                 } else {
-                    // Would need full state merging logic here
+                    target
+                }
+            };
+            
+            // Handle goto optimization - remove unnecessary goto to next instruction
+            if self.code.get(pc as usize).copied() == Some(opcodes::GOTO) && 
+               pc + 3 == target && target == self.cp as u16 && !self.fixed_pc {
+                // Remove the goto by setting cp back and not emitting the instruction
+                if usize::from(pc + 3) == self.cp {
+                    self.cp = pc as usize;
+                    self.alive = true;
+                    continue;
                 }
             }
             
-            chain = c.next.map(|boxed| *boxed);
+            // Patch the jump offset
+            let jump_offset = target as i16 - pc as i16;
+            if self.fatcode && (self.code[pc as usize] == opcodes::GOTO_W || self.code[pc as usize] == opcodes::JSR_W) {
+                // 4-byte offset for wide jumps
+                self.put4(pc + 1, jump_offset as i32);
+            } else {
+                // 2-byte offset for normal jumps
+                self.put2(pc + 1, jump_offset);
+            }
         }
     }
     
-    /// Resolve a chain to point to current position (javac resolve)
-    pub fn resolve(&mut self, chain: Option<Chain>) {
-        assert!(
-            !self.alive ||
-            chain.is_none() ||
-            self.state.stacksize == chain.as_ref().unwrap().state.stacksize &&
-            self.state.nlocks == chain.as_ref().unwrap().state.nlocks
-        );
-        
-        let target = self.cur_cp();
-        self.resolve_chain(chain, target);
+    /// Merge two chains (JavaC mergeChains equivalent)
+    pub fn merge_chains(
+        chain1: Option<Box<crate::codegen::chain::Chain>>, 
+        chain2: Option<Box<crate::codegen::chain::Chain>>
+    ) -> Option<Box<crate::codegen::chain::Chain>> {
+        crate::codegen::chain::ChainOps::merge(chain1, chain2)
+    }
+    
+    /// Get current jump context for chain operations
+    pub fn jump_context(&self) -> crate::codegen::chain::JumpContext {
+        crate::codegen::chain::JumpContext::new(
+            self.cp as u16,
+            self.state.stacksize,
+            self.max_locals,
+            self.fatcode,
+        )
+    }
+    
+    /// End scopes up to the given limit (JavaC endScopes equivalent)
+    pub fn end_scopes(&mut self, limit: u16) {
+        // For now, this is a placeholder that matches the javac pattern
+        // In a full implementation, this would handle local variable scope cleanup
+        // and emit any necessary cleanup bytecode
+        if self.debug_code {
+            println!("End scopes to limit: {}", limit);
+        }
+        // TODO: Implement proper scope management when we add local variable tracking
     }
     
     /// Negate a conditional jump opcode (javac negate)
@@ -852,13 +729,21 @@ impl Code {
     }
     
     /// Place two bytes into code at address pc (javac put2)
-    fn put2(&mut self, pc: usize, od: u16) {
+    pub fn put2(&mut self, pc: u16, od: i16) {
+        self.put2_internal(pc as usize, od as u16);
+    }
+    
+    fn put2_internal(&mut self, pc: usize, od: u16) {
         self.put1(pc, (od >> 8) as u8);
         self.put1(pc + 1, od as u8);
     }
     
     /// Place four bytes into code at address pc (javac put4)
-    pub fn put4(&mut self, pc: usize, od: u32) {
+    pub fn put4(&mut self, pc: u16, od: i32) {
+        self.put4_internal(pc as usize, od as u32);
+    }
+    
+    fn put4_internal(&mut self, pc: usize, od: u32) {
         self.put1(pc, (od >> 24) as u8);
         self.put1(pc + 1, (od >> 16) as u8);
         self.put1(pc + 2, (od >> 8) as u8);
@@ -1145,9 +1030,8 @@ impl Code {
     
     /// Resolve all pending jumps (javac resolvePending)
     fn resolve_pending(&mut self) {
-        if let Some(pending) = self.pending_jumps.take() {
-            self.resolve_chain(Some(pending), self.cp as u16);
-        }
+        // For now, pending jumps use the older system
+        // TODO: Migrate to new Chain system
     }
     
     /// Adjust alive ranges for local variables when code is compacted
@@ -1212,6 +1096,7 @@ impl Code {
             line_number: line,
         });
     }
+    
 }
 
 impl Default for Code {

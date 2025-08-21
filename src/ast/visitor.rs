@@ -294,6 +294,11 @@ where
                 self.visit_stmt(&while_stmt.body);
                 T::default()
             }
+            Stmt::DoWhile(do_while_stmt) => {
+                self.visit_stmt(&do_while_stmt.body);
+                self.visit_expr(&do_while_stmt.condition);
+                T::default()
+            }
             Stmt::For(for_stmt) => {
                 for init in &for_stmt.init {
                     self.visit_stmt(init);

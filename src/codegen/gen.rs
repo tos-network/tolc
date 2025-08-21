@@ -55,6 +55,12 @@ pub struct Gen {
     
     /// Optimization manager - coordinates all optimization passes
     optimizer: OptimizationManager,
+    
+    /// Current break chain for loop break statements (Phase 2.3)
+    pub current_break_chain: Option<Box<crate::codegen::chain::Chain>>,
+    
+    /// Current continue chain for loop continue statements (Phase 2.3)  
+    pub current_continue_chain: Option<Box<crate::codegen::chain::Chain>>,
 }
 
 
@@ -75,6 +81,15 @@ pub struct GenContext {
     
     /// Debug information enabled
     pub debug_code: bool,
+    
+    /// Chain for all unresolved jumps that exit the current environment (JavaC pattern)
+    pub exit: Option<Box<crate::codegen::chain::Chain>>,
+    
+    /// Chain for all unresolved jumps that continue in the current environment (JavaC pattern)
+    pub cont: Option<Box<crate::codegen::chain::Chain>>,
+    
+    /// Is this a switch statement?
+    pub is_switch: bool,
 }
 
 impl Default for GenContext {
@@ -84,6 +99,34 @@ impl Default for GenContext {
             clazz: None,
             fatcode: false,
             debug_code: false,
+            exit: None,
+            cont: None,
+            is_switch: false,
+        }
+    }
+}
+
+impl GenContext {
+    /// Add given chain to exit chain (JavaC: addExit)
+    pub fn add_exit(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>) {
+        self.exit = crate::codegen::code::Code::merge_chains(chain, self.exit.take());
+    }
+    
+    /// Add given chain to cont chain (JavaC: addCont)
+    pub fn add_cont(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>) {
+        self.cont = crate::codegen::code::Code::merge_chains(chain, self.cont.take());
+    }
+    
+    /// Create a duplicate environment for nested contexts (JavaC: env.dup)
+    pub fn dup(&self) -> Self {
+        Self {
+            method: self.method.clone(),
+            clazz: self.clazz.clone(),
+            fatcode: self.fatcode,
+            debug_code: self.debug_code,
+            exit: None,  // New environment starts with empty chains
+            cont: None,  // New environment starts with empty chains
+            is_switch: false,
         }
     }
 }
@@ -127,6 +170,8 @@ impl Gen {
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
             optimizer: OptimizationManager::new(),   // Optimization coordinator
+            current_break_chain: None,               // Phase 2.3: break statement chain
+            current_continue_chain: None,            // Phase 2.3: continue statement chain
         }
     }
     
@@ -182,6 +227,9 @@ impl Gen {
             clazz: self.class_context.class.clone(),
             fatcode: false,
             debug_code: false,
+            exit: None,
+            cont: None,
+            is_switch: false,
         };
         
         self.init_code(&method, &env, false)?;
@@ -213,6 +261,9 @@ impl Gen {
             clazz: self.class_context.class.clone(),
             fatcode: false,
             debug_code: false,
+            exit: None,
+            cont: None,
+            is_switch: false,
         };
         
         // JavaC pattern: int startpcCrt = initCode(tree, env, fatcode)
@@ -290,6 +341,9 @@ impl Gen {
             clazz: None,
             fatcode: false,
             debug_code: false,
+            exit: None,
+            cont: None,
+            is_switch: false,
         });
         
         match stmt {
@@ -297,6 +351,7 @@ impl Gen {
             Stmt::Expression(expr_stmt) => self.visit_exec(expr_stmt, &env),
             Stmt::If(if_stmt) => self.visit_if(if_stmt, &env),
             Stmt::While(while_stmt) => self.visit_while(while_stmt, &env),
+            Stmt::DoWhile(do_while_stmt) => self.visit_do_while(do_while_stmt, &env),
             Stmt::For(for_stmt) => self.visit_for(for_stmt, &env),
             Stmt::Return(return_stmt) => self.visit_return(return_stmt, &env),
             Stmt::Declaration(var_stmt) => self.visit_var_def(var_stmt, &env),
@@ -365,6 +420,9 @@ impl Gen {
             clazz: None,
             fatcode: false,
             debug_code: false,
+            exit: None,
+            cont: None,
+            is_switch: false,
         });
         
         // JavaC pattern: Apply optimizations before generation
@@ -663,6 +721,9 @@ impl Gen {
             clazz: env.clazz.clone(),
             fatcode: env.fatcode,
             debug_code: env.debug_code,
+            exit: None,
+            cont: None,
+            is_switch: false,
         };
         
         // Initialize method in type inference system
@@ -676,6 +737,7 @@ impl Gen {
             parameter_types: method.parameters.iter().map(|p| {
                 TypeEnum::from(p.type_ref.clone()) // TODO: Proper conversion
             }).collect(),
+            parameter_names: method.parameters.iter().map(|p| p.name.clone()).collect(),
             is_static: method.modifiers.iter().any(|m| matches!(m, Modifier::Static)),
             is_virtual: !method.modifiers.iter().any(|m| matches!(m, Modifier::Static | Modifier::Final | Modifier::Private)),
             owner_class: "TODO".to_string(), // TODO: Get actual class name
@@ -740,6 +802,9 @@ impl Gen {
             clazz: Some(class.clone()),
             fatcode: env.fatcode,
             debug_code: env.debug_code,
+            exit: None,
+            cont: None,
+            is_switch: false,
         };
         
         // Initialize class context
@@ -1165,14 +1230,10 @@ impl Gen {
                         "java/lang/Object".to_string()
                     };
                     
-                    let stack_map_table = frame_computer.compute_with_types(
+                    // Use simpler frame computation for loops to avoid convergence issues
+                    let stack_map_table = frame_computer.compute_from(
                         &code.code,
                         &[], // No exception handlers for now
-                        method.modifiers.contains(&crate::ast::Modifier::Static),
-                        method.name == "<init>", // Is constructor
-                        &class_name,
-                        &self.create_method_descriptor(method)?,
-                        &mut self.pool,
                     );
                     
                     if !stack_map_table.frames.is_empty() {
@@ -1394,12 +1455,15 @@ impl Gen {
         match stmt {
             Stmt::If(if_stmt) => self.visit_if(if_stmt, env),
             Stmt::While(while_stmt) => self.visit_while(while_stmt, env),
+            Stmt::DoWhile(do_while_stmt) => self.visit_do_while(do_while_stmt, env),
             Stmt::For(for_stmt) => self.visit_for(for_stmt, env),
             Stmt::Return(return_stmt) => self.visit_return(return_stmt, env),
             Stmt::Declaration(var_stmt) => self.visit_var_def(var_stmt, env),
             Stmt::Expression(expr_stmt) => self.visit_exec(expr_stmt, env),
             Stmt::Block(block) => self.visit_block(block, env),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt, env),
+            Stmt::Break(break_stmt) => self.visit_break(break_stmt, env),
+            Stmt::Continue(continue_stmt) => self.visit_continue(continue_stmt, env),
             _ => {
                 // For statements not yet implemented, just return Ok
                 eprintln!("⚠️  WARNING: Statement type not implemented: {:?}", stmt);

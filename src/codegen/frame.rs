@@ -345,8 +345,30 @@ impl FrameBuilder {
         let mut worklist: VecDeque<u16> = VecDeque::new();
         worklist.push_back(0);
 
-        // Forward simulate per basic block
+        // Forward simulate per basic block with convergence tracking
+        let mut iterations = 0;
+        let mut pc_visit_count: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        const MAX_ITERATIONS: usize = 10000; // Prevent infinite loops
+        const MAX_PC_VISITS: usize = 50; // Max times we visit same PC
+        
         while let Some(leader_pc) = worklist.pop_front() {
+            iterations += 1;
+            
+            // Track how many times we've visited this PC
+            let visit_count = pc_visit_count.entry(leader_pc).or_insert(0);
+            *visit_count += 1;
+            
+            // If we're visiting the same PC too many times, we're likely not converging
+            if *visit_count > MAX_PC_VISITS {
+                // Skip this PC to prevent infinite loops but continue with other PCs
+                continue;
+            }
+            
+            if iterations > MAX_ITERATIONS {
+                // Emergency brake: if we hit too many total iterations, stop processing
+                // This prevents complete hangs while still allowing partial frame computation
+                break;
+            }
             let Some(&li) = leader_index.get(&leader_pc) else { continue; };
             let Some(mut state) = in_states[li].clone() else { continue; };
             // Determine block end
