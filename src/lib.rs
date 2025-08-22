@@ -92,11 +92,19 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
     let type_info_raw = semantic_analyzer.attr.get_type_information();
     let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
     
-    // Convert HashMap<usize, ResolvedType> to HashMap<String, ResolvedType> for codegen
-    let type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType> = type_info_raw
+    // Get semantic type mapping (meaningful names) for codegen  
+    let semantic_types = semantic_analyzer.attr.get_semantic_types();
+    let type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType> = semantic_types
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    
+    // Debug: Print semantic type info being passed to codegen
+    eprintln!("🔍 DEBUG: Semantic type info being passed to codegen ({} entries):", type_info.len());
+    for (key, resolved_type) in &type_info {
+        eprintln!("  '{}' -> {:?}", key, resolved_type);
+    }
+    
     codegen::generate_bytecode_with_wash(&ast, output_dir, config, Some(signatures), Some(type_info), Some(symbol_env))?;
     eprintln!("✅ TOLC: Bytecode generation complete");
     

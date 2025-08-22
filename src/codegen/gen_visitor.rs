@@ -204,15 +204,17 @@ impl Gen {
     }
     
     /// Visit identifier expression - simplified version
-    pub fn visit_ident(&mut self, tree: &IdentifierExpr, _env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_ident(&mut self, tree: &IdentifierExpr, env: &GenContext) -> Result<JavacItem> {
         eprintln!("DEBUG: visit_ident called for identifier '{}'", tree.name);
         if tree.name == "this" {
             self.with_items(|items| {
-                Ok(items.make_this_item())
+                let this_item = items.make_this_item();
+                items.load_item(&this_item)
             })
         } else if tree.name == "super" {
             self.with_items(|items| {
-                Ok(items.make_super_item())
+                let super_item = items.make_super_item();
+                items.load_item(&super_item)
             })
         } else {
             // Look up local variable or field
@@ -220,10 +222,25 @@ impl Gen {
             
             if let Some(local_var) = local_var {
                 eprintln!("DEBUG: Found local variable '{}' at slot {}", tree.name, local_var.reg);
-                self.with_items(|items| {
-                    let local_item = items.make_local_item(&local_var.typ, local_var.reg);
-                    items.load_item(&local_item)
-                })
+                
+                // Try to use wash type information first for better type awareness
+                let resolved_type_opt = self.get_wash_type_info().and_then(|wash_types| {
+                    wash_types.get(&tree.name).cloned()
+                });
+                
+                if let Some(resolved_type) = resolved_type_opt {
+                    eprintln!("DEBUG: Using wash type info for local variable '{}': {:?}", tree.name, resolved_type);
+                    self.with_items(|items| {
+                        let local_item = items.make_local_item_for_resolved_type(&resolved_type, local_var.reg);
+                        items.load_item(&local_item)
+                    })
+                } else {
+                    eprintln!("DEBUG: Using legacy type info for local variable '{}'", tree.name);
+                    self.with_items(|items| {
+                        let local_item = items.make_local_item(&local_var.typ, local_var.reg);
+                        items.load_item(&local_item)
+                    })
+                }
             } else {
                 eprintln!("DEBUG: No local variable found for '{}', checking symbol table", tree.name);
                 // Try wash type information first for type-aware variable loading
@@ -233,12 +250,43 @@ impl Gen {
                 
                 if let Some(resolved_type) = resolved_type_opt {
                     eprintln!("DEBUG: Found wash type info for '{}': {:?}", tree.name, resolved_type);
-                    return self.with_items(|items| {
-                        // Use wash type information to create type-aware local item
-                        // For now, assume slot 1 for simplicity - this should be improved with proper slot tracking
-                        let local_item = items.make_local_item_for_resolved_type(&resolved_type, 1);
-                        items.load_item(&local_item)
-                    });
+                    
+                    // Check if this is an instance field by looking for "this.fieldname" in wash types
+                    let field_key = format!("this.{}", tree.name);
+                    let is_field = self.get_wash_type_info()
+                        .map(|wash_types| wash_types.contains_key(&field_key))
+                        .unwrap_or(false);
+                    
+                    if is_field {
+                        // This is an implicit field access: identifier -> this.field
+                        eprintln!("DEBUG: '{}' is an implicit field access, generating this.{}", tree.name, tree.name);
+                        let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
+                        let field_name = tree.name.clone();
+                        
+                        return self.with_items(|items| {
+                            // First, load 'this' reference
+                            items.code.emitop(super::opcodes::ALOAD_0);
+                            
+                            // Create type-aware field item using wash information
+                            let field_item = items.make_field_item_for_resolved_type(
+                                field_name,
+                                owner_class,
+                                &resolved_type,
+                                false // Assume non-static for instance field access
+                            );
+                            
+                            // Load the field using the items system (type-aware)
+                            items.load_item(&field_item)
+                        });
+                    } else {
+                        // This is a local variable or parameter
+                        return self.with_items(|items| {
+                            // Use wash type information to create type-aware local item
+                            // For now, assume slot 1 for simplicity - this should be improved with proper slot tracking
+                            let local_item = items.make_local_item_for_resolved_type(&resolved_type, 1);
+                            items.load_item(&local_item)
+                        });
+                    }
                 }
                 
                 // Fallback to hardcoded logic for specific known variables (deprecated)
@@ -326,7 +374,8 @@ impl Gen {
             }
             
             // General case: evaluate target first, then access field
-            let _target_item = self.visit_expr(target, env)?;
+            // Don't discard the target evaluation - it loads 'this' onto the stack
+            self.visit_expr(target, env)?;
             
             // Use wash type information for type-aware field access
             let field_key = format!("{}.{}", 
@@ -344,21 +393,36 @@ impl Gen {
             if let Some(resolved_type) = resolved_type_opt {
                 eprintln!("DEBUG: Found wash field type for '{}': {:?}", tree.name, resolved_type);
                 
-                // Extract class name before borrowing
+                // Extract class name and field descriptor before borrowing
                 let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
                 let field_name = tree.name.clone();
+                let field_descriptor = self.get_field_descriptor_from_resolved_type(&resolved_type);
+                
+                // Direct GETFIELD emission since object is already on stack
+                let field_ref_idx = self.get_pool_mut().add_field_ref(&owner_class, &field_name, &field_descriptor);
                 
                 return self.with_items(|items| {
-                    // Create type-aware field item using wash information
-                    let field_item = items.make_field_item_for_resolved_type(
-                        field_name,
-                        owner_class,
-                        &resolved_type,
-                        false // Assume non-static for instance field access
-                    );
+                    items.code.emitop(super::opcodes::GETFIELD);
+                    items.code.emit2(field_ref_idx);
                     
-                    // Load the field using the items system (type-aware)
-                    items.load_item(&field_item)
+                    // Update stack state - pop object reference, push field value
+                    items.code.state.pop(1); // Remove object reference
+                    let field_type = match resolved_type {
+                        crate::wash::attr::ResolvedType::Primitive(prim) => {
+                            match prim {
+                                crate::wash::attr::PrimitiveType::Int => super::code::Type::Int,
+                                crate::wash::attr::PrimitiveType::Boolean => super::code::Type::Int,
+                                crate::wash::attr::PrimitiveType::Long => super::code::Type::Long,
+                                crate::wash::attr::PrimitiveType::Float => super::code::Type::Float,
+                                crate::wash::attr::PrimitiveType::Double => super::code::Type::Double,
+                                _ => super::code::Type::Int,
+                            }
+                        },
+                        _ => super::code::Type::Object("java/lang/Object".to_string()),
+                    };
+                    items.code.state.push(field_type);
+                    
+                    Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
                 });
             }
             
@@ -3532,6 +3596,42 @@ impl Gen {
         let index = self.bootstrap_methods.len() as u16;
         self.bootstrap_methods.push(method_arguments);
         index
+    }
+    
+    /// Get field descriptor from resolved type
+    fn get_field_descriptor_from_resolved_type(&self, resolved_type: &crate::wash::attr::ResolvedType) -> String {
+        match resolved_type {
+            crate::wash::attr::ResolvedType::Primitive(prim) => {
+                match prim {
+                    crate::wash::attr::PrimitiveType::Boolean => "Z".to_string(),
+                    crate::wash::attr::PrimitiveType::Byte => "B".to_string(),
+                    crate::wash::attr::PrimitiveType::Char => "C".to_string(),
+                    crate::wash::attr::PrimitiveType::Short => "S".to_string(),
+                    crate::wash::attr::PrimitiveType::Int => "I".to_string(),
+                    crate::wash::attr::PrimitiveType::Long => "J".to_string(),
+                    crate::wash::attr::PrimitiveType::Float => "F".to_string(),
+                    crate::wash::attr::PrimitiveType::Double => "D".to_string(),
+                }
+            },
+            crate::wash::attr::ResolvedType::Generic(name, _) => {
+                // For generics, use Object descriptor (type erasure)
+                format!("L{};", name.replace('.', "/"))
+            },
+            crate::wash::attr::ResolvedType::Reference(class_name) => {
+                format!("L{};", class_name.replace('.', "/"))
+            },
+            crate::wash::attr::ResolvedType::Array(element_type) => {
+                format!("[{}", self.get_field_descriptor_from_resolved_type(element_type))
+            },
+            crate::wash::attr::ResolvedType::Class(_) => {
+                // For ClassType, default to Object for now
+                "Ljava/lang/Object;".to_string()
+            },
+            _ => {
+                // For other types, default to Object
+                "Ljava/lang/Object;".to_string()
+            },
+        }
     }
 }
 

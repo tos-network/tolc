@@ -7,7 +7,7 @@
 //! JavaC alignment: This module implements the same visitor pattern and
 //! attribution logic as JavaC's Attr.java.
 
-use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, Expr, Stmt, BinaryOp};
+use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, FieldDecl, Expr, Stmt, BinaryOp};
 use crate::common::error::{Result, Error};
 use crate::wash::enter::SymbolEnvironment;
 use std::collections::{HashMap, HashSet};
@@ -143,6 +143,8 @@ pub struct AttrEnvironment {
     pub contexts: Vec<AttrContext>,
     /// Resolved expression types (expression ID -> type)
     pub expression_types: HashMap<usize, ResolvedType>,
+    /// Semantic type mapping for codegen (field/method names -> type)
+    pub semantic_types: HashMap<String, ResolvedType>,
     /// Symbol environment from Enter phase
     pub symbol_env: Option<SymbolEnvironment>,
     /// Deferred attribution tasks (for lambdas, method references)
@@ -214,6 +216,7 @@ impl Attr {
             attr_env: AttrEnvironment {
                 contexts: Vec::new(),
                 expression_types: HashMap::new(),
+                semantic_types: HashMap::new(),
                 symbol_env: None,
                 deferred_tasks: Vec::new(),
                 current_result_info: None,
@@ -352,7 +355,7 @@ impl Attr {
             }
             ClassMember::Field(field_decl) => {
                 eprintln!("🔍 ATTR: Processing field: {}", field_decl.name);
-                // TODO: Implement field attribution
+                self.attrib_field_decl(field_decl)?;
             }
             ClassMember::Constructor(constructor_decl) => {
                 eprintln!("🔍 ATTR: Processing constructor");
@@ -411,6 +414,28 @@ impl Attr {
         }
         
         self.pop_context();
+        Ok(())
+    }
+    
+    /// Attribute a field declaration
+    fn attrib_field_decl(&mut self, field_decl: &crate::ast::FieldDecl) -> Result<()> {
+        eprintln!("🔍 ATTR: Attributing field: {}", field_decl.name);
+        
+        // Resolve field type
+        let field_type = self.resolve_type_ref(&field_decl.type_ref);
+        eprintln!("🔍 ATTR: Field '{}' has type: {:?}", field_decl.name, field_type);
+        
+        // Record semantic type information for codegen
+        self.record_field_type(&field_decl.name, field_type.clone());
+        
+        // If field has initializer, attribute it
+        if let Some(ref init_expr) = field_decl.initializer {
+            let init_type = self.attrib_expression(init_expr)?;
+            eprintln!("🔍 ATTR: Field '{}' initializer type: {:?}", field_decl.name, init_type);
+            
+            // TODO: Check type compatibility between field type and initializer type
+        }
+        
         Ok(())
     }
     
@@ -741,6 +766,39 @@ impl Attr {
     /// Get type information for use by subsequent phases
     pub fn get_type_information(&self) -> &HashMap<usize, ResolvedType> {
         &self.attr_env.expression_types
+    }
+    
+    /// Get semantic type mapping for codegen (field/method names -> type)
+    pub fn get_semantic_types(&self) -> &HashMap<String, ResolvedType> {
+        &self.attr_env.semantic_types
+    }
+    
+    /// Record field type for semantic access (field_name -> type)
+    fn record_field_type(&mut self, field_name: &str, field_type: ResolvedType) {
+        self.attr_env.semantic_types.insert(field_name.to_string(), field_type.clone());
+        // Also store qualified field name for "this.field" access
+        if let Some(current_class) = &self.current_context_opt().and_then(|c| c.current_class.clone()) {
+            let qualified_name = format!("{}.{}", current_class, field_name);
+            self.attr_env.semantic_types.insert(qualified_name, field_type.clone());
+        }
+        // Store "this.field" pattern for implicit field access
+        let this_field = format!("this.{}", field_name);
+        self.attr_env.semantic_types.insert(this_field, field_type);
+    }
+    
+    /// Record method type for semantic access (method_name -> type)  
+    fn record_method_type(&mut self, method_name: &str, method_type: ResolvedType) {
+        self.attr_env.semantic_types.insert(method_name.to_string(), method_type.clone());
+        // Also store qualified method name
+        if let Some(current_class) = &self.current_context_opt().and_then(|c| c.current_class.clone()) {
+            let qualified_name = format!("{}.{}", current_class, method_name);
+            self.attr_env.semantic_types.insert(qualified_name, method_type);
+        }
+    }
+    
+    /// Record variable type for semantic access (var_name -> type)
+    fn record_variable_type(&mut self, var_name: &str, var_type: ResolvedType) {
+        self.attr_env.semantic_types.insert(var_name.to_string(), var_type);
     }
     
     /// Perform wildcard capture conversion following JLS §5.1.10

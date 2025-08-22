@@ -3,9 +3,9 @@
 //! This module implements the exact same Items architecture as Oracle's javac,
 //! with Items directly operating on the Code buffer for maximum compatibility.
 
-use crate::ast::{Literal, TypeEnum};
+use crate::ast::{Literal, TypeEnum, PrimitiveType};
 use crate::common::error::Result;
-use crate::wash::attr::{ResolvedType, PrimitiveType};
+use crate::wash::attr::{ResolvedType, PrimitiveType as WashPrimitiveType};
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
@@ -176,15 +176,9 @@ impl<'a> Items<'a> {
     }
     
     /// Convert TypeEnum to typecode
-    fn type_to_typecode(&self, _typ: &TypeEnum) -> u8 {
-        // TODO: Implement proper Type to typecode conversion
-        typecodes::INT
-    }
-    
-    /// Convert ResolvedType from wash phase to JVM typecode
-    fn resolved_type_to_typecode(&self, resolved_type: &ResolvedType) -> u8 {
-        match resolved_type {
-            ResolvedType::Primitive(prim_type) => {
+    fn type_to_typecode(&self, typ: &TypeEnum) -> u8 {
+        match typ {
+            TypeEnum::Primitive(prim_type) => {
                 match prim_type {
                     PrimitiveType::Boolean => typecodes::BYTE, // boolean stored as byte in JVM
                     PrimitiveType::Byte => typecodes::BYTE,
@@ -194,6 +188,26 @@ impl<'a> Items<'a> {
                     PrimitiveType::Float => typecodes::FLOAT,
                     PrimitiveType::Double => typecodes::DOUBLE,
                     PrimitiveType::Char => typecodes::CHAR,
+                }
+            }
+            TypeEnum::Reference(_) => typecodes::OBJECT,
+            TypeEnum::Void => typecodes::VOID,
+        }
+    }
+    
+    /// Convert ResolvedType from wash phase to JVM typecode
+    fn resolved_type_to_typecode(&self, resolved_type: &ResolvedType) -> u8 {
+        match resolved_type {
+            ResolvedType::Primitive(prim_type) => {
+                match prim_type {
+                    WashPrimitiveType::Boolean => typecodes::BYTE, // boolean stored as byte in JVM
+                    WashPrimitiveType::Byte => typecodes::BYTE,
+                    WashPrimitiveType::Short => typecodes::SHORT,
+                    WashPrimitiveType::Int => typecodes::INT,
+                    WashPrimitiveType::Long => typecodes::LONG,
+                    WashPrimitiveType::Float => typecodes::FLOAT,
+                    WashPrimitiveType::Double => typecodes::DOUBLE,
+                    WashPrimitiveType::Char => typecodes::CHAR,
                 }
             }
             ResolvedType::Reference(_) | 
@@ -234,14 +248,14 @@ impl<'a> Items<'a> {
         match resolved_type {
             ResolvedType::Primitive(prim_type) => {
                 match prim_type {
-                    PrimitiveType::Boolean => "Z".to_string(),
-                    PrimitiveType::Byte => "B".to_string(),
-                    PrimitiveType::Short => "S".to_string(),
-                    PrimitiveType::Int => "I".to_string(),
-                    PrimitiveType::Long => "J".to_string(),
-                    PrimitiveType::Float => "F".to_string(),
-                    PrimitiveType::Double => "D".to_string(),
-                    PrimitiveType::Char => "C".to_string(),
+                    WashPrimitiveType::Boolean => "Z".to_string(),
+                    WashPrimitiveType::Byte => "B".to_string(),
+                    WashPrimitiveType::Short => "S".to_string(),
+                    WashPrimitiveType::Int => "I".to_string(),
+                    WashPrimitiveType::Long => "J".to_string(),
+                    WashPrimitiveType::Float => "F".to_string(),
+                    WashPrimitiveType::Double => "D".to_string(),
+                    WashPrimitiveType::Char => "C".to_string(),
                 }
             }
             ResolvedType::Reference(class_name) => {
