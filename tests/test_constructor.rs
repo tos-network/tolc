@@ -64,8 +64,8 @@ public class ConstructorTest {
     assert!(javap_output.contains("public boolean flag;"), "Field 'flag' not found");
     
     // Check if constructors are generated
-    assert!(javap_output.contains("public ConstructorTest();"), "Default constructor not found");
-    assert!(javap_output.contains("public ConstructorTest(int);"), "Parameterized constructor not found");
+    assert!(javap_output.contains("public test.ConstructorTest();"), "Default constructor not found");
+    assert!(javap_output.contains("public test.ConstructorTest(int);"), "Parameterized constructor not found");
     
     // Check if constructor bodies contain field initialization bytecode
     assert!(javap_output.contains("bipush        42"), "Constructor should initialize value to 42");

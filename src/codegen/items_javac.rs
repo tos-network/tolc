@@ -175,6 +175,15 @@ impl<'a> Items<'a> {
         }
     }
     
+    /// Make assignment item (JavaC makeAssignItem equivalent)
+    pub fn make_assign_item(&self, lhs: Item) -> Item {
+        let typecode = lhs.typecode();
+        Item::Assign { 
+            lhs: Box::new(lhs),
+            typecode,
+        }
+    }
+    
     /// Convert TypeEnum to typecode
     fn type_to_typecode(&self, typ: &TypeEnum) -> u8 {
         match typ {
@@ -259,11 +268,41 @@ impl<'a> Items<'a> {
                 }
             }
             ResolvedType::Reference(class_name) => {
-                format!("L{};", class_name.replace('.', "/"))
+                // Handle common unqualified types like "String" -> "java.lang.String"
+                match class_name.as_str() {
+                    "String" => "Ljava/lang/String;".to_string(),
+                    "Object" => "Ljava/lang/Object;".to_string(),
+                    _ => {
+                        // Use classpath resolution to find the fully qualified name
+                        if let Some(internal_name) = crate::common::classpath::resolve_class_name(class_name) {
+                            format!("L{};", internal_name)
+                        } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
+                            format!("Ljava/lang/{};", class_name)
+                        } else {
+                            // Fallback: assume it's already qualified or use as-is
+                            format!("L{};", class_name.replace('.', "/"))
+                        }
+                    }
+                }
             }
             ResolvedType::Class(class_type) => {
                 // For generic classes, use erasure (raw type)
-                format!("L{};", class_type.name.replace('.', "/"))
+                // Handle common unqualified types like "String" -> "java.lang.String"
+                match class_type.name.as_str() {
+                    "String" => "Ljava/lang/String;".to_string(),
+                    "Object" => "Ljava/lang/Object;".to_string(),
+                    _ => {
+                        // Use classpath resolution to find the fully qualified name
+                        if let Some(internal_name) = crate::common::classpath::resolve_class_name(&class_type.name) {
+                            format!("L{};", internal_name)
+                        } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_type.name.as_str()) {
+                            format!("Ljava/lang/{};", class_type.name)
+                        } else {
+                            // Fallback: assume it's already qualified or use as-is
+                            format!("L{};", class_type.name.replace('.', "/"))
+                        }
+                    }
+                }
             }
             ResolvedType::TypeVariable(_) => {
                 // Type variables are erased to Object
@@ -316,6 +355,11 @@ impl<'a> Items<'a> {
             }
             
             Item::Void => Ok(Item::Void),
+            
+            Item::Assign { .. } => {
+                // Assignment items should be handled by their own load method
+                todo!("Assignment items should use item.load(items) instead of load_item")
+            },
         }
     }
     
@@ -763,6 +807,12 @@ pub enum Item {
     
     /// Void (no value)
     Void,
+    
+    /// Assignment item (JavaC AssignItem equivalent)
+    Assign { 
+        lhs: Box<Item>,  // Left-hand side item
+        typecode: u8,    // Result typecode
+    },
 }
 
 impl Item {
@@ -776,6 +826,7 @@ impl Item {
             Item::Indexed { typecode } => *typecode,
             Item::This | Item::Super => typecodes::OBJECT,
             Item::Void => typecodes::VOID,
+            Item::Assign { typecode, .. } => *typecode,
         }
     }
     
@@ -794,6 +845,236 @@ impl Item {
             opcode: opcodes::IFNE, // Default to ifne
             true_jumps: None,
             false_jumps: None,
+        }
+    }
+    
+    /// Load item value onto stack (JavaC load() equivalent)
+    /// This is the core method that all expression evaluation goes through
+    pub fn load(self, items: &mut Items) -> Result<Item> {
+        match self {
+            Item::Stack { typecode } => {
+                // Already on stack, return stack item
+                Ok(Item::Stack { typecode })
+            },
+            
+            Item::Local { typecode, reg } => {
+                // Load local variable
+                match typecode {
+                    typecodes::INT | typecodes::BYTE | typecodes::SHORT | typecodes::CHAR => {
+                        items.code.emitop1(opcodes::ILOAD, reg as u8);
+                    },
+                    typecodes::LONG => {
+                        items.code.emitop1(opcodes::LLOAD, reg as u8);
+                    },
+                    typecodes::FLOAT => {
+                        items.code.emitop1(opcodes::FLOAD, reg as u8);
+                    },
+                    typecodes::DOUBLE => {
+                        items.code.emitop1(opcodes::DLOAD, reg as u8);
+                    },
+                    typecodes::OBJECT | typecodes::ARRAY => {
+                        items.code.emitop1(opcodes::ALOAD, reg as u8);
+                    },
+                    _ => return Err(crate::common::error::Error::codegen_error(format!("Unsupported local variable typecode: {}", typecode))),
+                }
+                Ok(Item::Stack { typecode })
+            },
+            
+            Item::Immediate { typecode, value } => {
+                // Load immediate value
+                match value {
+                    Literal::Integer(i) => {
+                        if i >= -1 && i <= 5 {
+                            items.code.emitop(opcodes::ICONST_0 + (i + 1) as u8);
+                        } else if i >= -128 && i <= 127 {
+                            items.code.emitop1(opcodes::BIPUSH, i as u8);
+                        } else if i >= -32768 && i <= 32767 {
+                            items.code.emitop2(opcodes::SIPUSH, i as u16);
+                        } else {
+                            // Use LDC for large integers
+                            let const_idx = items.pool.add_integer(i as i32);
+                            items.code.emitop2(opcodes::LDC_W, const_idx);
+                        }
+                    },
+                    Literal::String(s) => {
+                        let const_idx = items.pool.add_string(&s);
+                        items.code.emitop2(opcodes::LDC_W, const_idx);
+                    },
+                    Literal::Null => {
+                        items.code.emitop(opcodes::ACONST_NULL);
+                    },
+                    // Add other literal types as needed
+                    _ => return Err(crate::common::error::Error::codegen_error(format!("Unsupported immediate value: {:?}", value))),
+                }
+                Ok(Item::Stack { typecode })
+            },
+            
+            Item::Member { typecode, member_name, class_name, descriptor, is_static, .. } => {
+                if is_static {
+                    // Static field access - getstatic
+                    let field_idx = items.pool.add_field_ref(&class_name, &member_name, &descriptor);
+                    items.code.emitop2(opcodes::GETSTATIC, field_idx);
+                } else {
+                    // Instance field access - getfield (assumes 'this' is already on stack)
+                    let field_idx = items.pool.add_field_ref(&class_name, &member_name, &descriptor);
+                    items.code.emitop2(opcodes::GETFIELD, field_idx);
+                }
+                Ok(Item::Stack { typecode })
+            },
+            
+            Item::Indexed { typecode } => {
+                // Array access - assumes array and index are on stack
+                match typecode {
+                    typecodes::INT => items.code.emitop(opcodes::IALOAD),
+                    typecodes::LONG => items.code.emitop(opcodes::LALOAD),
+                    typecodes::FLOAT => items.code.emitop(opcodes::FALOAD),
+                    typecodes::DOUBLE => items.code.emitop(opcodes::DALOAD),
+                    typecodes::OBJECT | typecodes::ARRAY => items.code.emitop(opcodes::AALOAD),
+                    typecodes::BYTE => items.code.emitop(opcodes::BALOAD),
+                    typecodes::CHAR => items.code.emitop(opcodes::CALOAD),
+                    typecodes::SHORT => items.code.emitop(opcodes::SALOAD),
+                    _ => return Err(crate::common::error::Error::codegen_error(format!("Unsupported array element typecode: {}", typecode))),
+                }
+                Ok(Item::Stack { typecode })
+            },
+            
+            Item::This => {
+                // Load 'this' reference
+                items.code.emitop(opcodes::ALOAD_0);
+                Ok(Item::Stack { typecode: typecodes::OBJECT })
+            },
+            
+            Item::Super => {
+                // Load 'this' reference for super access
+                items.code.emitop(opcodes::ALOAD_0);
+                Ok(Item::Stack { typecode: typecodes::OBJECT })
+            },
+            
+            Item::Assign { lhs, typecode } => {
+                // JavaC AssignItem.load() equivalent: stash + store + return stack item
+                let stashed_lhs = lhs.stash(typecode, items)?;
+                stashed_lhs.store(items)?;
+                Ok(Item::Stack { typecode })
+            },
+            
+            Item::Void => {
+                // Void items don't load anything
+                Ok(Item::Void)
+            },
+        }
+    }
+    
+    /// Store stack value into this item (JavaC store() equivalent)
+    pub fn store(self, items: &mut Items) -> Result<()> {
+        match self {
+            Item::Local { reg, typecode, .. } => {
+                // Store to local variable
+                match typecode {
+                    typecodes::INT | typecodes::BYTE | typecodes::SHORT | typecodes::CHAR => {
+                        items.code.emitop1(opcodes::ISTORE, reg as u8);
+                    },
+                    typecodes::LONG => {
+                        items.code.emitop1(opcodes::LSTORE, reg as u8);
+                    },
+                    typecodes::FLOAT => {
+                        items.code.emitop1(opcodes::FSTORE, reg as u8);
+                    },
+                    typecodes::DOUBLE => {
+                        items.code.emitop1(opcodes::DSTORE, reg as u8);
+                    },
+                    typecodes::OBJECT | typecodes::ARRAY => {
+                        items.code.emitop1(opcodes::ASTORE, reg as u8);
+                    },
+                    _ => return Err(crate::common::error::Error::codegen_error(format!("Unsupported local variable store typecode: {}", typecode))),
+                }
+                Ok(())
+            },
+            
+            Item::Member { member_name, class_name, descriptor, is_static, .. } => {
+                if is_static {
+                    // Static field store - putstatic
+                    let field_idx = items.pool.add_field_ref(&class_name, &member_name, &descriptor);
+                    items.code.emitop2(opcodes::PUTSTATIC, field_idx);
+                } else {
+                    // Instance field store - putfield
+                    let field_idx = items.pool.add_field_ref(&class_name, &member_name, &descriptor);
+                    items.code.emitop2(opcodes::PUTFIELD, field_idx);
+                }
+                Ok(())
+            },
+            
+            Item::Indexed { typecode, .. } => {
+                // Array store - assumes array, index, and value are on stack
+                match typecode {
+                    typecodes::INT => items.code.emitop(opcodes::IASTORE),
+                    typecodes::LONG => items.code.emitop(opcodes::LASTORE),
+                    typecodes::FLOAT => items.code.emitop(opcodes::FASTORE),
+                    typecodes::DOUBLE => items.code.emitop(opcodes::DASTORE),
+                    typecodes::OBJECT | typecodes::ARRAY => items.code.emitop(opcodes::AASTORE),
+                    typecodes::BYTE => items.code.emitop(opcodes::BASTORE),
+                    typecodes::CHAR => items.code.emitop(opcodes::CASTORE),
+                    typecodes::SHORT => items.code.emitop(opcodes::SASTORE),
+                    _ => return Err(crate::common::error::Error::codegen_error(format!("Unsupported array store typecode: {}", typecode))),
+                }
+                Ok(())
+            },
+            
+            _ => {
+                Err(crate::common::error::Error::codegen_error(format!("Cannot store to item type: {:?}", self)))
+            }
+        }
+    }
+    
+    /// Prepare for assignment by stashing value (JavaC stash() equivalent)
+    pub fn stash(self, value_typecode: u8, items: &mut Items) -> Result<Item> {
+        match self {
+            Item::Member { is_static, .. } => {
+                if !is_static {
+                    // For instance fields, we need to duplicate the value for putfield
+                    // Stack before: [this] [value] 
+                    // Stack after:  [this] [value] [value]
+                    match value_typecode {
+                        typecodes::LONG | typecodes::DOUBLE => {
+                            items.code.emitop(opcodes::DUP2_X1);  // Wide value
+                        },
+                        _ => {
+                            items.code.emitop(opcodes::DUP_X1);   // Normal value
+                        }
+                    }
+                }
+                Ok(self)
+            },
+            
+            Item::Local { .. } => {
+                // For local variables, just duplicate the value
+                match value_typecode {
+                    typecodes::LONG | typecodes::DOUBLE => {
+                        items.code.emitop(opcodes::DUP2);  // Wide value
+                    },
+                    _ => {
+                        items.code.emitop(opcodes::DUP);   // Normal value  
+                    }
+                }
+                Ok(self)
+            },
+            
+            Item::Indexed { .. } => {
+                // For array elements, duplicate the value
+                // Stack: [array] [index] [value] -> [array] [index] [value] [value]
+                match value_typecode {
+                    typecodes::LONG | typecodes::DOUBLE => {
+                        items.code.emitop(opcodes::DUP2_X2);  // Wide value
+                    },
+                    _ => {
+                        items.code.emitop(opcodes::DUP_X2);   // Normal value
+                    }
+                }
+                Ok(self)
+            },
+            
+            _ => {
+                Err(crate::common::error::Error::codegen_error(format!("Cannot stash for item type: {:?}", self)))
+            }
         }
     }
 }

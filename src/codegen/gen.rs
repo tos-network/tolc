@@ -90,6 +90,9 @@ pub struct Gen {
     
     /// Bootstrap methods for invokedynamic (simple u16 indices)
     pub bootstrap_methods: Vec<Vec<u16>>,
+    
+    /// Package context for current compilation unit
+    package_context: Option<String>,
 }
 
 
@@ -278,6 +281,7 @@ impl Gen {
             parent_class_name: None,                 // Parent class name for inner classes
             lambda_counter: 0,                       // Lambda method counter for unique names
             bootstrap_methods: Vec::new(),           // Bootstrap methods for invokedynamic
+            package_context: None,                   // Package context for current compilation unit
         }
     }
     
@@ -1286,8 +1290,8 @@ impl Gen {
     }
     
     /// Set package context for name resolution
-    pub fn set_package_context(&mut self, _package: String) {
-        // TODO: Store package context
+    pub fn set_package_context(&mut self, package: String) {
+        self.package_context = Some(package);
     }
     
     /// Set annotation retention mapping
@@ -1298,7 +1302,7 @@ impl Gen {
     /// Generate class declaration using JavaC patterns
     pub fn generate_class_decl(&mut self, class: &ClassDecl) -> Result<()> {
         // 1. Set class name in constant pool and get index
-        let class_name = if let Some(package) = &self.class_context.imports.get(0) {
+        let class_name = if let Some(ref package) = self.package_context {
             format!("{}/{}", package.replace(".", "/"), class.name)
         } else {
             class.name.clone()
@@ -1323,9 +1327,35 @@ impl Gen {
         self.class_file.access_flags = access_flags;
         
         // 4. Process interfaces
-        for _interface_ref in &class.implements {
-            // TODO: Convert TypeRef to string properly
-            let interface_name = "java/lang/Comparator"; // Placeholder
+        for interface_ref in &class.implements {
+            // Convert TypeRef to proper interface class name
+            let interface_name = match interface_ref.name.as_str() {
+                "Comparator" => {
+                    // Resolve Comparator based on package context
+                    if let Some(ref package) = self.package_context {
+                        if package == "java.util" {
+                            "java/util/Comparator"
+                        } else {
+                            "java/util/Comparator" // Default to java.util for Comparator
+                        }
+                    } else {
+                        "java/util/Comparator" // Default to java.util for Comparator
+                    }
+                },
+                "Comparable" => "java/lang/Comparable",
+                "List" => "java/util/List",
+                "Map" => "java/util/Map",
+                "Set" => "java/util/Set",
+                "Collection" => "java/util/Collection",
+                _ => {
+                    // For unknown interfaces, try to construct full path
+                    if let Some(ref package) = self.package_context {
+                        &format!("{}/{}", package.replace(".", "/"), interface_ref.name)
+                    } else {
+                        &format!("java/lang/{}", interface_ref.name) // Default to java.lang
+                    }
+                }
+            };
             let interface_idx = self.pool.add_class(interface_name);
             self.class_file.interfaces.push(interface_idx);
         }
@@ -1398,13 +1428,253 @@ impl Gen {
         // 8. Generate BootstrapMethods attribute if there are any bootstrap methods
         self.generate_bootstrap_methods_attribute()?;
         
+        // 9. Add SourceFile attribute - all javac-generated classes have this
+        self.add_source_file_attribute(class)?;
+        
         Ok(())
     }
     
     /// Generate interface declaration using JavaC patterns
-    pub fn generate_interface_decl(&mut self, _interface: &InterfaceDecl) -> Result<()> {
-        // TODO: Implement interface generation using JavaC Gen patterns
+    pub fn generate_interface_decl(&mut self, interface: &InterfaceDecl) -> Result<()> {
+        // 1. Set interface name in constant pool and get index
+        let interface_name = if let Some(ref package) = self.package_context {
+            format!("{}/{}", package.replace(".", "/"), interface.name)
+        } else {
+            interface.name.clone()
+        };
+        let this_class_idx = self.pool.add_class(&interface_name);
+        self.class_file.this_class = this_class_idx;
+        
+        // 2. Set super class to java/lang/Object for interfaces
+        let super_class_idx = self.pool.add_class("java/lang/Object");
+        self.class_file.super_class = super_class_idx;
+        
+        // 3. Set access flags for interface (ACC_PUBLIC + ACC_INTERFACE + ACC_ABSTRACT)
+        let mut access_flags = super::modifiers_to_flags(&interface.modifiers);
+        access_flags |= super::flag::access_flags::ACC_INTERFACE;
+        access_flags |= super::flag::access_flags::ACC_ABSTRACT;
+        self.class_file.access_flags = access_flags;
+        
+        // 4. Process extended interfaces (interfaces can extend multiple interfaces)
+        for extends_ref in &interface.extends {
+            // Convert TypeRef to proper interface class name
+            let extended_interface_name = match extends_ref.name.as_str() {
+                "Comparator" => "java/util/Comparator",
+                "Comparable" => "java/lang/Comparable",
+                "List" => "java/util/List",
+                "Map" => "java/util/Map",
+                "Set" => "java/util/Set",
+                "Collection" => "java/util/Collection",
+                _ => {
+                    // For unknown interfaces, try to construct full path
+                    if let Some(ref package) = self.package_context {
+                        &format!("{}/{}", package.replace(".", "/"), extends_ref.name)
+                    } else {
+                        &format!("java/util/{}", extends_ref.name) // Default to java.util for interfaces
+                    }
+                }
+            };
+            let interface_idx = self.pool.add_class(extended_interface_name);
+            self.class_file.interfaces.push(interface_idx);
+        }
+        
+        // 5. Generate abstract methods for interface
+        for member in &interface.body {
+            if let InterfaceMember::Method(method) = member {
+                self.generate_abstract_method(method)?;
+            }
+        }
+        
+        // 6. Add Signature attribute if interface has type parameters (generic interface)
+        if !interface.type_params.is_empty() {
+            self.add_signature_attribute_for_interface(interface)?;
+        }
+        
+        // 7. Add SourceFile attribute - all javac-generated interfaces have this
+        self.add_source_file_attribute_for_interface(interface)?;
+        
         Ok(())
+    }
+    
+    /// Add SourceFile attribute for class
+    fn add_source_file_attribute(&mut self, class: &ClassDecl) -> Result<()> {
+        let filename = format!("{}.java", class.name);
+        let source_file_attr = super::attribute::NamedAttribute::new_source_file_attribute(
+            &mut self.pool, 
+            filename
+        ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create SourceFile attribute: {}", e)))?;
+        
+        self.class_file.attributes.push(source_file_attr);
+        Ok(())
+    }
+    
+    /// Add SourceFile attribute for interface
+    fn add_source_file_attribute_for_interface(&mut self, interface: &InterfaceDecl) -> Result<()> {
+        let filename = format!("{}.java", interface.name);
+        let source_file_attr = super::attribute::NamedAttribute::new_source_file_attribute(
+            &mut self.pool, 
+            filename
+        ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create SourceFile attribute: {}", e)))?;
+        
+        self.class_file.attributes.push(source_file_attr);
+        Ok(())
+    }
+    
+    /// Add Signature attribute for interface with generic type parameters
+    fn add_signature_attribute_for_interface(&mut self, interface: &InterfaceDecl) -> Result<()> {
+        // Use the signature module to generate the interface signature
+        let type_resolver = super::signature::TypeNameResolver::with_default_mappings();
+        let signature = super::signature::interface_to_signature(
+            interface, 
+            self.package_context.as_deref(), 
+            Some(&format!("java/util/{}", interface.name)),
+            &type_resolver
+        );
+        
+        let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+            &mut self.pool, 
+            signature
+        ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create Signature attribute: {}", e)))?;
+        
+        self.class_file.attributes.push(signature_attr);
+        Ok(())
+    }
+    
+    /// Generate abstract method for interface
+    fn generate_abstract_method(&mut self, method: &MethodDecl) -> Result<()> {
+        // Generate method descriptor with simple type mapping
+        let param_types = method.parameters.iter()
+            .map(|p| self.simple_type_to_descriptor(&p.type_ref))
+            .collect::<String>();
+        
+        let return_type = match &method.return_type {
+            Some(ret_type) => self.simple_type_to_descriptor(ret_type),
+            None => "V".to_string(),
+        };
+        
+        let method_descriptor = format!("({}){}", param_types, return_type);
+        
+        // Add method to constant pool
+        let method_name_idx = self.pool.add_utf8(&method.name);
+        let method_desc_idx = self.pool.add_utf8(&method_descriptor);
+        
+        // Create method info for abstract method
+        let mut access_flags = super::modifiers_to_flags(&method.modifiers);
+        access_flags |= super::flag::access_flags::ACC_PUBLIC; // Interface methods are public by default
+        access_flags |= super::flag::access_flags::ACC_ABSTRACT; // Interface methods are abstract
+        
+        let mut method_info = super::method::MethodInfo {
+            access_flags,
+            name_index: method_name_idx,
+            descriptor_index: method_desc_idx,
+            attributes: Vec::new(), // Abstract methods have no Code attribute
+        };
+        
+        // Add Signature attribute if method has generic parameters or uses generic types
+        if self.method_needs_signature_attribute(method) {
+            let signature_attr = self.create_method_signature_attribute(method)?;
+            method_info.attributes.push(signature_attr);
+        }
+        
+        self.class_file.methods.push(method_info);
+        
+        Ok(())
+    }
+    
+    /// Check if a method needs a Signature attribute for generic information
+    fn method_needs_signature_attribute(&self, method: &MethodDecl) -> bool {
+        // Method has its own type parameters
+        if !method.type_params.is_empty() {
+            return true;
+        }
+        
+        // Method uses type variables in parameters or return type
+        for param in &method.parameters {
+            if self.type_ref_uses_generics(&param.type_ref) {
+                return true;
+            }
+        }
+        
+        if let Some(return_type) = &method.return_type {
+            if self.type_ref_uses_generics(return_type) {
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    /// Check if a TypeRef uses generic types (type variables or wildcards)
+    fn type_ref_uses_generics(&self, type_ref: &TypeRef) -> bool {
+        // Single uppercase letter indicates type variable (T, S, E, etc.)
+        if type_ref.name.len() == 1 && type_ref.name.chars().next().unwrap().is_uppercase() {
+            return true;
+        }
+        
+        // Has type arguments with wildcards or type variables
+        if !type_ref.type_args.is_empty() {
+            return true;
+        }
+        
+        false
+    }
+    
+    /// Create a Signature attribute for a method
+    fn create_method_signature_attribute(&mut self, method: &MethodDecl) -> Result<super::attribute::NamedAttribute> {
+        let type_resolver = super::signature::TypeNameResolver::with_default_mappings();
+        let signature = super::signature::method_to_signature(
+            method, 
+            self.package_context.as_deref(), 
+            None,
+            &type_resolver
+        );
+        
+        super::attribute::NamedAttribute::new_signature_attribute(
+            &mut self.pool, 
+            signature
+        ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create method Signature attribute: {}", e)))
+    }
+    
+    /// Simple type to descriptor conversion for interfaces
+    fn simple_type_to_descriptor(&self, type_ref: &TypeRef) -> String {
+        // Get base type descriptor
+        let base_descriptor = match type_ref.name.as_str() {
+            "boolean" => "Z".to_string(),
+            "byte" => "B".to_string(),  
+            "char" => "C".to_string(),
+            "short" => "S".to_string(),
+            "int" => "I".to_string(),
+            "long" => "J".to_string(),
+            "float" => "F".to_string(),
+            "double" => "D".to_string(),
+            "void" => "V".to_string(),
+            "Object" => "Ljava/lang/Object;".to_string(),
+            "String" => "Ljava/lang/String;".to_string(),
+            "Map" => "Ljava/util/Map;".to_string(),
+            "Set" => "Ljava/util/Set;".to_string(),
+            "Collection" => "Ljava/util/Collection;".to_string(),
+            "List" => "Ljava/util/List;".to_string(),
+            "Iterator" => "Ljava/util/Iterator;".to_string(),
+            "ListIterator" => "Ljava/util/ListIterator;".to_string(),
+            "Entry" => "Ljava/util/Map$Entry;".to_string(),
+            _ => {
+                // For generic types like K, V, or unknown types, use Object
+                if type_ref.name.len() == 1 && type_ref.name.chars().all(|c| c.is_uppercase()) {
+                    "Ljava/lang/Object;".to_string() // Generic type parameter
+                } else {
+                    format!("Ljava/lang/{};", type_ref.name)
+                }
+            }
+        };
+        
+        // Add array dimensions prefix if needed
+        if type_ref.array_dims > 0 {
+            let mut array_prefix = "[".repeat(type_ref.array_dims);
+            array_prefix.push_str(&base_descriptor);
+            array_prefix
+        } else {
+            base_descriptor
+        }
     }
     
     /// Generate enum declaration using JavaC patterns
@@ -1951,16 +2221,75 @@ impl Gen {
     
     /// Generate annotation declaration using JavaC patterns
     pub fn generate_annotation_decl(&mut self, annotation: &AnnotationDecl) -> Result<()> {
-        eprintln!("📋 CODEGEN: Basic annotation bytecode generation for: {}", annotation.name);
-        eprintln!("📝 CODEGEN: Annotation members: {:?}", annotation.body.iter().map(|m| &m.name).collect::<Vec<_>>());
+        // 1. Set annotation name in constant pool and get index
+        let annotation_name = if let Some(ref package) = self.package_context {
+            format!("{}/{}", package.replace(".", "/"), annotation.name)
+        } else {
+            annotation.name.clone()
+        };
+        let this_class_idx = self.pool.add_class(&annotation_name);
+        self.class_file.this_class = this_class_idx;
         
-        // For now, provide basic annotation generation
-        eprintln!("⚠️  CODEGEN: Using simplified annotation generation - full implementation pending");
+        // 2. Set super class to java/lang/Object for annotations
+        let super_class_idx = self.pool.add_class("java/lang/Object");
+        self.class_file.super_class = super_class_idx;
         
-        // Set basic annotation information
-        // The class file structure should already be initialized by ClassWriter
+        // 3. Annotations implement java.lang.annotation.Annotation interface
+        let annotation_interface_idx = self.pool.add_class("java/lang/annotation/Annotation");
+        self.class_file.interfaces.push(annotation_interface_idx);
         
-        eprintln!("✅ CODEGEN: Basic annotation setup complete for: {}", annotation.name);
+        // 4. Set access flags for annotation (ACC_PUBLIC + ACC_INTERFACE + ACC_ABSTRACT + ACC_ANNOTATION)
+        let mut access_flags = super::modifiers_to_flags(&annotation.modifiers);
+        access_flags |= super::flag::access_flags::ACC_PUBLIC;      // Annotations are public
+        access_flags |= super::flag::access_flags::ACC_INTERFACE;   // Annotations are interfaces
+        access_flags |= super::flag::access_flags::ACC_ABSTRACT;    // Annotations are abstract
+        access_flags |= super::flag::access_flags::ACC_ANNOTATION;  // ACC_ANNOTATION flag
+        self.class_file.access_flags = access_flags;
+        
+        // 5. Generate abstract methods for annotation members
+        for member in &annotation.body {
+            self.generate_annotation_member(member)?;
+        }
+        
+        // 6. Add SourceFile attribute - all javac-generated annotations have this
+        self.add_source_file_attribute_for_annotation(annotation)?;
+        
+        Ok(())
+    }
+    
+    /// Generate abstract method for annotation member
+    fn generate_annotation_member(&mut self, member: &AnnotationMember) -> Result<()> {
+        // Annotation members are abstract methods with no parameters and a return type
+        let return_type = self.simple_type_to_descriptor(&member.type_ref);
+        let method_descriptor = format!("(){}", return_type);
+        
+        // Add method to constant pool
+        let method_name_idx = self.pool.add_utf8(&member.name);
+        let method_desc_idx = self.pool.add_utf8(&method_descriptor);
+        
+        // Create method info for abstract annotation member
+        let access_flags = super::flag::access_flags::ACC_PUBLIC | super::flag::access_flags::ACC_ABSTRACT;
+        
+        let method_info = super::method::MethodInfo {
+            access_flags,
+            name_index: method_name_idx,
+            descriptor_index: method_desc_idx,
+            attributes: Vec::new(), // Abstract methods have no Code attribute
+        };
+        
+        self.class_file.methods.push(method_info);
+        Ok(())
+    }
+    
+    /// Add SourceFile attribute for annotation
+    fn add_source_file_attribute_for_annotation(&mut self, annotation: &AnnotationDecl) -> Result<()> {
+        let filename = format!("{}.java", annotation.name);
+        let source_file_attr = super::attribute::NamedAttribute::new_source_file_attribute(
+            &mut self.pool, 
+            filename
+        ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create SourceFile attribute: {}", e)))?;
+        
+        self.class_file.attributes.push(source_file_attr);
         Ok(())
     }
     
@@ -2281,7 +2610,7 @@ impl Gen {
     }
     
     /// Convert base type name to JVM descriptor string  
-    fn type_ref_to_base_descriptor(&self, name: &str) -> Result<String> {
+    pub fn type_ref_to_base_descriptor(&self, name: &str) -> Result<String> {
         match name {
             // Primitive types
             "boolean" => Ok("Z".to_string()),
@@ -2298,8 +2627,15 @@ impl Gen {
             "Object" => Ok("Ljava/lang/Object;".to_string()),
             // Other class types
             _ => {
-                // TODO: Proper class name resolution with package info
-                Ok(format!("L{};", name.replace(".", "/")))
+                // Use classpath resolution to find the fully qualified name
+                if let Some(internal_name) = crate::common::classpath::resolve_class_name(name) {
+                    Ok(format!("L{};", internal_name))
+                } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&name) {
+                    Ok(format!("Ljava/lang/{};", name))
+                } else {
+                    // Fallback: assume it's already fully qualified or in the default package
+                    Ok(format!("L{};", name.replace(".", "/")))
+                }
             }
         }
     }
@@ -2357,15 +2693,21 @@ impl Gen {
     }
     
     /// Generate default constructor: public ClassName() { super(); }
-    fn generate_default_constructor(&mut self, _class: &ClassDecl) -> Result<()> {
+    fn generate_default_constructor(&mut self, class: &ClassDecl) -> Result<()> {
         use super::attribute::CodeAttribute;
         
         // Create method info for default constructor
         let constructor_name_idx = self.pool.add_utf8("<init>");
         let constructor_descriptor_idx = self.pool.add_utf8("()V");
         
-        // Constructor access flags (public)
-        let access_flags = access_flags::ACC_PUBLIC;
+        // Constructor access flags - depends on class visibility and whether it's abstract
+        let access_flags = if class.modifiers.iter().any(|m| matches!(m, Modifier::Public)) {
+            // If class is public, constructor should be public
+            access_flags::ACC_PUBLIC
+        } else {
+            // Package-private constructor (no access flags)
+            0
+        };
         
         // Generate constructor bytecode: aload_0, invokespecial Object.<init>, return
         let mut code_bytes = Vec::new();
@@ -2426,11 +2768,18 @@ impl Gen {
             Expr::Unary(unary) => self.visit_unary(unary, env),
             Expr::Assignment(assign) => self.visit_assign(assign, env),
             Expr::Cast(cast) => self.visit_type_cast(cast, env),
+            Expr::Parenthesized(inner) => {
+                // JavaC alignment: Parenthesized expressions delegate to inner expression
+                // This is critical for ((Comparable) a).compareTo(b) pattern
+                eprintln!("🔧 DEBUG: Processing parenthesized expression - delegating to inner");
+                self.visit_expr(inner.as_ref(), env)
+            },
             Expr::ArrayAccess(access) => self.visit_indexed(access, env),
             Expr::New(new_expr) => self.visit_new(new_expr, env),
             Expr::ArrayInitializer(values) => self.visit_array_initializer(values, env),
             _ => {
                 // For expressions not yet implemented, return a placeholder
+                eprintln!("⚠️  WARNING: Unhandled expression type in visit_expr: {:?}", expr);
                 self.with_items(|items| {
                     Ok(items.make_stack_item_for_type(&TypeEnum::Primitive(PrimitiveType::Int)))
                 })

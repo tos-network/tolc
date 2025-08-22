@@ -63,7 +63,7 @@ public class SimpleStackMapTest {
     println!("{}", javap_output);
     
     // Check for basic class structure
-    assert!(javap_output.contains("public class SimpleStackMapTest"), "SimpleStackMapTest class not found");
+    assert!(javap_output.contains("public class test.SimpleStackMapTest"), "SimpleStackMapTest class not found");
     assert!(javap_output.contains("public int simpleMethod();"), "Method simpleMethod not found");
     assert!(javap_output.contains("public int conditionalMethod(boolean);"), "Method conditionalMethod not found");
     
