@@ -2400,6 +2400,7 @@ impl Gen {
             Expr::Cast(cast) => self.visit_type_cast(cast, env),
             Expr::ArrayAccess(access) => self.visit_indexed(access, env),
             Expr::New(new_expr) => self.visit_new(new_expr, env),
+            Expr::ArrayInitializer(values) => self.visit_array_initializer(values, env),
             _ => {
                 // For expressions not yet implemented, return a placeholder
                 self.with_items(|items| {

@@ -91,8 +91,9 @@ impl LowerOptimizer {
         self.collect_string_operands(&Expr::Binary(bin.clone()), &mut operands)?;
         
         // JavaC: Optimize based on operand count and types
-        if operands.len() <= 2 {
-            // Simple case - keep as binary operation
+        // Always use StringBuilder for string concatenation to avoid Object.append issues
+        if operands.len() < 2 {
+            // Not actually concatenation, fallback to binary
             return self.lower_binary(bin);
         }
         
@@ -141,10 +142,17 @@ impl LowerOptimizer {
         // Estimate initial capacity (JavaC optimization)
         let estimated_capacity = self.estimate_string_capacity(&operands);
         
-        // Create new StringBuilder(capacity)
-        let mut result = Expr::MethodCall(MethodCallExpr {
-            target: None,
-            name: "new StringBuilder".to_string(),
+        // Create new StringBuilder(capacity) using proper object construction
+        let stringbuilder_type = TypeRef {
+            name: "StringBuilder".to_string(),
+            type_args: vec![],
+            annotations: vec![],
+            array_dims: 0,
+            span: span.clone(),
+        };
+        
+        let mut result = Expr::New(NewExpr {
+            target_type: stringbuilder_type,
             arguments: if estimated_capacity > 16 {
                 vec![Expr::Literal(LiteralExpr {
                     value: Literal::Integer(estimated_capacity as i64),
@@ -153,6 +161,7 @@ impl LowerOptimizer {
             } else {
                 vec![] // Use default capacity
             },
+            anonymous_body: None,
             span: span.clone(),
         });
         

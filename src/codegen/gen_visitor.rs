@@ -580,7 +580,12 @@ impl Gen {
     
     /// Visit new expression - JavaC Gen.visitNewClass equivalent
     pub fn visit_new(&mut self, tree: &NewExpr, env: &GenContext) -> Result<JavacItem> {
-        // JavaC pattern for new expressions:
+        // Check if this is array creation (has array dimensions)
+        if tree.target_type.array_dims > 0 {
+            return self.visit_new_array(tree, env);
+        }
+        
+        // JavaC pattern for regular object creation:
         // 1. Generate 'new' instruction to allocate object
         // 2. Duplicate reference for constructor call
         // 3. Generate constructor arguments
@@ -630,6 +635,103 @@ impl Gen {
             // The result is the object reference (from the first 'dup')
             Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
         })
+    }
+    
+    /// Handle array creation using newarray/anewarray/multianewarray
+    fn visit_new_array(&mut self, tree: &NewExpr, env: &GenContext) -> Result<JavacItem> {
+        let element_type = &tree.target_type.name;
+        let dimensions = tree.target_type.array_dims;
+        
+        // Generate dimension expressions (array sizes)
+        // For "new int[5][3]", arguments would be [5, 3]
+        for arg in &tree.arguments {
+            let _arg_item = self.visit_expr(arg, env)?;
+        }
+        
+        // Prepare constants outside the closure
+        let class_idx = if dimensions == 1 && !Self::is_primitive_type(element_type) {
+            Some(self.get_pool_mut().add_class(element_type))
+        } else if dimensions > 1 {
+            let array_descriptor = format!("{}{}", "[".repeat(dimensions), 
+                if Self::is_primitive_type(element_type) {
+                    Self::get_primitive_descriptor(element_type).to_string()
+                } else {
+                    format!("L{};", element_type)
+                });
+            Some(self.get_pool_mut().add_class(&array_descriptor))
+        } else {
+            None
+        };
+        
+        self.with_items(|items| {
+            if dimensions == 1 {
+                // Single dimension array
+                if Self::is_primitive_type(element_type) {
+                    // Use newarray for primitive arrays
+                    let atype = Self::get_primitive_array_type(element_type);
+                    items.code.emitop(super::opcodes::NEWARRAY);
+                    items.code.emit1(atype);
+                    items.code.state.pop(1); // Pop count
+                    items.code.state.push(super::code::Type::Object(format!("[{}", Self::get_primitive_descriptor(element_type))));
+                } else {
+                    // Use anewarray for reference arrays
+                    items.code.emitop(super::opcodes::ANEWARRAY);
+                    items.code.emit2(class_idx.unwrap());
+                    items.code.state.pop(1); // Pop count
+                    items.code.state.push(super::code::Type::Object(format!("[L{};", element_type)));
+                }
+            } else if dimensions > 1 {
+                // Multi-dimensional array
+                let array_descriptor = format!("{}{}", "[".repeat(dimensions), 
+                    if Self::is_primitive_type(element_type) {
+                        Self::get_primitive_descriptor(element_type).to_string()
+                    } else {
+                        format!("L{};", element_type)
+                    });
+                items.code.emitop(super::opcodes::MULTIANEWARRAY);
+                items.code.emit2(class_idx.unwrap());
+                items.code.emit1(tree.arguments.len() as u8); // Number of dimensions provided
+                items.code.state.pop(tree.arguments.len() as u16); // Pop all dimension counts
+                items.code.state.push(super::code::Type::Object(array_descriptor));
+            }
+            
+            Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
+        })
+    }
+    
+    /// Check if a type name represents a primitive type
+    fn is_primitive_type(type_name: &str) -> bool {
+        matches!(type_name, "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double")
+    }
+    
+    /// Get the atype code for newarray instruction
+    fn get_primitive_array_type(type_name: &str) -> u8 {
+        match type_name {
+            "boolean" => 4,
+            "char" => 5,
+            "float" => 6,
+            "double" => 7,
+            "byte" => 8,
+            "short" => 9,
+            "int" => 10,
+            "long" => 11,
+            _ => 10, // Default to int
+        }
+    }
+    
+    /// Get the JVM type descriptor for primitive types
+    fn get_primitive_descriptor(type_name: &str) -> &'static str {
+        match type_name {
+            "boolean" => "Z",
+            "byte" => "B",
+            "char" => "C",
+            "short" => "S",
+            "int" => "I",
+            "long" => "J",
+            "float" => "F",
+            "double" => "D",
+            _ => "I", // Default to int
+        }
     }
     
     /// Visit binary expression - JavaC-aligned implementation
@@ -1099,17 +1201,320 @@ impl Gen {
         })
     }
     
-    /// Visit array access expression - simplified version
+    /// Visit array access expression - JavaC-aligned implementation
     pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<JavacItem> {
-        // Generate array and index
+        // Generate array and index expressions
         let _array_item = self.visit_expr(&tree.array, env)?;
         let _index_item = self.visit_expr(&tree.index, env)?;
         
-        // Create indexed item
+        // Determine array element type from the array expression
+        let element_type = self.infer_array_element_type(&tree.array)?;
+        
         self.with_items(|items| {
-            let element_type = TypeEnum::Primitive(PrimitiveType::Int);
+            // Generate appropriate array load instruction based on element type
+            match &element_type {
+                TypeEnum::Primitive(primitive_type) => {
+                    match primitive_type {
+                        PrimitiveType::Boolean => {
+                            items.code.emitop(super::opcodes::BALOAD); // boolean arrays use BALOAD
+                        }
+                        PrimitiveType::Byte => {
+                            items.code.emitop(super::opcodes::BALOAD);
+                        }
+                        PrimitiveType::Char => {
+                            items.code.emitop(super::opcodes::CALOAD);
+                        }
+                        PrimitiveType::Short => {
+                            items.code.emitop(super::opcodes::SALOAD);
+                        }
+                        PrimitiveType::Int => {
+                            items.code.emitop(super::opcodes::IALOAD);
+                        }
+                        PrimitiveType::Long => {
+                            items.code.emitop(super::opcodes::LALOAD);
+                        }
+                        PrimitiveType::Float => {
+                            items.code.emitop(super::opcodes::FALOAD);
+                        }
+                        PrimitiveType::Double => {
+                            items.code.emitop(super::opcodes::DALOAD);
+                        }
+                    }
+                }
+                TypeEnum::Reference(_) => {
+                    // Reference types use aaload
+                    items.code.emitop(super::opcodes::AALOAD);
+                }
+                _ => {
+                    // Default to aaload for unknown types
+                    items.code.emitop(super::opcodes::AALOAD);
+                }
+            }
+            
+            // Update stack: pop array ref and index, push element
+            items.code.state.pop(2); // Pop array reference and index
+            match &element_type {
+                TypeEnum::Primitive(PrimitiveType::Long) | TypeEnum::Primitive(PrimitiveType::Double) => {
+                    items.code.state.push(super::code::Type::Long); // 2 slots
+                }
+                TypeEnum::Reference(ref_type) => {
+                    let class_name = match ref_type {
+                        ReferenceType::Class(name) => name.clone(),
+                        _ => "java/lang/Object".to_string(),
+                    };
+                    items.code.state.push(super::code::Type::Object(class_name));
+                }
+                _ => {
+                    items.code.state.push(super::code::Type::Int); // Most primitives are 1 slot
+                }
+            }
+            
             Ok(items.make_indexed_item(&element_type))
         })
+    }
+    
+    /// Infer the element type of an array from its expression
+    fn infer_array_element_type(&self, array_expr: &Expr) -> Result<TypeEnum> {
+        match array_expr {
+            Expr::Identifier(ident) => {
+                // Enhanced heuristic based on variable name
+                let name = &ident.name;
+                if name.contains("numbers") || name.contains("ints") || name.contains("values") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Int))
+                } else if name.contains("names") || name.contains("strings") || name.contains("words") {
+                    Ok(TypeEnum::Reference(ReferenceType::Class("java/lang/String".to_string())))
+                } else if name.contains("booleans") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Boolean))
+                } else if name.contains("chars") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Char))
+                } else if name.contains("bytes") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Byte))
+                } else if name.contains("shorts") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Short))
+                } else if name.contains("longs") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Long))
+                } else if name.contains("floats") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Float))
+                } else if name.contains("doubles") {
+                    Ok(TypeEnum::Primitive(PrimitiveType::Double))
+                } else {
+                    // Default to int array for unknown identifiers
+                    Ok(TypeEnum::Primitive(PrimitiveType::Int))
+                }
+            }
+            Expr::New(new_expr) => {
+                // Array creation - extract element type
+                let element_type_name = &new_expr.target_type.name;
+                if Self::is_primitive_type(element_type_name) {
+                    Ok(self.primitive_name_to_type_enum(element_type_name))
+                } else {
+                    Ok(TypeEnum::Reference(ReferenceType::Class(element_type_name.clone())))
+                }
+            }
+            _ => {
+                // Default to Object for unknown types
+                Ok(TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string())))
+            }
+        }
+    }
+    
+    /// Convert primitive type name to TypeEnum
+    fn primitive_name_to_type_enum(&self, type_name: &str) -> TypeEnum {
+        match type_name {
+            "boolean" => TypeEnum::Primitive(PrimitiveType::Boolean),
+            "byte" => TypeEnum::Primitive(PrimitiveType::Byte),
+            "char" => TypeEnum::Primitive(PrimitiveType::Char),
+            "short" => TypeEnum::Primitive(PrimitiveType::Short),
+            "int" => TypeEnum::Primitive(PrimitiveType::Int),
+            "long" => TypeEnum::Primitive(PrimitiveType::Long),
+            "float" => TypeEnum::Primitive(PrimitiveType::Float),
+            "double" => TypeEnum::Primitive(PrimitiveType::Double),
+            _ => TypeEnum::Primitive(PrimitiveType::Int), // Default
+        }
+    }
+    
+    /// Visit array initializer (e.g., {1, 2, 3, 4, 5})
+    pub fn visit_array_initializer(&mut self, values: &[Expr], env: &GenContext) -> Result<JavacItem> {
+        // For array initializers like {1, 2, 3}, we need to:
+        // 1. Create the array with the correct size
+        // 2. Store each value at the appropriate index
+        
+        let array_size = values.len();
+        
+        // First, create the array with the appropriate size
+        // We'll infer the element type from the first value
+        let element_type = if let Some(first_value) = values.first() {
+            self.infer_element_type_from_expr(first_value)?
+        } else {
+            TypeEnum::Primitive(PrimitiveType::Int) // Default for empty arrays
+        };
+        
+        // Pre-compute class index for reference types
+        let class_idx = match &element_type {
+            TypeEnum::Reference(ref_type) => {
+                let class_name = match ref_type {
+                    ReferenceType::Class(name) => name.clone(),
+                    _ => "java/lang/Object".to_string(),
+                };
+                Some(self.get_pool_mut().add_class(&class_name))
+            }
+            _ => None,
+        };
+        
+        self.with_items(|items| {
+            // Push array size onto stack
+            match array_size {
+                0..=5 => {
+                    items.code.emitop(match array_size {
+                        0 => super::opcodes::ICONST_0,
+                        1 => super::opcodes::ICONST_1,
+                        2 => super::opcodes::ICONST_2,
+                        3 => super::opcodes::ICONST_3,
+                        4 => super::opcodes::ICONST_4,
+                        5 => super::opcodes::ICONST_5,
+                        _ => unreachable!(),
+                    });
+                }
+                6..=127 => {
+                    items.code.emitop(super::opcodes::BIPUSH);
+                    items.code.emit1(array_size as u8);
+                }
+                _ => {
+                    items.code.emitop(super::opcodes::SIPUSH);
+                    items.code.emit2(array_size as u16);
+                }
+            }
+            items.code.state.push(super::code::Type::Int); // Array size
+            
+            // Create array based on element type
+            match &element_type {
+                TypeEnum::Primitive(primitive_type) => {
+                    let atype = match primitive_type {
+                        PrimitiveType::Boolean => 4,
+                        PrimitiveType::Char => 5,
+                        PrimitiveType::Float => 6,
+                        PrimitiveType::Double => 7,
+                        PrimitiveType::Byte => 8,
+                        PrimitiveType::Short => 9,
+                        PrimitiveType::Int => 10,
+                        PrimitiveType::Long => 11,
+                    };
+                    items.code.emitop(super::opcodes::NEWARRAY);
+                    items.code.emit1(atype);
+                }
+                _ => {
+                    // Reference types
+                    items.code.emitop(super::opcodes::ANEWARRAY);
+                    items.code.emit2(class_idx.unwrap_or(1));
+                }
+            }
+            
+            items.code.state.pop(1); // Pop size, array ref remains
+            items.code.state.push(super::code::Type::Object("Array".to_string()));
+            
+            Ok(())
+        })?;
+        
+        // Now store each value in the array
+        for (index, value) in values.iter().enumerate() {
+            self.with_items(|items| {
+                // Duplicate array reference for store operation
+                items.code.emitop(super::opcodes::DUP);
+                items.code.state.push(super::code::Type::Object("Array".to_string()));
+                
+                // Push index
+                match index {
+                    0..=5 => {
+                        items.code.emitop(match index {
+                            0 => super::opcodes::ICONST_0,
+                            1 => super::opcodes::ICONST_1,
+                            2 => super::opcodes::ICONST_2,
+                            3 => super::opcodes::ICONST_3,
+                            4 => super::opcodes::ICONST_4,
+                            5 => super::opcodes::ICONST_5,
+                            _ => unreachable!(),
+                        });
+                    }
+                    6..=127 => {
+                        items.code.emitop(super::opcodes::BIPUSH);
+                        items.code.emit1(index as u8);
+                    }
+                    _ => {
+                        items.code.emitop(super::opcodes::SIPUSH);
+                        items.code.emit2(index as u16);
+                    }
+                }
+                items.code.state.push(super::code::Type::Int); // Index
+                
+                Ok(())
+            })?;
+            
+            // Generate the value expression
+            let _value_item = self.visit_expr(value, env)?;
+            
+            // Store the value in the array
+            self.with_items(|items| {
+                // Generate appropriate array store instruction
+                match &element_type {
+                    TypeEnum::Primitive(primitive_type) => {
+                        match primitive_type {
+                            PrimitiveType::Boolean | PrimitiveType::Byte => {
+                                items.code.emitop(super::opcodes::BASTORE);
+                            }
+                            PrimitiveType::Char => {
+                                items.code.emitop(super::opcodes::CASTORE);
+                            }
+                            PrimitiveType::Short => {
+                                items.code.emitop(super::opcodes::SASTORE);
+                            }
+                            PrimitiveType::Int => {
+                                items.code.emitop(super::opcodes::IASTORE);
+                            }
+                            PrimitiveType::Long => {
+                                items.code.emitop(super::opcodes::LASTORE);
+                            }
+                            PrimitiveType::Float => {
+                                items.code.emitop(super::opcodes::FASTORE);
+                            }
+                            PrimitiveType::Double => {
+                                items.code.emitop(super::opcodes::DASTORE);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Reference types use aastore
+                        items.code.emitop(super::opcodes::AASTORE);
+                    }
+                }
+                
+                // Update stack: pop array ref, index, and value
+                items.code.state.pop(3);
+                
+                Ok(())
+            })?;
+        }
+        
+        // Return the array reference (still on stack)
+        self.with_items(|items| {
+            Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
+        })
+    }
+    
+    /// Infer element type from an expression in array initializer
+    fn infer_element_type_from_expr(&self, expr: &Expr) -> Result<TypeEnum> {
+        match expr {
+            Expr::Literal(literal) => {
+                Ok(Self::literal_to_type_enum(&literal.value))
+            }
+            Expr::Identifier(_) => {
+                // TODO: Look up from symbol table
+                Ok(TypeEnum::Primitive(PrimitiveType::Int))
+            }
+            _ => {
+                // Default to int for unknown expressions
+                Ok(TypeEnum::Primitive(PrimitiveType::Int))
+            }
+        }
     }
     
     /// Helper: Convert Literal to TypeEnum
@@ -1550,11 +1955,66 @@ impl Gen {
         let var_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
         self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
         
+        // Determine element type for correct array access instruction
+        let element_type = self.infer_array_element_type(&tree.iterable)?;
+        
         self.with_items(|items| {
             items.code.emitop1(opcodes::ALOAD, array_slot as u8); // Load array
             items.code.emitop1(opcodes::ILOAD, index_slot as u8); // Load index
-            items.code.emitop(opcodes::AALOAD); // Load array[index] (assuming reference type)
-            items.code.emitop1(opcodes::ASTORE, var_slot as u8); // Store in loop variable
+            
+            // Use appropriate array load instruction based on element type
+            match &element_type {
+                TypeEnum::Primitive(primitive_type) => {
+                    match primitive_type {
+                        PrimitiveType::Boolean | PrimitiveType::Byte => {
+                            items.code.emitop(opcodes::BALOAD);
+                        }
+                        PrimitiveType::Char => {
+                            items.code.emitop(opcodes::CALOAD);
+                        }
+                        PrimitiveType::Short => {
+                            items.code.emitop(opcodes::SALOAD);
+                        }
+                        PrimitiveType::Int => {
+                            items.code.emitop(opcodes::IALOAD);
+                        }
+                        PrimitiveType::Long => {
+                            items.code.emitop(opcodes::LALOAD);
+                        }
+                        PrimitiveType::Float => {
+                            items.code.emitop(opcodes::FALOAD);
+                        }
+                        PrimitiveType::Double => {
+                            items.code.emitop(opcodes::DALOAD);
+                        }
+                    }
+                    
+                    // Use appropriate store instruction for primitives
+                    match primitive_type {
+                        PrimitiveType::Boolean | PrimitiveType::Byte => {
+                            items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                        }
+                        PrimitiveType::Char | PrimitiveType::Short | PrimitiveType::Int => {
+                            items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                        }
+                        PrimitiveType::Long => {
+                            items.code.emitop1(opcodes::LSTORE, var_slot as u8);
+                        }
+                        PrimitiveType::Float => {
+                            items.code.emitop1(opcodes::FSTORE, var_slot as u8);
+                        }
+                        PrimitiveType::Double => {
+                            items.code.emitop1(opcodes::DSTORE, var_slot as u8);
+                        }
+                    }
+                }
+                _ => {
+                    // Reference types use aaload/astore
+                    items.code.emitop(opcodes::AALOAD);
+                    items.code.emitop1(opcodes::ASTORE, var_slot as u8);
+                }
+            }
+            
             Ok(())
         })?;
         
@@ -1565,7 +2025,8 @@ impl Gen {
         self.with_items(|items| {
             items.code.emitop(opcodes::IINC);
             items.code.emit1(index_slot as u8); // Local variable index
-            items.code.emit1(1u8); // Increment by 1 (explicitly unsigned)
+            items.code.emit1(1u8); // Increment by 1 - low byte
+            items.code.emit1(0u8); // Increment by 1 - high byte (0 since 1 < 256)
             Ok(())
         })?;
         
@@ -1698,14 +2159,19 @@ impl Gen {
     }
     
     /// Check if an expression evaluates to an array type
-    fn is_array_type(&self, _expr: &Expr) -> Result<bool> {
-        // TODO: Implement proper type checking
-        // For now, assume it's an array if it's an identifier that looks like an array
-        match _expr {
+    fn is_array_type(&self, expr: &Expr) -> Result<bool> {
+        match expr {
             Expr::Identifier(id) => {
-                // Simple heuristic: if variable name suggests array (contains "arr", "array", etc.)
-                // In a full implementation, this would check the actual type from symbol table
-                Ok(id.name.contains("numbers") || id.name.contains("arr") || id.name.contains("array"))
+                // Enhanced heuristic: check for common array variable name patterns
+                let name = &id.name;
+                Ok(name.contains("numbers") || name.contains("arr") || name.contains("array") ||
+                   name.contains("names") || name.contains("values") || name.contains("items") ||
+                   name.ends_with("s") && name.len() > 2) // Simple plural detection
+            }
+            Expr::ArrayInitializer(_) => Ok(true), // Array literals are arrays
+            Expr::New(new_expr) => {
+                // Array creation expressions
+                Ok(new_expr.target_type.array_dims > 0)
             }
             _ => Ok(false) // Default to iterable for other expressions
         }

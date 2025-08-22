@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::codegen::bytecode::BytecodeBuilder;
+use crate::codegen::constpool::ConstantPool;
 use std::collections::HashMap;
 
 /// Method invocation optimization patterns from javac's Gen.java
@@ -184,10 +185,11 @@ impl MethodInvocationOptimizer {
         &self,
         pattern: &InvocationPattern,
         bytecode_builder: &mut BytecodeBuilder,
+        constant_pool: &mut ConstantPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match &pattern.optimization_type {
             InvocationOptimizationType::StringConcatenation { expressions } => {
-                self.generate_string_concatenation(expressions, bytecode_builder)?;
+                self.generate_string_concatenation(expressions, bytecode_builder, constant_pool)?;
             }
             InvocationOptimizationType::ArrayLength { array_expr: _ } => {
                 // Array expression should already be on stack
@@ -234,23 +236,28 @@ impl MethodInvocationOptimizer {
         &self,
         expressions: &[Expr],
         bytecode_builder: &mut BytecodeBuilder,
+        constant_pool: &mut ConstantPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // new StringBuilder
-        bytecode_builder.new_object(1)?; // Placeholder for StringBuilder class ref
+        let stringbuilder_class = constant_pool.add_class("java/lang/StringBuilder");
+        bytecode_builder.new_object(stringbuilder_class)?;
         bytecode_builder.dup()?;
         
         // StringBuilder.<init>()
-        bytecode_builder.invokespecial(1)?; // Placeholder for StringBuilder constructor
+        let constructor_ref = constant_pool.add_method_ref("java/lang/StringBuilder", "<init>", "()V");
+        bytecode_builder.invokespecial(constructor_ref)?;
 
         // Append each expression
-        for expr in expressions {
+        for _expr in expressions {
             // Expression value should be on stack
-            // StringBuilder.append(type)
-            bytecode_builder.invokevirtual(1)?; // Placeholder for appropriate append method
+            // StringBuilder.append(String) - use generic Object append for now
+            let append_ref = constant_pool.add_method_ref("java/lang/StringBuilder", "append", "(Ljava/lang/Object;)Ljava/lang/StringBuilder;");
+            bytecode_builder.invokevirtual(append_ref)?;
         }
 
         // StringBuilder.toString()
-        bytecode_builder.invokevirtual(1)?; // Placeholder for toString method
+        let tostring_ref = constant_pool.add_method_ref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+        bytecode_builder.invokevirtual(tostring_ref)?;
 
         Ok(())
     }

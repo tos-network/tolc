@@ -315,6 +315,7 @@ impl Code {
                          self.cp, self.state.stacksize, self.mnem(op));
             }
             
+            
             self.emit1(op);
             
             // Update stack state based on instruction
@@ -335,10 +336,11 @@ impl Code {
             }
             
             // Mark code as dead after terminal instructions (JavaC pattern)
+            // Note: GOTO is handled in branch() method, not here
             match op {
                 opcodes::RETURN | opcodes::IRETURN | opcodes::LRETURN | 
                 opcodes::FRETURN | opcodes::DRETURN | opcodes::ARETURN | 
-                opcodes::ATHROW | opcodes::GOTO => {
+                opcodes::ATHROW => {
                     self.alive = false;
                 }
                 _ => {}
@@ -615,7 +617,10 @@ impl Code {
             }
         } else {
             self.emitop2(opcode, 0);
-            return (self.cp - 3) as u16;
+            let pc = (self.cp - 3) as u16;
+            
+            
+            return pc;
         }
     }
     
@@ -626,7 +631,15 @@ impl Code {
         }
         
         let pc = self.emit_jump(opcode);
-        crate::codegen::chain::ChainOps::single(pc, self.state.stacksize, self.max_locals)
+        let result = crate::codegen::chain::ChainOps::single(pc, self.state.stacksize, self.max_locals);
+        
+        // JavaC alignment: GOTO instruction marks code as dead after emission
+        // This matches javac's Code.java:1468 - if (opcode == goto_) alive = false;
+        if opcode == opcodes::GOTO {
+            self.alive = false;
+        }
+        
+        result
     }
     
     /// Resolve a chain to the current code position (JavaC resolve equivalent)
@@ -679,6 +692,8 @@ impl Code {
             
             // Patch the jump offset
             let jump_offset = target as i16 - pc as i16;
+            
+            
             if self.fatcode && (self.code[pc as usize] == opcodes::GOTO_W || self.code[pc as usize] == opcodes::JSR_W) {
                 // 4-byte offset for wide jumps
                 self.put4(pc + 1, jump_offset as i32);
