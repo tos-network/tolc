@@ -6,7 +6,6 @@
 //! - Redundant frame elimination
 //! - Optimal offset delta calculation
 
-use crate::ast::*;
 use crate::codegen::frame::{StackMapFrame, StackMapTable, VerificationType, FrameState};
 use std::collections::HashMap;
 

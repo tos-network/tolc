@@ -2,7 +2,7 @@
 /// Implements javac's sophisticated loop generation and optimization patterns
 
 use crate::codegen::opcodes;
-use crate::ast::{Stmt, Expr, ForStmt, WhileStmt, ExprStmt};
+use crate::ast::{Stmt, Expr, ForStmt, WhileStmt};
 
 #[derive(Debug, Clone)]
 pub struct LoopPattern {
@@ -111,7 +111,7 @@ impl LoopOptimizer {
     
     /// Generate optimized loop bytecode (javac genLoop pattern)
     pub fn generate_optimized_loop(pattern: &LoopPattern) -> Vec<u8> {
-        let mut bytecode = Vec::new();
+        let bytecode = Vec::new();
         
         // Check for constant condition optimization
         if let Some(constant_opt) = pattern.optimization_opportunities.iter()
@@ -388,7 +388,7 @@ impl LoopOptimizer {
     }
     
     /// Find expressions that are loop invariant
-    fn find_loop_invariant_expressions(body: &Stmt) -> Option<Vec<Expr>> {
+    fn find_loop_invariant_expressions(_body: &Stmt) -> Option<Vec<Expr>> {
         // Simplified analysis - would need more sophisticated data flow analysis
         // For now, just return empty vector
         Some(Vec::new())
@@ -436,7 +436,7 @@ impl LoopOptimizer {
     }
     
     /// Mark label (placeholder)
-    fn mark_label(label_id: u16) -> Vec<u8> {
+    fn mark_label(_label_id: u16) -> Vec<u8> {
         // Placeholder - would be handled by label management system
         vec![] // Labels don't generate bytecode directly
     }

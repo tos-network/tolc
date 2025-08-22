@@ -762,7 +762,31 @@ impl AstVisitor for AstPrinter {
     fn visit_binary_expr(&mut self, binary: &BinaryExpr) {
         self.visit_expr(&binary.left);
         self.output.push(' ');
-        self.output.push_str(&format!("{:?}", binary.operator).to_lowercase());
+        
+        // Use proper operator symbols instead of debug format
+        let op_str = match binary.operator {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-", 
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::Eq => "==",
+            BinaryOp::Ne => "!=",
+            BinaryOp::And => "&",
+            BinaryOp::Or => "|",
+            BinaryOp::Xor => "^",
+            BinaryOp::LShift => "<<",
+            BinaryOp::RShift => ">>",
+            BinaryOp::URShift => ">>>",
+            BinaryOp::LogicalAnd => "&&",
+            BinaryOp::LogicalOr => "||",
+        };
+        
+        self.output.push_str(op_str);
         self.output.push(' ');
         self.visit_expr(&binary.right);
     }

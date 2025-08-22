@@ -2,7 +2,7 @@
 /// Implements javac's sophisticated instruction selection and optimization
 
 use crate::codegen::opcodes;
-use crate::ast::{Expr, BinaryOp, UnaryOp, Literal};
+use crate::ast::{BinaryOp, UnaryOp};
 
 /// Instruction selection optimizer (javac Code.java pattern)
 pub struct InstructionOptimizer;

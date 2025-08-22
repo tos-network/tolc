@@ -5,8 +5,8 @@
 
 use crate::ast::*;
 use crate::error::{Result, Error};
-use super::symtab::{Symtab, Symbol, MethodSymbol, LocalVarSymbol, SymbolKind};
-use super::types::{Types, ConversionKind, BinaryOpResult};
+use super::symtab::{Symtab, MethodSymbol, LocalVarSymbol};
+use super::types::{Types, ConversionKind};
 use std::collections::HashMap;
 
 /// Type inference context - JavaC Attr equivalent
@@ -345,7 +345,7 @@ impl TypeInference {
     }
     
     /// Infer field access type - JavaC visitSelect equivalent
-    fn infer_field_access_type(&mut self, field: &FieldAccessExpr) -> Result<InferenceResult> {
+    fn infer_field_access_type(&mut self, _field: &FieldAccessExpr) -> Result<InferenceResult> {
         // TODO: Implement proper field resolution
         Ok(InferenceResult {
             typ: self.types.symtab().object_type.clone(),
@@ -369,7 +369,7 @@ impl TypeInference {
         
         // Extract element type from array type
         match array_result.typ {
-            TypeEnum::Reference(ReferenceType::Array(element_type_ref)) => {
+            TypeEnum::Reference(ReferenceType::Array(_element_type_ref)) => {
                 // TODO: Convert TypeRef back to TypeEnum
                 Ok(InferenceResult {
                     typ: self.types.symtab().object_type.clone(), // Placeholder
@@ -455,7 +455,7 @@ impl TypeInference {
     }
     
     /// Helper: Constant folding for binary operations
-    fn fold_binary_constant(&self, op: &BinaryOp, left: &Option<ConstantValue>, right: &Option<ConstantValue>) -> Option<ConstantValue> {
+    fn fold_binary_constant(&self, _op: &BinaryOp, _left: &Option<ConstantValue>, _right: &Option<ConstantValue>) -> Option<ConstantValue> {
         // TODO: Implement constant folding
         None
     }

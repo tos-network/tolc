@@ -68,3 +68,140 @@ fn test_system_out_println() -> Result<()> {
     
     Ok(())
 }
+
+#[test]
+fn test_static_method_call() -> Result<()> {
+    let source = r#"
+        public class MathUtils {
+            public static int add(int a, int b) {
+                return a + b;
+            }
+            
+            public static void main(String[] args) {
+                int result = MathUtils.add(5, 3);
+            }
+        }
+    "#;
+    
+    let parser = Parser::new(source)?;
+    let ast = parser.parse()?;
+    
+    assert!(!ast.type_decls.is_empty());
+    
+    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
+        let mut class_writer = ClassWriter::new();
+        let result = class_writer.generate_class(class);
+        assert!(result.is_ok(), "Static method call generation should succeed: {:?}", result);
+    } else {
+        panic!("Expected a class declaration in the AST");
+    }
+    
+    Ok(())
+}
+
+#[test]
+fn test_instance_method_call() -> Result<()> {
+    let source = r#"
+        public class Calculator {
+            private int value;
+            
+            public void setValue(int val) {
+                this.value = val;
+            }
+            
+            public int getValue() {
+                return this.value;
+            }
+            
+            public void test() {
+                setValue(42);
+                int result = getValue();
+            }
+        }
+    "#;
+    
+    let parser = Parser::new(source)?;
+    let ast = parser.parse()?;
+    
+    assert!(!ast.type_decls.is_empty());
+    
+    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
+        let mut class_writer = ClassWriter::new();
+        let result = class_writer.generate_class(class);
+        assert!(result.is_ok(), "Instance method call generation should succeed: {:?}", result);
+    } else {
+        panic!("Expected a class declaration in the AST");
+    }
+    
+    Ok(())
+}
+
+#[test]
+fn test_constructor_call() -> Result<()> {
+    let source = r#"
+        public class Person {
+            private String name;
+            
+            public Person(String name) {
+                this.name = name;
+            }
+            
+            public static void main(String[] args) {
+                Person p = new Person("John");
+            }
+        }
+    "#;
+    
+    let parser = Parser::new(source)?;
+    let ast = parser.parse()?;
+    
+    assert!(!ast.type_decls.is_empty());
+    
+    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
+        let mut class_writer = ClassWriter::new();
+        let result = class_writer.generate_class(class);
+        assert!(result.is_ok(), "Constructor call generation should succeed: {:?}", result);
+    } else {
+        panic!("Expected a class declaration in the AST");
+    }
+    
+    Ok(())
+}
+
+#[test]
+fn test_chained_method_calls() -> Result<()> {
+    let source = r#"
+        public class StringBuilder {
+            public StringBuilder append(String str) {
+                return this;
+            }
+            
+            public String toString() {
+                return "";
+            }
+            
+            public static void main(String[] args) {
+                String result = new StringBuilder()
+                    .append("Hello")
+                    .append(" ")
+                    .append("World")
+                    .toString();
+            }
+        }
+    "#;
+    
+    let parser = Parser::new(source)?;
+    let ast = parser.parse()?;
+    
+    assert!(!ast.type_decls.is_empty());
+    
+    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
+        let mut class_writer = ClassWriter::new();
+        let result = class_writer.generate_class(class);
+        assert!(result.is_ok(), "Chained method call generation should succeed: {:?}", result);
+    } else {
+        panic!("Expected a class declaration in the AST");
+    }
+    
+    Ok(())
+}

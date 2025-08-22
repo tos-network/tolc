@@ -214,7 +214,7 @@ impl MethodContext {
         self.next_local = if self.is_static { 0 } else { 1 };
         
         // Allocate parameter slots
-        for (i, param) in method.parameters.iter().enumerate() {
+        for (_i, param) in method.parameters.iter().enumerate() {
             let slot = self.next_local;
             let type_descriptor = self.type_ref_to_descriptor(&param.type_ref);
             

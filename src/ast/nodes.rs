@@ -595,6 +595,8 @@ pub enum BinaryOp {
     Add, Sub, Mul, Div, Mod,
     Lt, Le, Gt, Ge, Eq, Ne,
     And, Or, Xor, LShift, RShift, URShift,
+    // Logical operators for short-circuit evaluation
+    LogicalAnd, LogicalOr,
 }
 
 #[derive(Debug, Clone, PartialEq)]

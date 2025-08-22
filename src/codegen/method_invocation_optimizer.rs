@@ -189,7 +189,7 @@ impl MethodInvocationOptimizer {
             InvocationOptimizationType::StringConcatenation { expressions } => {
                 self.generate_string_concatenation(expressions, bytecode_builder)?;
             }
-            InvocationOptimizationType::ArrayLength { array_expr } => {
+            InvocationOptimizationType::ArrayLength { array_expr: _ } => {
                 // Array expression should already be on stack
                 bytecode_builder.arraylength()?;
             }
@@ -197,7 +197,7 @@ impl MethodInvocationOptimizer {
                 // Generate ldc for class literal
                 bytecode_builder.ldc(1)?; // Placeholder constant pool index
             }
-            InvocationOptimizationType::Direct { opcode, method_ref, is_interface } => {
+            InvocationOptimizationType::Direct { opcode, method_ref, is_interface: _ } => {
                 match *opcode {
                     183 => bytecode_builder.invokespecial(*method_ref)?, // invokespecial
                     184 => bytecode_builder.invokestatic(*method_ref)?, // invokestatic
@@ -207,7 +207,7 @@ impl MethodInvocationOptimizer {
                     _ => return Err("Unsupported direct invocation opcode".into()),
                 }
             }
-            InvocationOptimizationType::Virtual { opcode, method_ref, is_interface } => {
+            InvocationOptimizationType::Virtual { opcode: _, method_ref, is_interface } => {
                 if *is_interface {
                     bytecode_builder.invokeinterface(*method_ref, pattern.stack_effect.0 as u8)?;
                 } else {

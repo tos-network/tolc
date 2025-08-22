@@ -4,7 +4,6 @@
 //! javac ConstFold.java, providing compile-time constant evaluation and optimization.
 
 use crate::ast::{Literal, BinaryOp, UnaryOp, TypeEnum, PrimitiveType};
-use crate::error::{Result, Error};
 use super::symtab::Symtab;
 use super::opcodes;
 use std::collections::HashMap;
@@ -368,36 +367,79 @@ impl ConstFoldJavaC {
     fn b2i(b: bool) -> i64 {
         if b { 1 } else { 0 }
     }
+    
+    /// Check if short-circuit logical operators can be constant folded
+    /// This follows JavaC's constant folding rules for LogicalAnd and LogicalOr
+    pub fn can_fold_logical(&self, op: &BinaryOp, left: &Literal, right: &Literal) -> bool {
+        match op {
+            BinaryOp::LogicalAnd => {
+                match left {
+                    Literal::Boolean(false) => true, // false && X is always false
+                    Literal::Boolean(true) => matches!(right, Literal::Boolean(_)), // true && bool
+                    _ => false,
+                }
+            }
+            BinaryOp::LogicalOr => {
+                match left {
+                    Literal::Boolean(true) => true, // true || X is always true
+                    Literal::Boolean(false) => matches!(right, Literal::Boolean(_)), // false || bool
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Integration point for JavaC-style constant folding in tolc
 impl ConstFoldJavaC {
     /// Apply constant folding to binary expression - JavaC integration point
     pub fn fold_binary_expr(&self, op: &BinaryOp, left: &Literal, right: &Literal) -> Option<Literal> {
-        // Map AST binary operators to bytecode opcodes (JavaC pattern)
-        let opcode = match op {
-            BinaryOp::Add => opcodes::IADD,      // Will be adjusted based on type
-            BinaryOp::Sub => opcodes::ISUB,
-            BinaryOp::Mul => opcodes::IMUL,
-            BinaryOp::Div => opcodes::IDIV,
-            BinaryOp::Mod => opcodes::IREM,
-            BinaryOp::And => opcodes::IAND,
-            BinaryOp::Or => opcodes::IOR,
-            BinaryOp::Xor => opcodes::IXOR,
-            BinaryOp::LShift => opcodes::ISHL,
-            BinaryOp::RShift => opcodes::ISHR,
-            BinaryOp::Eq => opcodes::IF_ICMPEQ,
-            BinaryOp::Ne => opcodes::IF_ICMPNE,
-            BinaryOp::Lt => opcodes::IF_ICMPLT,
-            BinaryOp::Gt => opcodes::IF_ICMPGT,
-            BinaryOp::Le => opcodes::IF_ICMPLE,
-            BinaryOp::Ge => opcodes::IF_ICMPGE,
-            _ => return None,
-        };
-        
-        // Adjust opcode based on operand types (JavaC pattern)
-        let adjusted_opcode = self.adjust_opcode_for_types(opcode, left, right);
-        self.fold2(adjusted_opcode, left, right)
+        // Handle short-circuit logical operators first (JavaC pattern)
+        match op {
+            BinaryOp::LogicalAnd => {
+                // Short-circuit AND: false && X = false, true && X = X
+                match (left, right) {
+                    (Literal::Boolean(false), _) => Some(Literal::Boolean(false)),
+                    (Literal::Boolean(true), Literal::Boolean(r)) => Some(Literal::Boolean(*r)),
+                    _ => None, // Can't fold non-boolean operands
+                }
+            }
+            BinaryOp::LogicalOr => {
+                // Short-circuit OR: true || X = true, false || X = X  
+                match (left, right) {
+                    (Literal::Boolean(true), _) => Some(Literal::Boolean(true)),
+                    (Literal::Boolean(false), Literal::Boolean(r)) => Some(Literal::Boolean(*r)),
+                    _ => None, // Can't fold non-boolean operands
+                }
+            }
+            _ => {
+                // Map other AST binary operators to bytecode opcodes (JavaC pattern)
+                let opcode = match op {
+                    BinaryOp::Add => opcodes::IADD,      // Will be adjusted based on type
+                    BinaryOp::Sub => opcodes::ISUB,
+                    BinaryOp::Mul => opcodes::IMUL,
+                    BinaryOp::Div => opcodes::IDIV,
+                    BinaryOp::Mod => opcodes::IREM,
+                    BinaryOp::And => opcodes::IAND,
+                    BinaryOp::Or => opcodes::IOR,
+                    BinaryOp::Xor => opcodes::IXOR,
+                    BinaryOp::LShift => opcodes::ISHL,
+                    BinaryOp::RShift => opcodes::ISHR,
+                    BinaryOp::Eq => opcodes::IF_ICMPEQ,
+                    BinaryOp::Ne => opcodes::IF_ICMPNE,
+                    BinaryOp::Lt => opcodes::IF_ICMPLT,
+                    BinaryOp::Gt => opcodes::IF_ICMPGT,
+                    BinaryOp::Le => opcodes::IF_ICMPLE,
+                    BinaryOp::Ge => opcodes::IF_ICMPGE,
+                    _ => return None,
+                };
+                
+                // Adjust opcode based on operand types (JavaC pattern)
+                let adjusted_opcode = self.adjust_opcode_for_types(opcode, left, right);
+                self.fold2(adjusted_opcode, left, right)
+            }
+        }
     }
     
     /// Apply constant folding to unary expression - JavaC integration point

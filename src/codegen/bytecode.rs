@@ -127,12 +127,12 @@ impl StackState {
             });
         }
         
-        let old_depth = self.depth;
+        let _old_depth = self.depth;
         self.depth -= dec;
         self.depth += inc;
         
         if self.depth > self.max_depth {
-            let old_max = self.max_depth;
+            let _old_max = self.max_depth;
             self.max_depth = self.depth;
             self.max_stack = self.max_depth;
             // eprintln!("🔍 DEBUG: MAX_STACK UPDATE: {} -> {} (depth: {} -> {})", old_max, self.max_depth, old_depth, self.depth);
@@ -2275,7 +2275,7 @@ impl BytecodeBuilder {
     }
 
     /// Emit stack map frame (enhanced emitStackMapFrame implementation)
-    pub fn emit_stack_map_frame(&mut self, pc: u16, locals_size: u16) -> Result<(), StackError> {
+    pub fn emit_stack_map_frame(&mut self, _pc: u16, _locals_size: u16) -> Result<(), StackError> {
         // This is a placeholder for enhanced stack map frame emission
         // The actual implementation would need access to the current frame state,
         // local variable information, and stack state
@@ -2291,7 +2291,7 @@ impl BytecodeBuilder {
     }
 
     /// Check if stack map frame emission is needed at current PC
-    pub fn needs_stack_map_frame(&self, pc: u16) -> bool {
+    pub fn needs_stack_map_frame(&self, _pc: u16) -> bool {
         // Enhanced emitter emits stack map frames at:
         // 1. Jump targets
         // 2. Exception handler entry points

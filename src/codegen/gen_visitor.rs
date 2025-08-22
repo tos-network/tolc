@@ -7,7 +7,6 @@ use crate::ast::*;
 use crate::error::Result;
 use super::gen::{Gen, GenContext};
 use super::items_javac::{Item, CondItem, Items};
-use super::chain::Chain;
 use super::opcodes;
 
 impl Gen {
@@ -163,10 +162,6 @@ impl Gen {
                     }
                     code.state.push(super::code::Type::Double);
                 }
-                _ => {
-                    // Fallback for any unhandled literal types
-                    eprintln!("⚠️  WARNING: Unhandled literal type: {:?}", tree.value);
-                }
             }
         }
         
@@ -182,7 +177,6 @@ impl Gen {
                 Literal::Double(_) => typecodes::DOUBLE,
                 Literal::String(_) => typecodes::OBJECT,
                 Literal::Null => typecodes::OBJECT,
-                _ => typecodes::OBJECT,
             },
             value: tree.value.clone(),
         })
@@ -243,9 +237,135 @@ impl Gen {
     
     /// Visit method call expression - simplified version
     pub fn visit_apply(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
-        // Generate target expression if present
+        // JavaC: visitApply method implementation
+        
+        // Determine method call type and generate appropriate bytecode
+        let is_static = self.is_static_method_call(tree);
+        let is_constructor = tree.name == "<init>";
+        let is_super_call = self.is_super_method_call(tree);
+        
+        if is_static {
+            // Static method call: invokestatic
+            self.gen_static_method_call(tree, env)
+        } else if is_constructor {
+            // Constructor call: invokespecial
+            self.gen_constructor_call(tree, env)
+        } else if is_super_call {
+            // Super method call: invokespecial
+            self.gen_super_method_call(tree, env)
+        } else {
+            // Instance method call: invokevirtual or invokeinterface
+            self.gen_instance_method_call(tree, env)
+        }
+    }
+    
+    /// Generate static method call (invokestatic)
+    fn gen_static_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+        // JavaC pattern: generate arguments first
+        let mut arg_items = Vec::new();
+        for arg in &tree.arguments {
+            let arg_item = self.visit_expr(arg, env)?;
+            arg_items.push(arg_item);
+        }
+        
+        // Generate invokestatic instruction
+        self.with_items(|items| {
+            // Add method to constant pool (simplified)
+            let method_name = &tree.name;
+            let class_name = if let Some(ref target) = tree.target {
+                // Extract class name from target expression
+                format!("{:?}", target) // Simplified
+            } else {
+                "java/lang/System".to_string() // Default for static calls
+            };
+            
+            eprintln!("🔧 DEBUG: Generating invokestatic {}#{}", class_name, method_name);
+            
+            // Emit invokestatic bytecode
+            items.code.emitop(super::opcodes::INVOKESTATIC);
+            items.code.emit2(1); // Method reference index (placeholder)
+            
+            // Determine return type (simplified)
+            let return_type = if method_name.contains("print") {
+                TypeEnum::Void
+            } else if method_name.contains("max") || method_name.contains("min") {
+                TypeEnum::Primitive(crate::ast::PrimitiveType::Int)
+            } else {
+                TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))
+            };
+            
+            Ok(items.make_stack_item_for_type(&return_type))
+        })
+    }
+    
+    /// Generate constructor call (invokespecial)
+    fn gen_constructor_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+        // JavaC pattern: object reference already on stack from NEW instruction
+        
+        // Generate arguments
+        for arg in &tree.arguments {
+            let _arg_item = self.visit_expr(arg, env)?;
+        }
+        
+        self.with_items(|items| {
+            eprintln!("🔧 DEBUG: Generating invokespecial for constructor");
+            
+            // Emit invokespecial bytecode
+            items.code.emitop(super::opcodes::INVOKESPECIAL);
+            items.code.emit2(1); // Constructor reference index (placeholder)
+            
+            // Constructor returns void but object reference remains on stack
+            Ok(items.make_stack_item_for_type(&TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))))
+        })
+    }
+    
+    /// Generate super method call (invokespecial)
+    fn gen_super_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+        // Generate 'this' reference
+        self.with_items(|items| {
+            items.code.emitop(super::opcodes::ALOAD_0); // Load 'this'
+            Ok(())
+        })?;
+        
+        // Generate arguments
+        for arg in &tree.arguments {
+            let _arg_item = self.visit_expr(arg, env)?;
+        }
+        
+        self.with_items(|items| {
+            eprintln!("🔧 DEBUG: Generating invokespecial for super call: {}", tree.name);
+            
+            // Emit invokespecial bytecode
+            items.code.emitop(super::opcodes::INVOKESPECIAL);
+            items.code.emit2(1); // Super method reference index (placeholder)
+            
+            // Determine return type (simplified)
+            let return_type = if tree.name.starts_with("get") {
+                TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))
+            } else if tree.name.starts_with("is") || tree.name.starts_with("has") {
+                TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean)
+            } else {
+                TypeEnum::Void
+            };
+            
+            Ok(items.make_stack_item_for_type(&return_type))
+        })
+    }
+    
+    /// Generate instance method call (invokevirtual or invokeinterface)
+    fn gen_instance_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+        // Check if this is an interface method call first (before any mutable borrows)
+        let is_interface = self.is_interface_method_call(tree);
+        
+        // Generate target expression (receiver)
         if let Some(ref target) = tree.target {
             let _target_item = self.visit_expr(target, env)?;
+        } else {
+            // Implicit 'this' reference
+            self.with_items(|items| {
+                items.code.emitop(super::opcodes::ALOAD_0);
+                Ok(())
+            })?;
         }
         
         // Generate arguments
@@ -253,18 +373,103 @@ impl Gen {
             let _arg_item = self.visit_expr(arg, env)?;
         }
         
-        // Create method result item
+        // Determine return type based on method name (simplified heuristics, before mutable borrow)
+        let return_type = self.infer_method_return_type(&tree.name);
+        
         self.with_items(|items| {
-            let return_type = TypeEnum::Void; // TODO: Get actual return type
+            if is_interface {
+                eprintln!("🔧 DEBUG: Generating invokeinterface for: {}", tree.name);
+                items.code.emitop(super::opcodes::INVOKEINTERFACE);
+                items.code.emit2(1); // Interface method reference (placeholder)
+                items.code.emit1(tree.arguments.len() as u8 + 1); // Argument count + receiver
+                items.code.emit1(0); // Reserved byte
+            } else {
+                eprintln!("🔧 DEBUG: Generating invokevirtual for: {}", tree.name);
+                items.code.emitop(super::opcodes::INVOKEVIRTUAL);
+                items.code.emit2(1); // Method reference index (placeholder)
+            }
+            
             Ok(items.make_stack_item_for_type(&return_type))
         })
+    }
+    
+    /// Check if this is a static method call
+    fn is_static_method_call(&self, tree: &MethodCallExpr) -> bool {
+        // Heuristics for static method detection
+        // In a complete implementation, this would use symbol table information
+        tree.target.is_none() || // No receiver usually means static
+        tree.name.starts_with("System.") ||
+        tree.name.contains("Math.") ||
+        tree.name.contains("String.valueOf") ||
+        tree.name.contains("Integer.parseInt")
+    }
+    
+    /// Check if this is a super method call
+    fn is_super_method_call(&self, tree: &MethodCallExpr) -> bool {
+        if let Some(ref target) = tree.target {
+            if let Expr::Identifier(ident) = target.as_ref() {
+                return ident.name == "super";
+            }
+        }
+        false
+    }
+    
+    /// Check if this is an interface method call
+    fn is_interface_method_call(&self, tree: &MethodCallExpr) -> bool {
+        // Simplified heuristics - in real implementation would use type information
+        tree.name.contains("Iterator") ||
+        tree.name.contains("Collection") ||
+        tree.name.contains("List") ||
+        tree.name.contains("Map") ||
+        tree.name.contains("Set")
+    }
+    
+    /// Infer method return type from method name (simplified)
+    fn infer_method_return_type(&self, method_name: &str) -> TypeEnum {
+        match method_name {
+            // Void methods
+            name if name.starts_with("set") => TypeEnum::Void,
+            name if name == "println" || name == "print" => TypeEnum::Void,
+            name if name.starts_with("add") || name.starts_with("remove") => TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean),
+            
+            // Boolean methods
+            name if name.starts_with("is") || name.starts_with("has") => TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean),
+            name if name.starts_with("contains") || name.starts_with("equals") => TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean),
+            
+            // Integer methods
+            name if name == "size" || name == "length" => TypeEnum::Primitive(crate::ast::PrimitiveType::Int),
+            name if name == "hashCode" || name.starts_with("compare") => TypeEnum::Primitive(crate::ast::PrimitiveType::Int),
+            name if name.contains("indexOf") => TypeEnum::Primitive(crate::ast::PrimitiveType::Int),
+            
+            // String methods
+            name if name == "toString" || name.starts_with("substring") => TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/String".to_string())),
+            name if name.starts_with("get") && name.contains("String") => TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/String".to_string())),
+            
+            // Object methods (default)
+            name if name.starts_with("get") => TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string())),
+            name if name == "clone" => TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string())),
+            
+            // Default to Object for unknown methods
+            _ => TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string())),
+        }
     }
     
     /// Visit binary expression - JavaC-aligned implementation
     pub fn visit_binary(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
         use crate::ast::BinaryOp;
         
-        // Generate operands
+        // Handle short-circuit operators first (they need special logic)
+        match tree.operator {
+            BinaryOp::LogicalAnd => {
+                return self.visit_logical_and(tree, env);
+            }
+            BinaryOp::LogicalOr => {
+                return self.visit_logical_or(tree, env);
+            }
+            _ => {} // Continue with normal binary operations
+        }
+        
+        // Generate operands for normal binary operations
         let left_item = self.visit_expr(&tree.left, env)?;
         let right_item = self.visit_expr(&tree.right, env)?;
         
@@ -392,6 +597,91 @@ impl Gen {
         })
     }
     
+    /// Visit LogicalAnd expression with proper short circuit evaluation (JavaC aligned)
+    fn visit_logical_and(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
+        // JavaC pattern for && : if left is false, jump to false result
+        let _left_item = self.visit_expr(&tree.left, env)?;
+        
+        let false_chain = self.with_items(|items| {
+            // If left is false (0), jump to false result
+            let false_chain = items.code.branch(opcodes::IFEQ);
+            Ok(false_chain)
+        })?;
+        
+        // Left is true, evaluate right operand
+        let _right_item = self.visit_expr(&tree.right, env)?;
+        
+        self.with_items(|items| {
+            // If right is also true, set result to true and jump to end
+            let true_chain = items.code.branch(opcodes::IFEQ);
+            items.code.emitop(opcodes::ICONST_1); // Push true (1)
+            let end_chain = items.code.branch(opcodes::GOTO);
+            
+            // Resolve false chain - left was false, set result to false
+            if let Some(chain) = false_chain {
+                items.code.resolve(Some(chain));
+            }
+            if let Some(chain) = true_chain {
+                items.code.resolve(Some(chain));
+            }
+            items.code.emitop(opcodes::ICONST_0); // Push false (0)
+            
+            // Resolve end chain
+            if let Some(chain) = end_chain {
+                items.code.resolve(Some(chain));
+            }
+            
+            let result_type = TypeEnum::Primitive(PrimitiveType::Boolean);
+            Ok(items.make_stack_item_for_type(&result_type))
+        })
+    }
+    
+    /// Visit LogicalOr expression with proper short circuit evaluation (JavaC aligned)
+    fn visit_logical_or(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
+        // JavaC pattern for || : if left is true, jump to true result
+        let _left_item = self.visit_expr(&tree.left, env)?;
+        
+        let true_chain = self.with_items(|items| {
+            // If left is true (non-zero), jump to true result
+            let true_chain = items.code.branch(opcodes::IFNE);
+            Ok(true_chain)
+        })?;
+        
+        // Left is false, evaluate right operand
+        let _right_item = self.visit_expr(&tree.right, env)?;
+        
+        self.with_items(|items| {
+            // If right is also false, set result to false and jump to end
+            let false_chain = items.code.branch(opcodes::IFEQ);
+            items.code.emitop(opcodes::ICONST_1); // Push true (1) - right was true
+            let end_chain = items.code.branch(opcodes::GOTO);
+            
+            // Resolve true chain - left was true, set result to true
+            if let Some(chain) = true_chain {
+                items.code.resolve(Some(chain));
+            }
+            items.code.emitop(opcodes::ICONST_1); // Push true (1)
+            let end_chain2 = items.code.branch(opcodes::GOTO);
+            
+            // Resolve false chain - both were false, set result to false
+            if let Some(chain) = false_chain {
+                items.code.resolve(Some(chain));
+            }
+            items.code.emitop(opcodes::ICONST_0); // Push false (0)
+            
+            // Resolve end chains
+            if let Some(chain) = end_chain {
+                items.code.resolve(Some(chain));
+            }
+            if let Some(chain) = end_chain2 {
+                items.code.resolve(Some(chain));
+            }
+            
+            let result_type = TypeEnum::Primitive(PrimitiveType::Boolean);
+            Ok(items.make_stack_item_for_type(&result_type))
+        })
+    }
+    
     /// Infer binary operation result type based on operands and operator
     fn infer_binary_result_type(&self, left_item: &Item, right_item: &Item, operator: &BinaryOp) -> TypeEnum {
         use crate::ast::BinaryOp;
@@ -401,10 +691,11 @@ impl Gen {
         let left_type = left_item.typecode();
         let right_type = right_item.typecode();
         
-        // Comparison operators always return boolean
+        // Comparison and logical operators always return boolean
         match operator {
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | 
-            BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or => {
+            BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or |
+            BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
                 return TypeEnum::Primitive(PrimitiveType::Boolean);
             }
             _ => {}
@@ -472,9 +763,36 @@ impl Gen {
                         }
                     }
                 }
-                _ => {
-                    eprintln!("⚠️  WARNING: Unsupported unary operator: {:?}", tree.operator);
-                    items.code.emitop(opcodes::NOP);
+                UnaryOp::PreInc => {
+                    // Pre-increment: increment first, then return the incremented value
+                    // Stack: [value] -> [value+1]
+                    items.code.emitop(opcodes::ICONST_1);
+                    items.code.emitop(opcodes::IADD);
+                    // TODO: Store back to variable (requires variable tracking)
+                    eprintln!("⚠️  WARNING: PreInc simplified - computes increment but doesn't store to variable");
+                }
+                UnaryOp::PreDec => {
+                    // Pre-decrement: decrement first, then return the decremented value  
+                    // Stack: [value] -> [value-1]
+                    items.code.emitop(opcodes::ICONST_1);
+                    items.code.emitop(opcodes::ISUB);
+                    // TODO: Store back to variable (requires variable tracking)
+                    eprintln!("⚠️  WARNING: PreDec simplified - computes decrement but doesn't store to variable");
+                }
+                UnaryOp::PostInc => {
+                    // Post-increment: return current value, but increment happens behind the scenes
+                    // Stack: [value] -> [value] (same value returned, increment ignored for now)
+                    // For proper implementation, we'd need to:
+                    // 1. Store current value to temp
+                    // 2. Increment original variable  
+                    // 3. Return temp value
+                    // For now, just pass through the current value
+                    eprintln!("⚠️  WARNING: PostInc simplified - returns current value without incrementing");
+                }
+                UnaryOp::PostDec => {
+                    // Post-decrement: return current value, but decrement happens behind the scenes  
+                    // Stack: [value] -> [value] (same value returned, decrement ignored for now)
+                    eprintln!("⚠️  WARNING: PostDec simplified - returns current value without decrementing");
                 }
             }
             
@@ -491,7 +809,8 @@ impl Gen {
         
         match operator {
             UnaryOp::Not => TypeEnum::Primitive(PrimitiveType::Boolean),
-            UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot => {
+            UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot | 
+            UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => {
                 // Preserve the operand type for arithmetic operations
                 match operand_type {
                     typecodes::DOUBLE => TypeEnum::Primitive(PrimitiveType::Double),
@@ -500,7 +819,6 @@ impl Gen {
                     _ => TypeEnum::Primitive(PrimitiveType::Int),
                 }
             }
-            _ => TypeEnum::Primitive(PrimitiveType::Int), // Default
         }
     }
     
@@ -731,19 +1049,92 @@ impl Gen {
                         Ok(CondItem::new(opcodes::IF_ICMPGE))
                     }
                     
-                    // Logical operators - simplified for now
+                    // Bitwise logical operators (non-short-circuit)
                     BinaryOp::And => {
-                        // For now, generate as regular expression and test != 0
-                        // TODO: Implement proper short-circuit evaluation
+                        // Generate as regular expression and test != 0
                         self.visit_expr(expr, env)?;
                         Ok(CondItem::new(opcodes::IFNE))
                     }
                     
                     BinaryOp::Or => {
-                        // For now, generate as regular expression and test != 0
-                        // TODO: Implement proper short-circuit evaluation
+                        // Generate as regular expression and test != 0  
                         self.visit_expr(expr, env)?;
                         Ok(CondItem::new(opcodes::IFNE))
+                    }
+                    
+                    // Short-circuit logical operators - JavaC aligned implementation
+                    BinaryOp::LogicalAnd => {
+                        // JavaC: genCond for logical AND (&&)
+                        // Left operand condition
+                        let left_cond = self.gen_cond(&bin_expr.left, env)?;
+                        
+                        // Get false jumps from left operand - if left is false, entire expression is false
+                        let false_jumps = self.with_items(|items| {
+                            left_cond.jump_false(&mut items.code)
+                        })?;
+                        
+                        // If left is true, evaluate right operand
+                        self.with_items(|items| {
+                            left_cond.resolve_true(&mut items.code);
+                            Ok(())
+                        })?;
+                        
+                        // Right operand condition
+                        let right_cond = self.gen_cond(&bin_expr.right, env)?;
+                        
+                        // Combine conditions: true only if both are true
+                        Ok(CondItem {
+                            opcode: right_cond.opcode,
+                            true_jumps: right_cond.true_jumps,
+                            false_jumps: {
+                                // Chain false jumps from left and right
+                                match (false_jumps.as_ref(), right_cond.false_jumps.as_ref()) {
+                                    (Some(left_false), Some(right_false)) => {
+                                        super::code::Code::merge_chains(Some(left_false.clone()), Some(right_false.clone()))
+                                    }
+                                    (Some(left_false), None) => Some(left_false.clone()),
+                                    (None, Some(right_false)) => Some(right_false.clone()),
+                                    (None, None) => None,
+                                }
+                            },
+                        })
+                    }
+                    
+                    BinaryOp::LogicalOr => {
+                        // JavaC: genCond for logical OR (||)
+                        // Left operand condition
+                        let left_cond = self.gen_cond(&bin_expr.left, env)?;
+                        
+                        // Get true jumps from left operand - if left is true, entire expression is true
+                        let true_jumps = self.with_items(|items| {
+                            left_cond.jump_true(&mut items.code)
+                        })?;
+                        
+                        // If left is false, evaluate right operand
+                        self.with_items(|items| {
+                            left_cond.resolve_false(&mut items.code);
+                            Ok(())
+                        })?;
+                        
+                        // Right operand condition
+                        let right_cond = self.gen_cond(&bin_expr.right, env)?;
+                        
+                        // Combine conditions: false only if both are false
+                        Ok(CondItem {
+                            opcode: right_cond.opcode,
+                            true_jumps: {
+                                // Chain true jumps from left and right
+                                match (true_jumps.as_ref(), right_cond.true_jumps.as_ref()) {
+                                    (Some(left_true), Some(right_true)) => {
+                                        super::code::Code::merge_chains(Some(left_true.clone()), Some(right_true.clone()))
+                                    }
+                                    (Some(left_true), None) => Some(left_true.clone()),
+                                    (None, Some(right_true)) => Some(right_true.clone()),
+                                    (None, None) => None,
+                                }
+                            },
+                            false_jumps: right_cond.false_jumps,
+                        })
                     }
                     
                     // For other binary ops, evaluate and test != 0
@@ -896,6 +1287,22 @@ impl Gen {
         // JavaC: int startpc = code.entryPoint();
         let start_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
         
+        // Enhanced scope management: push loop scope
+        let current_max_locals = self.with_items(|items| Ok(items.code.max_locals))?;
+        let loop_type_for_scope = if condition.is_some() { 
+            super::gen::LoopType::While 
+        } else { 
+            super::gen::LoopType::For 
+        };
+        
+        let _scope_id = self.scope_manager.push_scope(
+            start_pc as usize, 
+            true, // is_loop_scope
+            Some(loop_type_for_scope), 
+            None, // no label at this level
+            current_max_locals
+        );
+        
         if test_first {
             // while or for loop - condition tested first
             
@@ -925,21 +1332,25 @@ impl Gen {
                 Ok(())
             })?;
             
-            // Clear any previous break/continue chains for this loop
-            self.current_break_chain = None;
-            self.current_continue_chain = None;
+            // Push optimized loop context instead of clearing global chains
+            let loop_type = if condition.is_some() { 
+                super::gen::LoopType::While 
+            } else { 
+                super::gen::LoopType::For 
+            };
+            self.push_loop_context(None, loop_type, start_pc as usize);
             
             // JavaC: genStat(body, loopEnv, CRT_STATEMENT | CRT_FLOW_TARGET);
             self.visit_stmt(body, &loop_env)?;
             
-            // Collect any break statements generated during body execution
-            if let Some(break_chain) = self.current_break_chain.take() {
-                loop_env.add_exit(Some(break_chain));
-            }
-            
-            // Collect any continue statements generated during body execution
-            if let Some(continue_chain) = self.current_continue_chain.take() {
-                loop_env.add_cont(Some(continue_chain));
+            // Pop loop context and collect break/continue chains 
+            if let Some(loop_ctx) = self.pop_loop_context() {
+                if let Some(break_chain) = loop_ctx.break_chain {
+                    loop_env.add_exit(Some(break_chain));
+                }
+                if let Some(continue_chain) = loop_ctx.continue_chain {
+                    loop_env.add_cont(Some(continue_chain));
+                }
             }
             
             // JavaC: code.resolve(loopEnv.info.cont); - continue statements
@@ -971,21 +1382,20 @@ impl Gen {
         } else {
             // do-while loop - condition tested last
             
-            // Clear any previous break/continue chains for this loop
-            self.current_break_chain = None;
-            self.current_continue_chain = None;
+            // Push optimized loop context for do-while loop
+            self.push_loop_context(None, super::gen::LoopType::DoWhile, start_pc as usize);
             
             // JavaC: genStat(body, loopEnv, CRT_STATEMENT | CRT_FLOW_TARGET);
             self.visit_stmt(body, &loop_env)?;
             
-            // Collect any break statements generated during body execution
-            if let Some(break_chain) = self.current_break_chain.take() {
-                loop_env.add_exit(Some(break_chain));
-            }
-            
-            // Collect any continue statements generated during body execution
-            if let Some(continue_chain) = self.current_continue_chain.take() {
-                loop_env.add_cont(Some(continue_chain));
+            // Pop loop context and collect break/continue chains 
+            if let Some(loop_ctx) = self.pop_loop_context() {
+                if let Some(break_chain) = loop_ctx.break_chain {
+                    loop_env.add_exit(Some(break_chain));
+                }
+                if let Some(continue_chain) = loop_ctx.continue_chain {
+                    loop_env.add_cont(Some(continue_chain));
+                }
             }
             
             // JavaC: code.resolve(loopEnv.info.cont); - continue statements
@@ -1032,6 +1442,19 @@ impl Gen {
             })?;
         }
         
+        // Enhanced scope management: pop loop scope and finalize variables
+        let current_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
+        if let Some((scope_context, finalized_vars)) = self.scope_manager.pop_scope(current_pc as usize) {
+            if self.with_items(|items| Ok(items.code.debug_code))? {
+                eprintln!("🔄 DEBUG: Finalized loop scope {} with {} local variables", 
+                         scope_context.scope_id, finalized_vars.len());
+                for var in &finalized_vars {
+                    eprintln!("   - {}: {} (slot {}, {}..{})", 
+                             var.name, var.type_desc, var.slot, var.start_pc, var.start_pc + var.length);
+                }
+            }
+        }
+        
         // JavaC: Chain exit = loopEnv.info.exit; - break statements  
         if let Some(exit_chain) = loop_env.exit.take() {
             // JavaC: code.resolve(exit);
@@ -1041,7 +1464,7 @@ impl Gen {
             })?;
             
             // JavaC: exit.state.defined.excludeFrom(code.nextreg);
-            // TODO: Implement proper register exclusion for local variable cleanup
+            // Loop scope variables are already managed by the scope manager
         }
         
         Ok(())
@@ -1073,9 +1496,33 @@ impl Gen {
     /// Visit variable declaration - simplified version
     pub fn visit_var_def(&mut self, tree: &VarDeclStmt, env: &GenContext) -> Result<()> {
         for var in &tree.variables {
+            // Generate initializer if present
             if let Some(ref init) = var.initializer {
                 let _init_result = self.visit_expr(init, env)?;
             }
+            
+            // Add variable to current scope
+            let current_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
+            let next_slot = self.with_items(|items| Ok(items.code.max_locals))?;
+            
+            // Get type descriptor from VarDeclStmt's type_ref
+            let type_desc = format!("{:?}", tree.type_ref); // Simplified for now
+            
+            // Add to scope manager
+            if let Err(e) = self.scope_manager.add_local_var(
+                var.name.clone(),
+                type_desc,
+                next_slot,
+                current_pc as usize
+            ) {
+                eprintln!("⚠️  WARNING: Failed to add local variable '{}' to scope: {}", var.name, e);
+            }
+            
+            // Update max_locals (allocate one slot for simplicity)
+            self.with_items(|items| {
+                items.code.max_locals += 1;
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -1115,18 +1562,27 @@ impl Gen {
         // Ensure stack is clear before break
         // TODO: Add stack size assertion when we have proper stack tracking
         
+        // Handle labeled vs unlabeled break
+        let _target_env = if let Some(ref label) = tree.label {
+            // Labeled break: find the target environment by label
+            self.label_env_map.get(label).unwrap_or(env).clone()
+        } else {
+            // Unlabeled break: use current environment
+            env.clone()
+        };
+        
         // JavaC: targetEnv.info.addExit(code.branch(goto_));
-        // Generate a goto and add to the exit chain of target environment
+        // Generate a goto and add to the break chain using optimized system
         if let Some(goto_chain) = self.with_items(|items| {
             Ok(items.code.branch(super::opcodes::GOTO))
         })? {
-            // Store the break jump for the enclosing loop to resolve
-            // For now, we'll need to handle this with a global break chain
-            // In a full implementation, we'd find the target environment and add to its exit chain
-            self.current_break_chain = crate::codegen::code::Code::merge_chains(
-                Some(goto_chain), 
-                self.current_break_chain.take()
-            );
+            // Use optimized loop context system instead of global chains
+            let label_ref = tree.label.as_ref().map(|s| s.as_str());
+            self.add_break_jump(label_ref, goto_chain);
+            
+            if tree.label.is_some() {
+                eprintln!("🔄 DEBUG: Optimized labeled break to '{:?}' generated", tree.label);
+            }
         }
         
         // Mark code as dead after break (JavaC behavior)
@@ -1140,24 +1596,30 @@ impl Gen {
     
     /// Visit continue statement - JavaC visitContinue equivalent (Gen.java:1800-1805)
     pub fn visit_continue(&mut self, tree: &crate::ast::ContinueStmt, env: &GenContext) -> Result<()> {
-        // For now, we need a mutable environment to track continue chains
-        // In full implementation, we'd use unwind(tree.target, env) to find target environment
-        
         // JavaC: Assert.check(code.state.stacksize == 0);
         // Ensure stack is clear before continue
         
+        // Handle labeled vs unlabeled continue
+        let _target_env = if let Some(ref label) = tree.label {
+            // Labeled continue: find the target environment by label
+            self.label_env_map.get(label).unwrap_or(env).clone()
+        } else {
+            // Unlabeled continue: use current environment
+            env.clone()
+        };
+        
         // JavaC: targetEnv.info.addCont(code.branch(goto_));
-        // Generate a goto and add to the cont chain of target environment  
+        // Generate a goto and add to the continue chain using optimized system  
         if let Some(goto_chain) = self.with_items(|items| {
             Ok(items.code.branch(super::opcodes::GOTO))
         })? {
-            // For now, we'll need to handle this at the loop level
-            // In full implementation, this would be added to the appropriate environment's cont chain
-            // Store the continue jump for the enclosing loop to resolve
-            self.current_continue_chain = crate::codegen::code::Code::merge_chains(
-                Some(goto_chain), 
-                self.current_continue_chain.take()
-            );
+            // Use optimized loop context system instead of global chains
+            let label_ref = tree.label.as_ref().map(|s| s.as_str());
+            self.add_continue_jump(label_ref, goto_chain);
+            
+            if tree.label.is_some() {
+                eprintln!("🔄 DEBUG: Optimized labeled continue to '{:?}' generated", tree.label);
+            }
         }
         
         // Mark code as dead after continue (JavaC behavior)
@@ -1165,6 +1627,76 @@ impl Gen {
             items.code.mark_dead();
             Ok(())
         })?;
+        
+        Ok(())
+    }
+    
+    /// Visit labeled statement - JavaC visitLabelled equivalent (Gen.java:1849-1855)
+    pub fn visit_labeled_stmt(&mut self, tree: &crate::ast::LabeledStmt, env: &GenContext) -> Result<()> {
+        // JavaC: Env<GenContext> localEnv = env.dup(env.tree, env.info);
+        let local_env = env.dup();
+        
+        // Store the label to environment mapping for break/continue resolution
+        // In JavaC, labels are associated with their target statement environment
+        self.label_env_map.insert(tree.label.clone(), local_env.clone());
+        
+        // Check if this is a labeled loop statement for optimized handling
+        let is_loop_stmt = matches!(*tree.statement, 
+            crate::ast::Stmt::While(_) | 
+            crate::ast::Stmt::DoWhile(_) | 
+            crate::ast::Stmt::For(_)
+        );
+        
+        if is_loop_stmt {
+            // For labeled loops, enhance scope management with label information
+            let start_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
+            let current_max_locals = self.with_items(|items| Ok(items.code.max_locals))?;
+            let loop_type = super::gen::LoopType::Labeled;
+            
+            // Push both optimized loop context and enhanced scope
+            self.push_loop_context(Some(tree.label.clone()), loop_type, start_pc as usize);
+            
+            let _scope_id = self.scope_manager.push_scope(
+                start_pc as usize,
+                true, // is_loop_scope
+                Some(super::gen::LoopType::Labeled),
+                Some(tree.label.clone()),
+                current_max_locals
+            );
+            
+            // Visit the loop statement
+            self.visit_stmt(&tree.statement, &local_env)?;
+            
+            // Pop both contexts
+            self.pop_loop_context();
+            let end_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
+            if let Some((_scope_context, finalized_vars)) = self.scope_manager.pop_scope(end_pc as usize) {
+                if self.with_items(|items| Ok(items.code.debug_code))? {
+                    eprintln!("🏷️  DEBUG: Finalized labeled scope '{}' with {} variables", 
+                             tree.label, finalized_vars.len());
+                }
+            }
+        } else {
+            // Non-loop labeled statement - still manage scope for consistency
+            let start_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
+            let current_max_locals = self.with_items(|items| Ok(items.code.max_locals))?;
+            
+            let _scope_id = self.scope_manager.push_scope(
+                start_pc as usize,
+                false, // not a loop scope
+                None,
+                Some(tree.label.clone()),
+                current_max_locals
+            );
+            
+            self.visit_stmt(&tree.statement, &local_env)?;
+            
+            let end_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
+            self.scope_manager.pop_scope(end_pc as usize);
+        }
+        
+        // Clean up the label mapping after the statement completes
+        self.label_env_map.remove(&tree.label);
         
         Ok(())
     }

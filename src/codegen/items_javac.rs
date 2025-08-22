@@ -3,12 +3,12 @@
 //! This module implements the exact same Items architecture as Oracle's javac,
 //! with Items directly operating on the Code buffer for maximum compatibility.
 
-use crate::ast::{Type, Literal, TypeEnum, PrimitiveType};
+use crate::ast::{Literal, TypeEnum};
 use crate::error::Result;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
-use super::optimization_manager::{OptimizationManager, OptimizationType, OptimizationLevel};
+use super::optimization_manager::{OptimizationManager, OptimizationLevel};
 
 /// Type codes exactly matching JavaC ByteCodes.java
 pub mod typecodes {
@@ -55,7 +55,7 @@ impl<'a> Items<'a> {
     pub fn new_with_optimization(
         pool: &'a mut ConstantPool, 
         code: &'a mut Code, 
-        level: OptimizationLevel
+        _level: OptimizationLevel
     ) -> Self {
         Self {
             pool,
@@ -248,7 +248,7 @@ impl<'a> Items<'a> {
         }
         
         // Load item first if not already on stack
-        let stack_item = if matches!(item, Item::Stack { .. }) {
+        let _stack_item = if matches!(item, Item::Stack { .. }) {
             item.clone()
         } else {
             self.load_item(item)?
@@ -323,7 +323,7 @@ impl<'a> Items<'a> {
     }
     
     /// Emit optimized immediate value load (JavaC pattern)
-    fn emit_load_immediate(&mut self, typecode: u8, value: &Literal) -> Result<()> {
+    fn emit_load_immediate(&mut self, _typecode: u8, value: &Literal) -> Result<()> {
         match value {
             Literal::Integer(val) => {
                 // Apply JavaC optimization patterns
@@ -655,7 +655,7 @@ impl CondItem {
     }
     
     /// Create negated condition (swap true/false jumps)
-    pub fn negate(mut cond: CondItem) -> Self {
+    pub fn negate(cond: CondItem) -> Self {
         Self {
             opcode: Self::negate_opcode(cond.opcode),
             true_jumps: cond.false_jumps,
@@ -667,6 +667,20 @@ impl CondItem {
     pub fn is_false(&self) -> bool {
         // For now, no constant folding - never consider always false
         false
+    }
+    
+    /// Resolve true jumps to current position (JavaC: resolve trueJumps)
+    pub fn resolve_true(&self, code: &mut Code) {
+        if let Some(ref true_jumps) = self.true_jumps {
+            code.resolve(Some(true_jumps.clone()));
+        }
+    }
+    
+    /// Resolve false jumps to current position (JavaC: resolve falseJumps)
+    pub fn resolve_false(&self, code: &mut Code) {
+        if let Some(ref false_jumps) = self.false_jumps {
+            code.resolve(Some(false_jumps.clone()));
+        }
     }
     
     /// Generate jump when condition is false (JavaC: jumpFalse)

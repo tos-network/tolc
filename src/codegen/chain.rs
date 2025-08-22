@@ -5,7 +5,6 @@
  * This system enables elegant handling of complex control flow patterns.
  */
 
-use crate::error::Result;
 
 /// Represents a linked list of unresolved forward jumps.
 /// Jump locations are stored in decreasing order for efficient resolution.

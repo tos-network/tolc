@@ -373,7 +373,7 @@ impl PendingJumpsManager {
     
     /// Optimize chains that can benefit from code reordering
     fn optimize_code_reordering_chains(&mut self) -> u32 {
-        let mut optimizations = 0;
+        let optimizations = 0;
         
         // This is a placeholder for future code reordering optimization
         // In a full implementation, this would analyze control flow graphs

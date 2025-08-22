@@ -311,7 +311,7 @@ impl Symtab {
                             span: crate::ast::Span::default(),
                         }
                     }
-                    ReferenceType::Array(element) => {
+                    ReferenceType::Array(_element) => {
                         let mut base = self.type_enum_to_type_ref(&TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string())));
                         base.array_dims = 1;
                         base

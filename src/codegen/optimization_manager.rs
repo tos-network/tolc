@@ -7,7 +7,7 @@
 use crate::ast::*;
 use crate::error::Result;
 use crate::codegen::{
-    instruction_optimizer::{InstructionOptimizer, PeepholeOptimizer, NaNBehavior},
+    instruction_optimizer::{InstructionOptimizer, PeepholeOptimizer},
     pending_jumps::PendingJumpsManager,
     constant_optimizer::{ConstantOptimizer, ConstantInstruction},
 };

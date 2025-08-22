@@ -105,7 +105,7 @@ impl CondItem {
             Ok(ChainOps::merge(self.true_jumps.take(), new_branch))
         } else {
             // Complex case with debugging info (for -Xjcov mode in javac)
-            let start_pc = code.cur_cp();
+            let _start_pc = code.cur_cp();
             let new_branch = code.branch(self.opcode);
             let result = ChainOps::merge(self.true_jumps.take(), new_branch);
             
@@ -127,7 +127,7 @@ impl CondItem {
             Ok(ChainOps::merge(self.false_jumps.take(), new_branch))
         } else {
             // Complex case with debugging info
-            let start_pc = code.cur_cp();
+            let _start_pc = code.cur_cp();
             let new_branch = code.branch(negated_opcode);
             let result = ChainOps::merge(self.false_jumps.take(), new_branch);
             

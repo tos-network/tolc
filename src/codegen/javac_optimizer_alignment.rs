@@ -4,9 +4,6 @@
 //! is 100% aligned with Oracle's javac optimizer implementation.
 
 use crate::error::Result;
-use super::const_fold_javac::ConstFoldJavaC;
-use super::attr_optimizer::AttrOptimizer;
-use super::lower_optimizer::LowerOptimizer;
 
 /// JavaC Optimizer Alignment Verifier
 pub struct JavaCOptimizerAlignment;

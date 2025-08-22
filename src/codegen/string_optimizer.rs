@@ -2,7 +2,7 @@
 /// Optimizes string concatenation using StringBuilder pattern
 
 use crate::codegen::opcodes;
-use crate::ast::{Expr, BinaryExpr, BinaryOp, LiteralExpr, Literal, IdentifierExpr};
+use crate::ast::{Expr, BinaryOp, Literal};
 
 #[derive(Debug, Clone)]
 pub struct StringConcatenation {

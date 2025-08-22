@@ -14,14 +14,11 @@ use super::opcodes;
 use super::items_javac::{Items, Item as JavacItem, CondItem};
 use super::method_context::MethodContext;
 use super::symtab::Symtab;
-use super::types::Types;
 use super::type_inference::TypeInference;
 use super::class::ClassFile;
-use super::optimization_manager::{OptimizationManager, OptimizationLevel};
+use super::optimization_manager::OptimizationManager;
 use super::flag::access_flags;
 use super::method::MethodInfo;
-use super::field::FieldInfo;
-use std::collections::HashMap;
 
 /// Main bytecode generator - corresponds to javac's Gen class
 /// 100% aligned with javac Gen.java architecture
@@ -61,11 +58,87 @@ pub struct Gen {
     
     /// Current continue chain for loop continue statements (Phase 2.3)  
     pub current_continue_chain: Option<Box<crate::codegen::chain::Chain>>,
+    
+    /// Label to environment mapping for labeled break/continue resolution  
+    pub label_env_map: std::collections::HashMap<String, GenContext>,
+    
+    /// Optimized loop context stack for efficient jump resolution
+    pub loop_context_stack: Vec<LoopContext>,
+    
+    /// Enhanced scope management for loops and local variables
+    pub scope_manager: LoopScopeManager,
 }
 
 
 // Items system is now implemented in items_javac.rs with 100% JavaC alignment
 // Direct Code buffer manipulation without Rc<RefCell> complexity
+
+/// Optimized loop context for efficient jump resolution
+#[derive(Debug, Clone)]
+pub struct LoopContext {
+    /// Loop label if any
+    pub label: Option<String>,
+    /// Break chain for this specific loop
+    pub break_chain: Option<Box<crate::codegen::chain::Chain>>,
+    /// Continue chain for this specific loop  
+    pub continue_chain: Option<Box<crate::codegen::chain::Chain>>,
+    /// Loop start PC for continue jumps
+    pub start_pc: usize,
+    /// Loop type for optimization hints
+    pub loop_type: LoopType,
+}
+
+/// Loop type enumeration for optimization
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoopType {
+    While,
+    DoWhile,
+    For,
+    Labeled,
+}
+
+/// Enhanced scope management for loops
+#[derive(Debug, Clone)]
+pub struct LoopScopeManager {
+    /// Stack of scope contexts for nested loops
+    pub scope_stack: Vec<ScopeContext>,
+    /// Current scope depth 
+    pub current_depth: u16,
+}
+
+/// Individual scope context for a loop or block
+#[derive(Debug, Clone)]
+pub struct ScopeContext {
+    /// Scope identifier
+    pub scope_id: u16,
+    /// Start PC of this scope
+    pub start_pc: usize,
+    /// Local variables defined in this scope
+    pub local_vars: Vec<ScopedLocalVar>,
+    /// Maximum locals before this scope started
+    pub prev_max_locals: u16,
+    /// Whether this scope is a loop scope
+    pub is_loop_scope: bool,
+    /// Loop type if this is a loop scope
+    pub loop_type: Option<LoopType>,
+    /// Label if this is a labeled scope
+    pub label: Option<String>,
+}
+
+/// Local variable with scope information
+#[derive(Debug, Clone)]
+pub struct ScopedLocalVar {
+    /// Variable name
+    pub name: String,
+    /// Variable type descriptor  
+    pub type_desc: String,
+    /// Local variable slot index
+    pub slot: u16,
+    /// PC where variable becomes visible
+    pub start_pc: usize,
+    /// Length of variable scope (0 if still active)
+    pub length: usize,
+}
 
 /// JavaC GenContext equivalent - unified environment
 #[derive(Debug, Clone)]
@@ -172,6 +245,9 @@ impl Gen {
             optimizer: OptimizationManager::new(),   // Optimization coordinator
             current_break_chain: None,               // Phase 2.3: break statement chain
             current_continue_chain: None,            // Phase 2.3: continue statement chain
+            label_env_map: std::collections::HashMap::new(), // Label to environment mapping
+            loop_context_stack: Vec::new(),          // Optimized loop context stack
+            scope_manager: LoopScopeManager::new(), // Enhanced scope management
         }
     }
     
@@ -186,7 +262,7 @@ impl Gen {
     /// MethodSymbol meth = tree.sym;
     /// meth.code = code = new Code(meth, fatcode, lineMap, varDebugInfo, stackMap, debugCode, types, pool);
     /// items = new Items(pool, code, syms, types);
-    pub fn init_code(&mut self, method: &MethodDecl, env: &GenContext, fatcode: bool) -> Result<u16> {
+    pub fn init_code(&mut self, method: &MethodDecl, env: &GenContext, _fatcode: bool) -> Result<u16> {
         // JavaC equivalent: Create a new code structure
         // meth.code = code = new Code(...)
         self.code = Some(Code::new(
@@ -356,6 +432,7 @@ impl Gen {
             Stmt::Return(return_stmt) => self.visit_return(return_stmt, &env),
             Stmt::Declaration(var_stmt) => self.visit_var_def(var_stmt, &env),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt, &env),
+            Stmt::Labeled(labeled_stmt) => self.visit_labeled_stmt(labeled_stmt, &env),
             _ => {
                 eprintln!("⚠️  DEBUG: gen_stmt: Unsupported statement type: {:?}", stmt);
                 Ok(())
@@ -374,7 +451,7 @@ impl Gen {
     /// Generate expression statement
     pub fn gen_expr_stmt(&mut self, expr_stmt: &ExprStmt) -> Result<()> {
         // Generate expression and handle return value
-        let item = self.gen_expr(&expr_stmt.expr)?;
+        let _item = self.gen_expr(&expr_stmt.expr)?;
         
         // Pop result if expression has a value
         if self.expression_has_value(&expr_stmt.expr) {
@@ -392,7 +469,7 @@ impl Gen {
         if let Some(ref mut code) = self.code {
             // Create labels using Code buffer
             let else_label = code.get_cp() + 100; // Temporary label allocation
-            let end_label = if if_stmt.else_branch.is_some() {
+            let _end_label = if if_stmt.else_branch.is_some() {
                 code.get_cp() + 200
             } else {
                 else_label
@@ -479,7 +556,7 @@ impl Gen {
     fn apply_gen_phase_optimizations(&self, expr: &Expr) -> Result<Expr> {
         match expr {
             // Final constant propagation check
-            Expr::Binary(bin) => {
+            Expr::Binary(_bin) => {
                 // Restored constant folding using optimization manager"
                 // if let (Expr::Literal(left_lit), Expr::Literal(right_lit)) = (&*bin.left, &*bin.right) {
                 //     // Use JavaC-aligned constant folding  
@@ -892,7 +969,7 @@ impl Gen {
     }
     
     /// Generate statement - JavaC genStat equivalent
-    pub fn gen_stat(&mut self, tree: &Stmt, env: &GenContext) -> Result<()> {
+    pub fn gen_stat(&mut self, tree: &Stmt, _env: &GenContext) -> Result<()> {
         // TODO: Implement unified statement generation using visitor pattern
         self.gen_stmt(tree) // Delegate to existing implementation for now
     }
@@ -1065,21 +1142,21 @@ impl Gen {
     // ========== ClassWriter Integration Methods ==========
     
     /// Initialize for interface compilation
-    pub fn init_interface(&mut self, interface: InterfaceDecl, all_types: Vec<TypeDecl>) -> Result<()> {
+    pub fn init_interface(&mut self, _interface: InterfaceDecl, all_types: Vec<TypeDecl>) -> Result<()> {
         self.class_context.all_types = all_types;
         // TODO: Store interface context
         Ok(())
     }
     
     /// Initialize for enum compilation
-    pub fn init_enum(&mut self, enum_decl: EnumDecl, all_types: Vec<TypeDecl>) -> Result<()> {
+    pub fn init_enum(&mut self, _enum_decl: EnumDecl, all_types: Vec<TypeDecl>) -> Result<()> {
         self.class_context.all_types = all_types;
         // TODO: Store enum context
         Ok(())
     }
     
     /// Initialize for annotation compilation
-    pub fn init_annotation(&mut self, annotation: AnnotationDecl, all_types: Vec<TypeDecl>) -> Result<()> {
+    pub fn init_annotation(&mut self, _annotation: AnnotationDecl, all_types: Vec<TypeDecl>) -> Result<()> {
         self.class_context.all_types = all_types;
         // TODO: Store annotation context
         Ok(())
@@ -1091,12 +1168,12 @@ impl Gen {
     }
     
     /// Set package context for name resolution
-    pub fn set_package_context(&mut self, package: String) {
+    pub fn set_package_context(&mut self, _package: String) {
         // TODO: Store package context
     }
     
     /// Set annotation retention mapping
-    pub fn set_annotation_retention(&mut self, retention: std::collections::HashMap<String, crate::codegen::attribute::RetentionPolicy>) {
+    pub fn set_annotation_retention(&mut self, _retention: std::collections::HashMap<String, crate::codegen::attribute::RetentionPolicy>) {
         // TODO: Store annotation retention mapping
     }
     
@@ -1112,7 +1189,7 @@ impl Gen {
         self.class_file.this_class = this_class_idx;
         
         // 2. Set super class (default to Object if not specified)
-        let super_class_name = if let Some(ref extends) = class.extends {
+        let super_class_name = if let Some(ref _extends) = class.extends {
             // TODO: Convert TypeRef to string properly
             "java/lang/Object"
         } else {
@@ -1128,7 +1205,7 @@ impl Gen {
         self.class_file.access_flags = access_flags;
         
         // 4. Process interfaces
-        for interface_ref in &class.implements {
+        for _interface_ref in &class.implements {
             // TODO: Convert TypeRef to string properly
             let interface_name = "java/lang/Comparator"; // Placeholder
             let interface_idx = self.pool.add_class(interface_name);
@@ -1174,19 +1251,19 @@ impl Gen {
     }
     
     /// Generate interface declaration using JavaC patterns
-    pub fn generate_interface_decl(&mut self, interface: &InterfaceDecl) -> Result<()> {
+    pub fn generate_interface_decl(&mut self, _interface: &InterfaceDecl) -> Result<()> {
         // TODO: Implement interface generation using JavaC Gen patterns
         Ok(())
     }
     
     /// Generate enum declaration using JavaC patterns
-    pub fn generate_enum_decl(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+    pub fn generate_enum_decl(&mut self, _enum_decl: &EnumDecl) -> Result<()> {
         // TODO: Implement enum generation using JavaC Gen patterns
         Ok(())
     }
     
     /// Generate annotation declaration using JavaC patterns
-    pub fn generate_annotation_decl(&mut self, annotation: &AnnotationDecl) -> Result<()> {
+    pub fn generate_annotation_decl(&mut self, _annotation: &AnnotationDecl) -> Result<()> {
         // TODO: Implement annotation generation using JavaC Gen patterns
         Ok(())
     }
@@ -1222,7 +1299,7 @@ impl Gen {
                     use super::frame::FrameBuilder;
                     
                     let frame_computer = FrameBuilder::new();
-                    let class_name = if self.class_file.this_class == 0 {
+                    let _class_name = if self.class_file.this_class == 0 {
                         "java/lang/Object".to_string()
                     } else {
                         // For now, use a placeholder since we don't have a way to retrieve class name
@@ -1240,7 +1317,7 @@ impl Gen {
                         use super::attribute::{NamedAttribute, AttributeInfo};
                         use super::frame::make_stack_map_attribute;
                         
-                        let stack_map_attr_info = make_stack_map_attribute(&mut self.pool, &stack_map_table);
+                        let _stack_map_attr_info = make_stack_map_attribute(&mut self.pool, &stack_map_table);
                         let stack_map_attr_name_idx = self.pool.add_utf8("StackMapTable");
                         let stack_map_named_attr = NamedAttribute::new(
                             super::typed_index::ConstPoolIndex::from(stack_map_attr_name_idx),
@@ -1369,7 +1446,7 @@ impl Gen {
     }
     
     /// Generate default constructor: public ClassName() { super(); }
-    fn generate_default_constructor(&mut self, class: &ClassDecl) -> Result<()> {
+    fn generate_default_constructor(&mut self, _class: &ClassDecl) -> Result<()> {
         use super::attribute::CodeAttribute;
         
         // Create method info for default constructor
@@ -1429,7 +1506,6 @@ impl Gen {
     /// Visit expression - unified entry point for all expressions
     /// This dispatches to the appropriate visitor method in gen_visitor.rs
     pub fn visit_expr(&mut self, expr: &Expr, env: &GenContext) -> Result<JavacItem> {
-        use super::items_javac::Item;
         match expr {
             Expr::Literal(literal) => self.visit_literal(literal, env),
             Expr::Identifier(ident) => self.visit_ident(ident, env),
@@ -1464,6 +1540,7 @@ impl Gen {
             Stmt::Try(try_stmt) => self.visit_try(try_stmt, env),
             Stmt::Break(break_stmt) => self.visit_break(break_stmt, env),
             Stmt::Continue(continue_stmt) => self.visit_continue(continue_stmt, env),
+            Stmt::Labeled(labeled_stmt) => self.visit_labeled_stmt(labeled_stmt, env),
             _ => {
                 // For statements not yet implemented, just return Ok
                 eprintln!("⚠️  WARNING: Statement type not implemented: {:?}", stmt);
@@ -1472,6 +1549,216 @@ impl Gen {
         }
     }
     
+    /// Push a new loop context for optimized jump resolution
+    pub fn push_loop_context(&mut self, label: Option<String>, loop_type: LoopType, start_pc: usize) {
+        let context = LoopContext {
+            label,
+            break_chain: None,
+            continue_chain: None,
+            start_pc,
+            loop_type,
+        };
+        self.loop_context_stack.push(context);
+    }
+    
+    /// Pop the current loop context and return it
+    pub fn pop_loop_context(&mut self) -> Option<LoopContext> {
+        self.loop_context_stack.pop()
+    }
+    
+    /// Get the current (innermost) loop context
+    pub fn current_loop_context(&self) -> Option<&LoopContext> {
+        self.loop_context_stack.last()
+    }
+    
+    /// Get mutable reference to current loop context
+    pub fn current_loop_context_mut(&mut self) -> Option<&mut LoopContext> {
+        self.loop_context_stack.last_mut()
+    }
+    
+    /// Find loop context by label (for labeled break/continue)
+    pub fn find_loop_context_by_label(&mut self, label: &str) -> Option<&mut LoopContext> {
+        self.loop_context_stack.iter_mut()
+            .rev() // Search from innermost to outermost
+            .find(|ctx| ctx.label.as_ref().map_or(false, |l| l == label))
+    }
+    
+    /// Add break jump to appropriate loop context
+    pub fn add_break_jump(&mut self, label: Option<&str>, chain: Box<crate::codegen::chain::Chain>) {
+        if let Some(label) = label {
+            // Labeled break - find specific loop
+            if let Some(loop_ctx) = self.find_loop_context_by_label(label) {
+                loop_ctx.break_chain = crate::codegen::code::Code::merge_chains(
+                    Some(chain), 
+                    loop_ctx.break_chain.take()
+                );
+            } else {
+                eprintln!("⚠️  WARNING: Label '{}' not found for break statement", label);
+            }
+        } else {
+            // Unlabeled break - use innermost loop
+            if let Some(loop_ctx) = self.current_loop_context_mut() {
+                loop_ctx.break_chain = crate::codegen::code::Code::merge_chains(
+                    Some(chain), 
+                    loop_ctx.break_chain.take()
+                );
+            } else {
+                eprintln!("⚠️  WARNING: No loop context found for break statement");
+            }
+        }
+    }
+    
+    /// Add continue jump to appropriate loop context
+    pub fn add_continue_jump(&mut self, label: Option<&str>, chain: Box<crate::codegen::chain::Chain>) {
+        if let Some(label) = label {
+            // Labeled continue - find specific loop
+            if let Some(loop_ctx) = self.find_loop_context_by_label(label) {
+                loop_ctx.continue_chain = crate::codegen::code::Code::merge_chains(
+                    Some(chain), 
+                    loop_ctx.continue_chain.take()
+                );
+            } else {
+                eprintln!("⚠️  WARNING: Label '{}' not found for continue statement", label);
+            }
+        } else {
+            // Unlabeled continue - use innermost loop
+            if let Some(loop_ctx) = self.current_loop_context_mut() {
+                loop_ctx.continue_chain = crate::codegen::code::Code::merge_chains(
+                    Some(chain), 
+                    loop_ctx.continue_chain.take()
+                );
+            } else {
+                eprintln!("⚠️  WARNING: No loop context found for continue statement");
+            }
+        }
+    }
+}
+
+impl LoopScopeManager {
+    /// Create a new scope manager
+    pub fn new() -> Self {
+        Self {
+            scope_stack: Vec::new(),
+            current_depth: 0,
+        }
+    }
+    
+    /// Push a new scope context
+    pub fn push_scope(&mut self, start_pc: usize, is_loop_scope: bool, loop_type: Option<LoopType>, label: Option<String>, max_locals: u16) -> u16 {
+        let scope_id = self.current_depth;
+        let context = ScopeContext {
+            scope_id,
+            start_pc,
+            local_vars: Vec::new(),
+            prev_max_locals: max_locals,
+            is_loop_scope,
+            loop_type,
+            label,
+        };
+        self.scope_stack.push(context);
+        self.current_depth += 1;
+        scope_id
+    }
+    
+    /// Pop the current scope and return finalized local variables
+    pub fn pop_scope(&mut self, end_pc: usize) -> Option<(ScopeContext, Vec<ScopedLocalVar>)> {
+        if let Some(mut context) = self.scope_stack.pop() {
+            self.current_depth = self.current_depth.saturating_sub(1);
+            
+            // Finalize all local variables in this scope
+            for var in &mut context.local_vars {
+                if var.length == 0 {
+                    var.length = end_pc - var.start_pc;
+                }
+            }
+            
+            let finalized_vars = context.local_vars.clone();
+            Some((context, finalized_vars))
+        } else {
+            None
+        }
+    }
+    
+    /// Add a local variable to the current scope
+    pub fn add_local_var(&mut self, name: String, type_desc: String, slot: u16, start_pc: usize) -> std::result::Result<(), String> {
+        if let Some(current_scope) = self.scope_stack.last_mut() {
+            let scoped_var = ScopedLocalVar {
+                name,
+                type_desc,
+                slot,
+                start_pc,
+                length: 0, // Will be set when scope ends
+            };
+            current_scope.local_vars.push(scoped_var);
+            Ok(())
+        } else {
+            Err("No active scope to add local variable".to_string())
+        }
+    }
+    
+    /// Find the scope containing a specific label
+    pub fn find_labeled_scope(&self, label: &str) -> Option<&ScopeContext> {
+        self.scope_stack.iter()
+            .rev() // Search from innermost to outermost
+            .find(|ctx| ctx.label.as_ref().map_or(false, |l| l == label))
+    }
+    
+    /// Get the current (innermost) scope
+    pub fn current_scope(&self) -> Option<&ScopeContext> {
+        self.scope_stack.last()
+    }
+    
+    /// Get mutable reference to current scope
+    pub fn current_scope_mut(&mut self) -> Option<&mut ScopeContext> {
+        self.scope_stack.last_mut()
+    }
+    
+    /// Get the depth of the current scope
+    pub fn scope_depth(&self) -> u16 {
+        self.current_depth
+    }
+    
+    /// Check if we are currently in a loop scope
+    pub fn in_loop_scope(&self) -> bool {
+        self.scope_stack.iter().any(|ctx| ctx.is_loop_scope)
+    }
+    
+    /// Get the innermost loop scope
+    pub fn current_loop_scope(&self) -> Option<&ScopeContext> {
+        self.scope_stack.iter()
+            .rev()
+            .find(|ctx| ctx.is_loop_scope)
+    }
+    
+    /// Calculate local variable table entries for all finalized scopes
+    pub fn get_local_var_table_entries(&self) -> Vec<(String, String, u16, usize, usize)> {
+        let mut entries = Vec::new();
+        
+        for scope in &self.scope_stack {
+            for var in &scope.local_vars {
+                if var.length > 0 { // Only include finalized variables
+                    entries.push((
+                        var.name.clone(),
+                        var.type_desc.clone(),
+                        var.slot,
+                        var.start_pc,
+                        var.length,
+                    ));
+                }
+            }
+        }
+        
+        entries
+    }
+    
+    /// Clear all scopes (for method end)
+    pub fn clear_all_scopes(&mut self) {
+        self.scope_stack.clear();
+        self.current_depth = 0;
+    }
+}
+
+impl Gen {
     /// Check if bytecode contains conditional branch instructions that require StackMapTable
     fn has_conditional_branches(&self, bytecode: &[u8]) -> bool {
         use super::opcodes;

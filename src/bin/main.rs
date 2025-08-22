@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use anyhow::Result;
-use tolc::parser::parse_tol;
+use tolc::Config;
+use tolc::parser::{parse_tol, parse_java};
 use tolc::codegen::generate_bytecode;
 use std::fs;
 
@@ -16,9 +17,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile a .tol file to .class files
+    /// Compile Java source file(s) to .class files
     Compile {
-        /// Input .tol file
+        /// Input Java source file (.java) or .tol file (legacy)
         #[arg(value_name = "FILE")]
         input: PathBuf,
         
@@ -42,9 +43,9 @@ enum Commands {
         no_frames: bool,
     },
     
-    /// Parse a .tol file and show the AST
+    /// Parse Java source file and show the AST
     Parse {
-        /// Input .tol file
+        /// Input Java source file (.java) or .tol file (legacy)
         #[arg(value_name = "FILE")]
         input: PathBuf,
         
@@ -88,9 +89,6 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target
         println!("Compiling {}...", input.display());
     }
     
-    let source = fs::read_to_string(input)?;
-    let ast = parse_tol(&source)?;
-    
     let default_output = PathBuf::from(".");
     let output_dir = output.unwrap_or(&default_output);
     if !output_dir.exists() {
@@ -99,7 +97,7 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target
     
     let output_str = output_dir.to_string_lossy();
 
-    let mut config = tolc::config::Config::default()
+    let mut config = Config::default()
         .with_target_java_version(target_version)
         .with_verbose(verbose)
         .with_output_dir(output_dir.clone());
@@ -109,7 +107,25 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target
 
     config.validate()?;
 
-    generate_bytecode(&ast, &output_str, &config)?;
+    // Determine file type and use appropriate compilation method
+    let input_str = input.to_string_lossy();
+    
+    if input_str.ends_with(".java") {
+        // Use new Java compilation pipeline
+        tolc::compile_file(&input_str, &output_str, &config)
+            .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
+    } else if input_str.ends_with(".tol") {
+        // Use legacy .tol compilation
+        if verbose {
+            println!("Note: Using legacy .tol compilation. Consider using .java files for full pipeline support.");
+        }
+        
+        let source = fs::read_to_string(input)?;
+        let ast = parse_tol(&source)?;
+        generate_bytecode(&ast, &output_str, &config)?;
+    } else {
+        return Err(anyhow::anyhow!("Unsupported file type. Expected .java or .tol file."));
+    }
     
     if verbose {
         println!("Compilation successful! Output directory: {}", output_dir.display());
@@ -120,7 +136,16 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target
 
 fn parse_file(input: &PathBuf, detailed: bool) -> Result<()> {
     let source = fs::read_to_string(input)?;
-    let ast = parse_tol(&source)?;
+    let input_str = input.to_string_lossy();
+    
+    let ast = if input_str.ends_with(".java") {
+        parse_java(&source)?
+    } else if input_str.ends_with(".tol") {
+        println!("Note: Parsing legacy .tol file. Consider using .java files.");
+        parse_tol(&source)?
+    } else {
+        return Err(anyhow::anyhow!("Unsupported file type. Expected .java or .tol file."));
+    };
     
     if detailed {
         println!("{:#?}", ast);

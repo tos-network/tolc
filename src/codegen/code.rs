@@ -4,14 +4,10 @@
 //! javac Code.java, providing centralized bytecode generation, offset calculation,
 //! and jump resolution mechanisms.
 
-use crate::ast::TypeRef;
-use crate::error::Result;
 use crate::codegen::{
     opcodes,
-    pending_jumps::{PendingJumpsManager, JumpChain},
-    constant_optimizer::{ConstantOptimizer, ConstantInstruction},
+    pending_jumps::PendingJumpsManager,
 };
-use std::collections::HashMap;
 
 /// Stack state tracking for StackMapTable generation (javac State equivalent)
 #[derive(Debug, Clone)]
@@ -519,7 +515,7 @@ impl Code {
     pub fn resolve_optimized(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>, target: u16) {
         if let Some(chain) = chain {
             // Advanced resolution with goto optimization
-            for mut current in chain.iter() {
+            for current in chain.iter() {
                 let mut actual_target = target;
 
                 // Follow goto chains for optimization (javac behavior)
@@ -627,7 +623,7 @@ impl Code {
     pub fn resolve_chain(&mut self, chain: Box<crate::codegen::chain::Chain>, target: u16) {
         for pc in chain.iter() {
             // Calculate the jump offset
-            let offset = if target >= self.cp as u16 {
+            let _offset = if target >= self.cp as u16 {
                 target
             } else {
                 // Check if target is a goto instruction for optimization
@@ -673,6 +669,11 @@ impl Code {
         crate::codegen::chain::ChainOps::merge(chain1, chain2)
     }
     
+    /// Create a new empty chain
+    pub fn new_chain(&self) -> Box<crate::codegen::chain::Chain> {
+        Box::new(crate::codegen::chain::Chain::new(self.cp as u16, self.state.stacksize, self.max_locals))
+    }
+    
     /// Get current jump context for chain operations
     pub fn jump_context(&self) -> crate::codegen::chain::JumpContext {
         crate::codegen::chain::JumpContext::new(
@@ -685,13 +686,21 @@ impl Code {
     
     /// End scopes up to the given limit (JavaC endScopes equivalent)
     pub fn end_scopes(&mut self, limit: u16) {
-        // For now, this is a placeholder that matches the javac pattern
-        // In a full implementation, this would handle local variable scope cleanup
-        // and emit any necessary cleanup bytecode
-        if self.debug_code {
-            println!("End scopes to limit: {}", limit);
+        // JavaC pattern: restore max_locals to the given limit
+        // This effectively deallocates local variables allocated after the limit
+        if self.max_locals > limit {
+            if self.debug_code {
+                println!("End scopes: reducing max_locals from {} to {}", self.max_locals, limit);
+            }
+            self.max_locals = limit;
         }
-        // TODO: Implement proper scope management when we add local variable tracking
+        
+        // Note: This works in conjunction with the enhanced scope manager
+        // The scope manager handles detailed local variable tracking
+        // while this method handles the basic max_locals restoration
+        if self.debug_code {
+            println!("Scope ended at limit: {}", limit);
+        }
     }
     
     /// Negate a conditional jump opcode (javac negate)
@@ -777,7 +786,7 @@ impl Code {
     // ============================================================================
     
     /// Update stack state for emitop1 instructions
-    fn update_stack_for_op1(&mut self, op: u8, od: u8) {
+    fn update_stack_for_op1(&mut self, op: u8, _od: u8) {
         match op {
             opcodes::BIPUSH => {
                 self.state.push(Type::Int);
@@ -884,8 +893,14 @@ impl Code {
             opcodes::IFEQ..=opcodes::IF_ACMPNE => {
                 // Conditional jumps pop their operands
                 match op {
-                    opcodes::IFEQ..=opcodes::IFNONNULL => self.state.pop(1),
-                    opcodes::IF_ICMPEQ..=opcodes::IF_ACMPNE => self.state.pop(2),
+                    opcodes::IFEQ..=opcodes::IFNONNULL => {
+                        // Check if it's a two-operand comparison
+                        if op >= opcodes::IF_ICMPEQ && op <= opcodes::IF_ACMPNE {
+                            self.state.pop(2);
+                        } else {
+                            self.state.pop(1);
+                        }
+                    }
                     _ => {}
                 }
             }

@@ -2064,7 +2064,7 @@ impl Parser {
         while self.match_token(&Token::PipePipe) {
             let right = self.parse_logical_and_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
-            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::Or, right: Box::new(right), span });
+            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::LogicalOr, right: Box::new(right), span });
         }
         Ok(expr)
     }
@@ -2074,7 +2074,7 @@ impl Parser {
         while self.match_token(&Token::AndAnd) {
             let right = self.parse_bitwise_or_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
-            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::And, right: Box::new(right), span });
+            expr = Expr::Binary(BinaryExpr { left: Box::new(expr), operator: BinaryOp::LogicalAnd, right: Box::new(right), span });
         }
         Ok(expr)
     }

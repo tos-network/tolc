@@ -4,7 +4,7 @@
 //! following the exact same patterns as Oracle's javac Attr.java.
 
 use crate::ast::*;
-use crate::error::{Result, Error};
+use crate::error::Result;
 use super::const_fold_javac::ConstFoldJavaC;
 use super::symtab::Symtab;
 use super::types::Types;
@@ -50,7 +50,7 @@ impl AttrOptimizer {
             Expr::Cast(cast) => self.attrib_cast(cast),
             
             // Literal expressions (already constants)
-            Expr::Literal(lit) => Ok(expr.clone()),
+            Expr::Literal(_lit) => Ok(expr.clone()),
             
             // Identifier expressions
             Expr::Identifier(id) => self.attrib_identifier(id),
@@ -239,7 +239,7 @@ impl AttrOptimizer {
             
             "Integer.valueOf" | "Long.valueOf" | "Float.valueOf" | "Double.valueOf" if args.len() == 1 => {
                 // Optimize wrapper valueOf for constants
-                if let Expr::Literal(lit) = &args[0] {
+                if let Expr::Literal(_lit) = &args[0] {
                     // For compile-time constants, keep as literals (autoboxing will handle at runtime)
                     return Ok(args[0].clone());
                 }

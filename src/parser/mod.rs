@@ -52,11 +52,22 @@ use crate::error::Result;
 //     pub mod new_expr;
 // }
 
-/// Parse a .tol source file into an AST
+/// Parse Java source code into an AST
+/// 
+/// This is the main entry point for parsing Java source files (.java)
+/// Compatible with standard Java syntax
+pub fn parse_java(source: &str) -> Result<Ast> { 
+    parser::parse(source) 
+}
+
+/// Parse a .tol source file into an AST (legacy support)
 pub fn parse_tol(source: &str) -> Result<Ast> { parser::parse(source) }
 
 /// Lenient parse: produce best-effort AST even if syntax errors occurred.
 pub fn parse_tol_lenient(source: &str) -> Result<Ast> { Parser::new(source)?.parse_lenient() }
+
+/// Lenient parse for Java source
+pub fn parse_java_lenient(source: &str) -> Result<Ast> { Parser::new(source)?.parse_lenient() }
 
 /// Parse and verify a .tol source file
 pub fn parse_and_verify(source: &str) -> Result<Ast> {

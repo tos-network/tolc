@@ -4,7 +4,7 @@
 //! providing type operations, conversions, and subtyping relationships.
 
 use crate::ast::{TypeEnum, PrimitiveType, ReferenceType, BinaryOp};
-use super::symtab::{Symtab, Symbol, MethodSymbol};
+use super::symtab::Symtab;
 use crate::error::{Result, Error};
 
 /// Types system - 100% JavaC Types equivalent
@@ -232,8 +232,8 @@ impl Types {
                 })
             }
             
-            // Logical operations
-            BinaryOp::And | BinaryOp::Or => {
+            // Short-circuit logical operations
+            BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
                 if matches!(left, TypeEnum::Primitive(PrimitiveType::Boolean)) && 
                    matches!(right, TypeEnum::Primitive(PrimitiveType::Boolean)) {
                     Ok(BinaryOpResult {
@@ -248,13 +248,22 @@ impl Types {
                 }
             }
             
-            // Bitwise operations
+            // Bitwise operations (including bitwise AND/OR which can work on boolean or integral types)
             BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
-                if self.symtab.is_integral(left) && self.symtab.is_integral(right) {
+                if matches!(left, TypeEnum::Primitive(PrimitiveType::Boolean)) && 
+                   matches!(right, TypeEnum::Primitive(PrimitiveType::Boolean)) {
+                    // Boolean bitwise operations
+                    Ok(BinaryOpResult {
+                        result_type: self.symtab.boolean_type.clone(),
+                        left_conversion: ConversionKind::Identity,
+                        right_conversion: ConversionKind::Identity,
+                    })
+                } else if self.symtab.is_integral(left) && self.symtab.is_integral(right) {
+                    // Integral bitwise operations
                     self.arithmetic_op_type(left, right)
                 } else {
                     Err(Error::CodeGen { 
-                        message: format!("Bitwise operations require integral operands, got {:?} and {:?}", left, right) 
+                        message: format!("Bitwise operations require boolean or integral operands, got {:?} and {:?}", left, right) 
                     })
                 }
             }

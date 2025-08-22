@@ -10,6 +10,7 @@ release/
 tests/com/
 *.log
 *.bak
+dev.md
 
 
 ## Test/bench artifacts

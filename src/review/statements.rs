@@ -3579,9 +3579,17 @@ fn infer_expr_primitive_or_string(expr: &Expr) -> Option<&'static str> {
                 }
                 B::Sub | B::Mul | B::Div | B::Mod => numeric_promotion(lt, rt),
                 B::Lt | B::Le | B::Gt | B::Ge | B::Eq | B::Ne => Some("boolean"),
+                B::LogicalAnd | B::LogicalOr => {
+                    // Short-circuit logical operations always return boolean
+                    Some("boolean")
+                }
                 B::And | B::Or | B::Xor => {
-                    // boolean short-circuit or bitwise? approximate as boolean if both boolean
-                    if matches!(lt, Some("boolean")) && matches!(rt, Some("boolean")) { Some("boolean") } else { None }
+                    // bitwise operations: boolean if both boolean, otherwise follow integral promotion
+                    if matches!(lt, Some("boolean")) && matches!(rt, Some("boolean")) { 
+                        Some("boolean") 
+                    } else { 
+                        numeric_promotion(lt, rt) 
+                    }
                 }
                 B::LShift | B::RShift | B::URShift => {
                     // result is left operand type after integral promotion

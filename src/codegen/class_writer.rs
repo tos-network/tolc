@@ -4,20 +4,7 @@
 //! code generation architecture to convert AST declarations into Java bytecode.
 
 use super::gen::Gen;
-use super::code::Code;
-use super::items_javac::Items;
-use crate::codegen::{
-    ClassFile,
-    flag::access_flags,
-    annotation::generate_annotation,
-    attribute::{AttributeInfo, NamedAttribute},
-    field::FieldInfo,
-    method::MethodInfo,
-    descriptor::type_to_descriptor,
-    modifiers_to_flags,
-    constpool::ConstantPool,
-    typed_index::ConstPoolIndex,
-};
+use crate::codegen::ClassFile;
 use crate::config::Config;
 use crate::ast::*;
 use crate::error::Result;
