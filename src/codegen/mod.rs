@@ -137,7 +137,7 @@ use std::path::Path;
 use std::collections::HashMap;
 
 /// Generate Java bytecode from an AST
-pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result<()> {
+pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signatures: Option<&std::collections::HashMap<String, String>>) -> Result<()> {
     let output_path = Path::new(output_dir);
     
     // Ensure output directory exists
@@ -146,22 +146,42 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
     // Build compilation-unit level annotation retention index
     let cu_retention = build_annotation_retention_index_from_cu(ast);
 
+    // Extract all type declarations (including inner classes)
+    let (all_type_decls, inner_class_relationships) = extract_all_type_declarations(ast);
+
     // Generate bytecode for each type declaration
-    for type_decl in &ast.type_decls {
+    for (type_decl, parent_class_name) in all_type_decls {
         match type_decl {
             TypeDecl::Class(class) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
                 class_writer.set_all_types(ast.type_decls.clone());
+                if let Some(sigs) = signatures {
+                    class_writer.set_generic_signatures(sigs);
+                }
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_class(class)?;
+                
+                // Set inner class relationships for InnerClasses attribute generation
+                class_writer.set_inner_class_relationships(&inner_class_relationships);
+                
+                // Set parent class name for inner class generation
+                class_writer.set_parent_class_name(parent_class_name.clone());
+                
+                class_writer.generate_class(&class)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
                     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
-                let class_file_path = output_path.join(format!("{}.class", class.name));
+                
+                // Determine the class file name (for inner classes: OuterClass$InnerClass.class)
+                let class_file_name = if let Some(outer_class) = &parent_class_name {
+                    format!("{}${}.class", outer_class, class.name)
+                } else {
+                    format!("{}.class", class.name)
+                };
+                let class_file_path = output_path.join(class_file_name);
                 let bytes = class_file_to_bytes(&class_file);
                 std::fs::write(&class_file_path, bytes)?;
             }
@@ -173,7 +193,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_interface(interface)?;
+                class_writer.generate_interface(&interface)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
                     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
@@ -188,7 +208,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_enum(enum_decl)?;
+                class_writer.generate_enum(&enum_decl)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
                     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
@@ -199,7 +219,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
             TypeDecl::Annotation(annotation) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
-                class_writer.generate_annotation(annotation)?;
+                class_writer.generate_annotation(&annotation)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
                     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
@@ -213,24 +233,192 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config) -> Result
     Ok(())
 }
 
+/// Inner class relationship information
+#[derive(Debug, Clone)]
+pub struct InnerClassInfo {
+    pub inner_class_name: String,
+    pub outer_class_name: String,
+    pub simple_name: String,
+    pub access_flags: u16,
+}
+
+/// Extract all type declarations from an AST, including nested inner classes
+/// Returns a tuple of (types, inner_class_relationships)
+fn extract_all_type_declarations(ast: &Ast) -> (Vec<(TypeDecl, Option<String>)>, Vec<InnerClassInfo>) {
+    let mut all_types = Vec::new();
+    let mut inner_class_info = Vec::new();
+    
+    // Process top-level type declarations
+    for type_decl in &ast.type_decls {
+        all_types.push((type_decl.clone(), None));
+        
+        // Extract inner classes from this type declaration
+        extract_inner_classes_from_type_decl(type_decl, None, &mut all_types, &mut inner_class_info);
+    }
+    
+    (all_types, inner_class_info)
+}
+
+/// Recursively extract inner classes from a type declaration
+fn extract_inner_classes_from_type_decl(
+    type_decl: &TypeDecl, 
+    parent_class_name: Option<String>, 
+    all_types: &mut Vec<(TypeDecl, Option<String>)>,
+    inner_class_info: &mut Vec<InnerClassInfo>
+) {
+    match type_decl {
+        TypeDecl::Class(class) => {
+            let current_class_name = if let Some(parent) = &parent_class_name {
+                format!("{}${}", parent, class.name)
+            } else {
+                class.name.clone()
+            };
+            
+            // Extract nested type declarations from class members
+            for member in &class.body {
+                if let crate::ast::ClassMember::TypeDecl(nested_type) = member {
+                    let nested_class_name = match nested_type {
+                        TypeDecl::Class(nested_class) => &nested_class.name,
+                        TypeDecl::Interface(nested_interface) => &nested_interface.name,
+                        TypeDecl::Enum(nested_enum) => &nested_enum.name,
+                        TypeDecl::Annotation(nested_annotation) => &nested_annotation.name,
+                    };
+                    
+                    // Calculate access flags based on modifiers
+                    let access_flags = calculate_access_flags(nested_type);
+                    
+                    // Add inner class relationship info
+                    if let Some(parent) = &parent_class_name {
+                        // This is a nested inner class (e.g., OuterClass$InnerClass$NestedClass)
+                        inner_class_info.push(InnerClassInfo {
+                            inner_class_name: format!("{}${}", current_class_name, nested_class_name),
+                            outer_class_name: current_class_name.clone(),
+                            simple_name: nested_class_name.clone(),
+                            access_flags,
+                        });
+                    } else {
+                        // This is a direct inner class (e.g., OuterClass$InnerClass)
+                        inner_class_info.push(InnerClassInfo {
+                            inner_class_name: format!("{}${}", class.name, nested_class_name),
+                            outer_class_name: class.name.clone(),
+                            simple_name: nested_class_name.clone(),
+                            access_flags,
+                        });
+                    }
+                    
+                    all_types.push((nested_type.clone(), Some(current_class_name.clone())));
+                    extract_inner_classes_from_type_decl(nested_type, Some(current_class_name.clone()), all_types, inner_class_info);
+                }
+            }
+        }
+        TypeDecl::Interface(interface) => {
+            let current_interface_name = if let Some(parent) = &parent_class_name {
+                format!("{}${}", parent, interface.name)
+            } else {
+                interface.name.clone()
+            };
+            
+            // Extract nested type declarations from interface members
+            for member in &interface.body {
+                if let crate::ast::InterfaceMember::TypeDecl(nested_type) = member {
+                    all_types.push((nested_type.clone(), Some(current_interface_name.clone())));
+                    extract_inner_classes_from_type_decl(nested_type, Some(current_interface_name.clone()), all_types, inner_class_info);
+                }
+            }
+        }
+        TypeDecl::Enum(enum_decl) => {
+            let current_enum_name = if let Some(parent) = &parent_class_name {
+                format!("{}${}", parent, enum_decl.name)
+            } else {
+                enum_decl.name.clone()
+            };
+            
+            // Enums can also have nested type declarations
+            for member in &enum_decl.body {
+                if let crate::ast::ClassMember::TypeDecl(nested_type) = member {
+                    all_types.push((nested_type.clone(), Some(current_enum_name.clone())));
+                    extract_inner_classes_from_type_decl(nested_type, Some(current_enum_name.clone()), all_types, inner_class_info);
+                }
+            }
+        }
+        TypeDecl::Annotation(_) => {
+            // Annotations typically don't have complex nested types for now
+        }
+    }
+}
+
+/// Calculate access flags for a type declaration based on its modifiers
+fn calculate_access_flags(type_decl: &TypeDecl) -> u16 {
+    let modifiers = match type_decl {
+        TypeDecl::Class(class) => &class.modifiers,
+        TypeDecl::Interface(interface) => &interface.modifiers,
+        TypeDecl::Enum(enum_decl) => &enum_decl.modifiers,
+        TypeDecl::Annotation(annotation) => &annotation.modifiers,
+    };
+    
+    let mut flags = 0u16;
+    
+    for modifier in modifiers {
+        match modifier {
+            crate::ast::Modifier::Public => flags |= 0x0001, // ACC_PUBLIC
+            crate::ast::Modifier::Private => flags |= 0x0002, // ACC_PRIVATE
+            crate::ast::Modifier::Protected => flags |= 0x0004, // ACC_PROTECTED
+            crate::ast::Modifier::Static => flags |= 0x0008, // ACC_STATIC
+            crate::ast::Modifier::Final => flags |= 0x0010, // ACC_FINAL
+            crate::ast::Modifier::Abstract => flags |= 0x0400, // ACC_ABSTRACT
+            _ => {} // Other modifiers not relevant for inner class access flags
+        }
+    }
+    
+    // For interfaces, add ACC_INTERFACE flag
+    if matches!(type_decl, TypeDecl::Interface(_)) {
+        flags |= 0x0200; // ACC_INTERFACE
+    }
+    
+    // For annotations, add ACC_ANNOTATION flag  
+    if matches!(type_decl, TypeDecl::Annotation(_)) {
+        flags |= 0x2000; // ACC_ANNOTATION
+    }
+    
+    // For enums, add ACC_ENUM flag
+    if matches!(type_decl, TypeDecl::Enum(_)) {
+        flags |= 0x4000; // ACC_ENUM
+    }
+    
+    flags
+}
+
 /// Generate Java bytecode from an AST and return as Vec<u8> (in-memory compilation)
 /// Returns the bytecode of the first type declaration found
-pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config) -> Result<Vec<u8>> {
+pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option<&std::collections::HashMap<String, String>>) -> Result<Vec<u8>> {
     // Build compilation-unit level annotation retention index
     let cu_retention = build_annotation_retention_index_from_cu(ast);
 
+    // Extract all type declarations (including inner classes) 
+    let (all_type_decls, inner_class_relationships) = extract_all_type_declarations(ast);
+
     // Generate bytecode for the first type declaration
-    for type_decl in &ast.type_decls {
+    for (type_decl, parent_class_name) in all_type_decls.iter().take(1) {
         match type_decl {
             TypeDecl::Class(class) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
                 class_writer.set_all_types(ast.type_decls.clone());
+                if let Some(sigs) = signatures {
+                    class_writer.set_generic_signatures(sigs);
+                }
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_class(class)?;
+                
+                // Set inner class relationships for InnerClasses attribute generation
+                class_writer.set_inner_class_relationships(&inner_class_relationships);
+                
+                // Set parent class name for inner class generation
+                class_writer.set_parent_class_name(parent_class_name.clone());
+                
+                class_writer.generate_class(&class)?;
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
@@ -246,7 +434,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config) -> Result<Vec<u8>>
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_interface(interface)?;
+                class_writer.generate_interface(&interface)?;
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
@@ -261,7 +449,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config) -> Result<Vec<u8>>
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_enum(enum_decl)?;
+                class_writer.generate_enum(&enum_decl)?;
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
@@ -276,7 +464,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config) -> Result<Vec<u8>>
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
                 }
-                class_writer.generate_annotation(annotation)?;
+                class_writer.generate_annotation(&annotation)?;
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)

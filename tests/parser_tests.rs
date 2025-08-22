@@ -190,21 +190,23 @@ class A {
 }
 
 #[test]
-fn lambda_syntax_is_rejected() {
+fn lambda_syntax_is_accepted() {
     let source = r#"
 package p;
 class A { void m(){ java.util.List<Integer> xs = null; xs.forEach(x -> {}); } }
 "#;
-    let err = tolc::parser::parse_tol(source).unwrap_err().to_string();
-    assert!(err.contains("lambda expressions are not supported"), "{err}");
+    let ast = tolc::parser::parse_tol(source).unwrap();
+    // Lambda expressions should now be successfully parsed
+    assert!(ast.type_decls.len() == 1);
 }
 
 #[test]
-fn method_reference_syntax_is_rejected() {
+fn method_reference_syntax_is_accepted() {
     let source = r#"
 package p;
 class A { void m(){ java.util.function.Function<String,Integer> f = String::length; } }
 "#;
-    let err = tolc::parser::parse_tol(source).unwrap_err().to_string();
-    assert!(err.contains("method references are not supported"), "{err}");
+    let ast = tolc::parser::parse_tol(source).unwrap();
+    // Method references should now be successfully parsed
+    assert!(ast.type_decls.len() == 1);
 }

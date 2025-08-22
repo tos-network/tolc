@@ -556,6 +556,8 @@ pub enum Expr {
     Parenthesized(Box<Expr>),
     // Used for annotation element array values like @Target({A,B})
     ArrayInitializer(Vec<Expr>),
+    Lambda(LambdaExpr),
+    MethodReference(MethodReferenceExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -674,6 +676,34 @@ pub struct NewExpr {
     pub target_type: TypeRef,
     pub arguments: Vec<Expr>,
     pub anonymous_body: Option<ClassDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaExpr {
+    pub parameters: Vec<LambdaParameter>,
+    pub body: LambdaBody,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaParameter {
+    pub name: String,
+    pub type_ref: Option<TypeRef>, // None for inferred types
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LambdaBody {
+    Expression(Box<Expr>),
+    Block(Block),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodReferenceExpr {
+    pub target: Option<Box<Expr>>, // None for static references like Class::method
+    pub method_name: String,
+    pub is_constructor: bool, // true for Class::new
     pub span: Span,
 }
 

@@ -3,7 +3,7 @@
 //! This module implements the exact same type system as Oracle's javac,
 //! providing type operations, conversions, and subtyping relationships.
 
-use crate::ast::{TypeEnum, PrimitiveType, ReferenceType, BinaryOp};
+use crate::ast::{TypeEnum, PrimitiveType, ReferenceType, BinaryOp, TypeExt};
 use super::symtab::Symtab;
 use crate::error::{Result, Error};
 
@@ -116,15 +116,21 @@ impl Types {
                 }
             }
             
-            // Boxing/Unboxing (simplified)
-            (TypeEnum::Primitive(_), TypeEnum::Reference(_)) => {
-                // TODO: Check if reference type is wrapper for primitive
-                ConversionKind::Boxing
+            // Boxing/Unboxing (aligned with javac)
+            (TypeEnum::Primitive(prim), TypeEnum::Reference(ref_type)) => {
+                if Self::is_wrapper_for_primitive(ref_type, prim) {
+                    ConversionKind::Boxing
+                } else {
+                    ConversionKind::Illegal
+                }
             }
             
-            (TypeEnum::Reference(_), TypeEnum::Primitive(_)) => {
-                // TODO: Check if reference type is wrapper for primitive
-                ConversionKind::Unboxing
+            (TypeEnum::Reference(ref_type), TypeEnum::Primitive(prim)) => {
+                if Self::is_wrapper_for_primitive(ref_type, prim) {
+                    ConversionKind::Unboxing
+                } else {
+                    ConversionKind::Illegal
+                }
             }
             
             _ => ConversionKind::Illegal,
@@ -174,18 +180,32 @@ impl Types {
     
     /// Check subtyping relationship - JavaC isSubtype equivalent
     pub fn is_subtype(&self, sub: &TypeEnum, sup: &TypeEnum) -> bool {
-        // Simplified subtyping check
+        // JavaC-aligned subtyping check
         match (sub, sup) {
-            // All reference types are subtypes of Object
+            // All reference types are subtypes of Object (java.lang.Object rule)
             (TypeEnum::Reference(_), TypeEnum::Reference(ReferenceType::Class(name))) 
                 if name == "java/lang/Object" => true,
             
-            // String is subtype of Object
+            // Array types are reference types, so they're subtypes of Object
+            (TypeEnum::Reference(ReferenceType::Array(_)), TypeEnum::Reference(ReferenceType::Class(name)))
+                if name == "java/lang/Object" => true,
+            
+            // String hierarchy
             (TypeEnum::Reference(ReferenceType::Class(sub_name)), TypeEnum::Reference(ReferenceType::Class(sup_name))) => {
-                if sub_name == "java/lang/String" && sup_name == "java/lang/Object" {
-                    true
-                } else {
-                    sub_name == sup_name
+                Self::is_class_subtype(sub_name, sup_name)
+            }
+            
+            // Array covariance: T[] <: S[] if T <: S (for reference types)
+            (TypeEnum::Reference(ReferenceType::Array(sub_elem)), TypeEnum::Reference(ReferenceType::Array(sup_elem))) => {
+                let sub_elem_type = sub_elem.as_type_enum();
+                let sup_elem_type = sup_elem.as_type_enum();
+                
+                // Array covariance only for reference types, not primitives
+                match (&sub_elem_type, &sup_elem_type) {
+                    (TypeEnum::Reference(_), TypeEnum::Reference(_)) => {
+                        self.is_subtype(&sub_elem_type, &sup_elem_type)
+                    }
+                    _ => self.same_type(&sub_elem_type, &sup_elem_type)
                 }
             }
             
@@ -193,9 +213,54 @@ impl Types {
         }
     }
     
+    /// Check class subtyping relationship (aligned with javac)
+    fn is_class_subtype(sub_name: &str, sup_name: &str) -> bool {
+        // Basic Java class hierarchy
+        match (sub_name, sup_name) {
+            // Everything extends Object
+            (_, "java/lang/Object") => true,
+            
+            // String extends Object
+            ("java/lang/String", "java/lang/Object") => true,
+            
+            // Wrapper class hierarchies
+            ("java/lang/Boolean", "java/lang/Object") => true,
+            ("java/lang/Byte", "java/lang/Number") | ("java/lang/Byte", "java/lang/Object") => true,
+            ("java/lang/Short", "java/lang/Number") | ("java/lang/Short", "java/lang/Object") => true,
+            ("java/lang/Integer", "java/lang/Number") | ("java/lang/Integer", "java/lang/Object") => true,
+            ("java/lang/Long", "java/lang/Number") | ("java/lang/Long", "java/lang/Object") => true,
+            ("java/lang/Float", "java/lang/Number") | ("java/lang/Float", "java/lang/Object") => true,
+            ("java/lang/Double", "java/lang/Number") | ("java/lang/Double", "java/lang/Object") => true,
+            ("java/lang/Character", "java/lang/Object") => true,
+            
+            // Number extends Object
+            ("java/lang/Number", "java/lang/Object") => true,
+            
+            // Exact match
+            (sub, sup) if sub == sup => true,
+            
+            _ => false,
+        }
+    }
+    
     /// Check supertyping relationship - JavaC isSupertype equivalent
     pub fn is_supertype(&self, sup: &TypeEnum, sub: &TypeEnum) -> bool {
         self.is_subtype(sub, sup)
+    }
+    
+    /// Check if reference type is wrapper for primitive (aligned with javac)
+    fn is_wrapper_for_primitive(ref_type: &ReferenceType, prim: &PrimitiveType) -> bool {
+        match (ref_type, prim) {
+            (ReferenceType::Class(name), PrimitiveType::Boolean) => name == "java/lang/Boolean",
+            (ReferenceType::Class(name), PrimitiveType::Byte) => name == "java/lang/Byte", 
+            (ReferenceType::Class(name), PrimitiveType::Char) => name == "java/lang/Character",
+            (ReferenceType::Class(name), PrimitiveType::Short) => name == "java/lang/Short",
+            (ReferenceType::Class(name), PrimitiveType::Int) => name == "java/lang/Integer",
+            (ReferenceType::Class(name), PrimitiveType::Long) => name == "java/lang/Long",
+            (ReferenceType::Class(name), PrimitiveType::Float) => name == "java/lang/Float",
+            (ReferenceType::Class(name), PrimitiveType::Double) => name == "java/lang/Double",
+            _ => false,
+        }
     }
     
     /// Compute binary operation result type - JavaC equivalent

@@ -10,8 +10,10 @@ release/
 tests/com/
 *.log
 *.bak
-dev.md
-
+Todos.md
+reference/
+reference_*/
+build/
 
 ## Test/bench artifacts
 **/*.profraw

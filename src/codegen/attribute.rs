@@ -187,6 +187,14 @@ impl NamedAttribute {
         Ok(Self { name: ConstPoolIndex::from(name), info: AttributeInfo::PermittedSubclasses(PermittedSubclassesAttribute { classes }) })
     }
 
+    pub fn new_inner_classes_attribute(
+        const_pool: &mut ConstantPool,
+        classes: Vec<InnerClassInfo>,
+    ) -> Result<Self, AttributeCreateError> {
+        let name = const_pool.try_add_utf8("InnerClasses")?;
+        Ok(Self { name: ConstPoolIndex::from(name), info: AttributeInfo::InnerClasses(InnerClassesAttribute { classes }) })
+    }
+
     pub fn to_bytes(&self, const_pool: &ConstantPool) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.name.as_u16().to_be_bytes());

@@ -67,6 +67,21 @@ pub struct Gen {
     
     /// Enhanced scope management for loops and local variables
     pub scope_manager: LoopScopeManager,
+    
+    /// Generic signatures stored during TransTypes phase
+    generic_signatures: Option<std::collections::HashMap<String, String>>,
+    
+    /// Inner class relationships for InnerClasses attribute generation
+    inner_class_relationships: Vec<crate::codegen::InnerClassInfo>,
+    
+    /// Parent class name for inner classes (None for top-level classes)
+    parent_class_name: Option<String>,
+    
+    /// Lambda method counter for generating unique method names
+    pub lambda_counter: usize,
+    
+    /// Bootstrap methods for invokedynamic (simple u16 indices)
+    pub bootstrap_methods: Vec<Vec<u16>>,
 }
 
 
@@ -248,6 +263,11 @@ impl Gen {
             label_env_map: std::collections::HashMap::new(), // Label to environment mapping
             loop_context_stack: Vec::new(),          // Optimized loop context stack
             scope_manager: LoopScopeManager::new(), // Enhanced scope management
+            generic_signatures: None,               // Generic signatures from TransTypes
+            inner_class_relationships: Vec::new(),  // Inner class relationships for InnerClasses attribute
+            parent_class_name: None,                 // Parent class name for inner classes
+            lambda_counter: 0,                       // Lambda method counter for unique names
+            bootstrap_methods: Vec::new(),           // Bootstrap methods for invokedynamic
         }
     }
     
@@ -256,6 +276,21 @@ impl Gen {
         self.class_context.class = Some(class);
         self.class_context.all_types = all_types;
         Ok(())
+    }
+    
+    /// Set generic signatures from TransTypes phase
+    pub fn set_generic_signatures(&mut self, signatures: Option<std::collections::HashMap<String, String>>) {
+        self.generic_signatures = signatures;
+    }
+    
+    /// Set inner class relationships for InnerClasses attribute generation
+    pub fn set_inner_class_relationships(&mut self, relationships: &[crate::codegen::InnerClassInfo]) {
+        self.inner_class_relationships = relationships.to_vec();
+    }
+    
+    /// Set parent class name for inner class generation
+    pub fn set_parent_class_name(&mut self, parent_name: Option<String>) {
+        self.parent_class_name = parent_name;
     }
     
     /// Initialize code buffer for method - 100% JavaC initCode equivalent
@@ -515,6 +550,8 @@ impl Gen {
             Expr::Assignment(assign) => self.visit_assign(assign, &env),
             Expr::Cast(cast) => self.visit_type_cast(cast, &env),
             Expr::ArrayAccess(array) => self.visit_indexed(array, &env),
+            Expr::Lambda(lambda) => self.visit_lambda(lambda, &env),
+            Expr::MethodReference(method_ref) => self.visit_method_reference(method_ref, &env),
             _ => {
                 eprintln!("⚠️  DEBUG: gen_expr: Unsupported expression type: {:?}", optimized_expr);
                 self.with_items(|items| {
@@ -826,14 +863,20 @@ impl Gen {
         // int startpcCrt = initCode(tree, localEnv, fatcode);
         let _startpc = self.init_code(method, &method_env, false)?;
         
-        // Generate method body if present
-        if let Some(ref body) = method.body {
-            self.gen_stmt(&Stmt::Block(body.clone()))?;
-        }
+        // Check if method is native - native methods should not have body generation
+        let is_native = method.modifiers.iter().any(|m| matches!(m, Modifier::Native));
         
-        // Ensure proper return instruction - JavaC pattern from Gen.visitMethodDef
-        if let Some(ref mut code) = self.code {
-            if code.alive {
+        if is_native {
+            // Native methods have no body to generate
+        } else {
+            // Generate method body if present (non-native methods)
+            if let Some(ref body) = method.body {
+                self.gen_stmt(&Stmt::Block(body.clone()))?;
+            }
+            
+            // Ensure proper return instruction - JavaC pattern from Gen.visitMethodDef
+            if let Some(ref mut code) = self.code {
+                if code.alive {
                 match &method.return_type {
                     None => {
                         // Void method - emit return instruction
@@ -856,6 +899,7 @@ impl Gen {
                     }
                 }
             }
+        }
         }
         
         // Create method info and add to class file
@@ -960,7 +1004,25 @@ impl Gen {
         let access_flags = super::modifiers_to_flags(&field.modifiers);
         
         // Create field info
-        let field_info = super::field::FieldInfo::new(access_flags, name_idx, descriptor_idx);
+        let mut field_info = super::field::FieldInfo::new(access_flags, name_idx, descriptor_idx);
+        
+        // Add Signature attribute if field uses generic types
+        if !field.type_ref.type_args.is_empty() {
+            let type_resolver = super::signature::TypeNameResolver::with_default_mappings();
+            let signature = super::signature::type_ref_to_signature(
+                &field.type_ref, 
+                None, // package_name - TODO: pass actual package
+                None, // current_class_name - TODO: pass actual class name
+                &type_resolver
+            );
+            
+            let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+                &mut self.pool, 
+                signature
+            ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create field signature attribute: {}", e)))?;
+            
+            field_info.attributes.push(signature_attr);
+        }
         
         // Add field to class file
         self.class_file.fields.push(field_info);
@@ -1212,12 +1274,32 @@ impl Gen {
             self.class_file.interfaces.push(interface_idx);
         }
         
-        // 5. Generate default constructor if no explicit constructor exists
+        // 5. Add Signature attribute if stored during TransTypes phase
+        if let Some(ref signatures) = self.generic_signatures {
+            let signature_key = format!("class:{}", class.name);
+            if let Some(signature) = signatures.get(&signature_key) {
+                let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+                    &mut self.pool, 
+                    signature.clone()
+                ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create class signature attribute: {}", e)))?;
+                
+                self.class_file.attributes.push(signature_attr);
+                eprintln!("🔧 GEN: Added class signature attribute for '{}'", class.name);
+            }
+        }
+        
+        // 6. Add InnerClasses attribute if this class has inner classes or is an inner class itself
+        self.generate_inner_classes_attribute(&class.name)?;
+        
+        // 6.5. Add synthetic this$0 field for non-static inner classes
+        self.generate_synthetic_this_field(class)?;
+        
+        // 7. Generate default constructor if no explicit constructor exists
         if !self.has_explicit_constructor(class) {
             self.generate_default_constructor(class)?;
         }
         
-        // 6. Generate all methods
+        // 7. Generate all methods
         for member in &class.body {
             match member {
                 ClassMember::Method(method) => {
@@ -1247,6 +1329,9 @@ impl Gen {
             }
         }
         
+        // 8. Generate BootstrapMethods attribute if there are any bootstrap methods
+        self.generate_bootstrap_methods_attribute()?;
+        
         Ok(())
     }
     
@@ -1265,6 +1350,162 @@ impl Gen {
     /// Generate annotation declaration using JavaC patterns
     pub fn generate_annotation_decl(&mut self, _annotation: &AnnotationDecl) -> Result<()> {
         // TODO: Implement annotation generation using JavaC Gen patterns
+        Ok(())
+    }
+    
+    /// Generate InnerClasses attribute if needed
+    fn generate_inner_classes_attribute(&mut self, current_class_name: &str) -> Result<()> {
+        // Find all inner class relationships relevant to this class
+        let mut relevant_inner_classes = Vec::new();
+        
+        for relationship in &self.inner_class_relationships {
+            // Add entries where this class is the outer class (it has inner classes)
+            if relationship.outer_class_name == current_class_name {
+                relevant_inner_classes.push(relationship.clone());
+            }
+            // Add entries where this class is an inner class itself
+            else if relationship.inner_class_name == current_class_name {
+                relevant_inner_classes.push(relationship.clone());
+            }
+        }
+        
+        // Only generate InnerClasses attribute if there are relevant relationships
+        if !relevant_inner_classes.is_empty() {
+            let mut inner_class_infos = Vec::new();
+            let num_relationships = relevant_inner_classes.len();
+            
+            for relationship in relevant_inner_classes {
+                // Add inner class to constant pool
+                let inner_class_idx = self.pool.add_class(&relationship.inner_class_name);
+                
+                // Add outer class to constant pool  
+                let outer_class_idx = self.pool.add_class(&relationship.outer_class_name);
+                
+                // Add simple name to constant pool
+                let inner_name_idx = self.pool.add_utf8(&relationship.simple_name);
+                
+                // Create InnerClassInfo
+                let inner_class_info = crate::codegen::attribute::InnerClassInfo {
+                    inner_class: inner_class_idx.into(),
+                    outer_class: outer_class_idx.into(),
+                    inner_name: inner_name_idx.into(),
+                    inner_class_access_flags: relationship.access_flags,
+                };
+                
+                inner_class_infos.push(inner_class_info);
+            }
+            
+            // Create InnerClasses attribute using factory method
+            let named_attr = crate::codegen::attribute::NamedAttribute::new_inner_classes_attribute(
+                &mut self.pool,
+                inner_class_infos,
+            ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create InnerClasses attribute: {}", e)))?;
+            
+            self.class_file.attributes.push(named_attr);
+            
+            eprintln!("🔧 GEN: Added InnerClasses attribute for '{}' with {} entries", current_class_name, num_relationships);
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate BootstrapMethods attribute if there are any bootstrap methods
+    fn generate_bootstrap_methods_attribute(&mut self) -> Result<()> {
+        if self.bootstrap_methods.is_empty() {
+            return Ok(());
+        }
+        
+        eprintln!("🔧 GEN: Generating BootstrapMethods attribute with {} methods", self.bootstrap_methods.len());
+        
+        // Convert Vec<Vec<u16>> to Vec<BootstrapMethod>
+        let mut bootstrap_method_entries = Vec::new();
+        for method_args in &self.bootstrap_methods {
+            if method_args.is_empty() {
+                continue; // Skip empty entries
+            }
+            
+            // First argument should be the bootstrap method handle
+            let bootstrap_method_ref = method_args[0];
+            
+            // Remaining arguments are the bootstrap arguments
+            let bootstrap_arguments: Vec<crate::codegen::typed_index::ConstPoolIndex<crate::codegen::typed_index::ConstClassInfo>> = 
+                method_args[1..].iter()
+                    .map(|&arg| crate::codegen::typed_index::ConstPoolIndex::from(arg))
+                    .collect();
+            
+            let bootstrap_method = crate::codegen::attribute::BootstrapMethod {
+                bootstrap_method: crate::codegen::typed_index::ConstPoolIndex::from(bootstrap_method_ref),
+                bootstrap_arguments,
+            };
+            
+            bootstrap_method_entries.push(bootstrap_method);
+        }
+        
+        if !bootstrap_method_entries.is_empty() {
+            let num_entries = bootstrap_method_entries.len();
+            
+            // Create BootstrapMethods attribute
+            let bootstrap_methods_attr = crate::codegen::attribute::BootstrapMethodsAttribute {
+                bootstrap_methods: bootstrap_method_entries,
+            };
+            
+            // Create NamedAttribute with BootstrapMethods
+            let name_index = self.pool.add_utf8("BootstrapMethods");
+            let named_attr = crate::codegen::attribute::NamedAttribute::new(
+                crate::codegen::typed_index::ConstPoolIndex::from(name_index),
+                crate::codegen::attribute::AttributeInfo::BootstrapMethods(bootstrap_methods_attr),
+            );
+            
+            self.class_file.attributes.push(named_attr);
+            
+            eprintln!("🔧 GEN: Added BootstrapMethods attribute with {} entries", num_entries);
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate synthetic this$0 field for non-static inner classes
+    fn generate_synthetic_this_field(&mut self, class: &ClassDecl) -> Result<()> {
+        // Check if this is an inner class using parent_class_name
+        let outer_class_name = match &self.parent_class_name {
+            Some(parent) => parent.clone(),
+            None => {
+                // Not an inner class
+                return Ok(());
+            }
+        };
+        
+        // Check if this is a static inner class by looking at modifiers
+        eprintln!("🔧 GEN: Checking modifiers for inner class '{}': {:?}", class.name, class.modifiers);
+        let is_static = class.modifiers.iter().any(|m| matches!(m, Modifier::Static));
+        if is_static {
+            eprintln!("🔧 GEN: Skipping synthetic this$0 field for static inner class '{}'", class.name);
+            return Ok(()); // Static inner classes don't need this$0 field
+        }
+        
+        // Create synthetic this$0 field
+        eprintln!("🔧 GEN: Adding synthetic this$0 field to non-static inner class '{}'", class.name);
+        
+        // Add field name and descriptor to constant pool
+        let field_name = "this$0";
+        let name_idx = self.pool.add_utf8(field_name);
+        
+        // Create descriptor for outer class type (L<OuterClass>;)
+        let descriptor = format!("L{};", outer_class_name);
+        let descriptor_idx = self.pool.add_utf8(&descriptor);
+        
+        // Create synthetic field with ACC_FINAL and ACC_SYNTHETIC flags
+        let access_flags = access_flags::ACC_FINAL | access_flags::ACC_SYNTHETIC;
+        
+        // Create field info
+        let field_info = super::field::FieldInfo::new(access_flags, name_idx, descriptor_idx);
+        
+        // Add field to class file
+        self.class_file.fields.push(field_info);
+        
+        eprintln!("🔧 GEN: Added synthetic this$0 field for inner class '{}' with outer class '{}'", 
+                 class.name, outer_class_name);
+        
         Ok(())
     }
     
@@ -1333,11 +1574,21 @@ impl Gen {
                 }
             }
 
+            // Convert exception table from code::ExceptionTableEntry to attribute::ExceptionTableEntry
+            let exception_table: Vec<super::attribute::ExceptionTableEntry> = code.exception_table.iter()
+                .map(|entry| super::attribute::ExceptionTableEntry::new(
+                    entry.start_pc,
+                    entry.end_pc,
+                    entry.handler_pc,
+                    entry.catch_type
+                ))
+                .collect();
+
             let code_attr = CodeAttribute {
                 max_stack: code.state.max_stacksize,
                 max_locals: code.max_locals,
                 code: code.code.clone(),
-                exception_table: Vec::new(), // TODO: Implement exception table
+                exception_table,
                 attributes: code_attributes,
             };
             
@@ -1348,6 +1599,27 @@ impl Gen {
             );
             
             method_info.attributes.push(code_named_attr);
+        }
+        
+        // Add Signature attribute if stored during TransTypes phase
+        if let Some(ref signatures) = self.generic_signatures {
+            // Get current class name for signature key
+            let class_name = if let Some(ref class) = self.class_context.class {
+                &class.name
+            } else {
+                "UnknownClass"
+            };
+            
+            let signature_key = format!("method:{}:{}", class_name, method.name);
+            if let Some(signature) = signatures.get(&signature_key) {
+                let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+                    &mut self.pool, 
+                    signature.clone()
+                ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create method signature attribute: {}", e)))?;
+                
+                method_info.attributes.push(signature_attr);
+                eprintln!("🔧 GEN: Added method signature attribute for '{}.{}'", class_name, method.name);
+            }
         }
         
         // Add method to class file
@@ -1541,6 +1813,7 @@ impl Gen {
             Stmt::Break(break_stmt) => self.visit_break(break_stmt, env),
             Stmt::Continue(continue_stmt) => self.visit_continue(continue_stmt, env),
             Stmt::Labeled(labeled_stmt) => self.visit_labeled_stmt(labeled_stmt, env),
+            Stmt::Throw(throw_stmt) => self.visit_throw(throw_stmt, env),
             _ => {
                 // For statements not yet implemented, just return Ok
                 eprintln!("⚠️  WARNING: Statement type not implemented: {:?}", stmt);

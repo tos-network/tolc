@@ -22,6 +22,8 @@ pub struct ClassWriter {
     annotation_retention: HashMap<String, crate::codegen::attribute::RetentionPolicy>,
     /// All types in the current compilation unit for interface method resolution
     all_types: Option<Vec<crate::ast::TypeDecl>>,
+    /// Generic signatures stored during TransTypes phase
+    generic_signatures: Option<HashMap<String, String>>,
 }
 
 impl ClassWriter {
@@ -33,6 +35,7 @@ impl ClassWriter {
             package_name: None,
             annotation_retention: HashMap::new(),
             all_types: None,
+            generic_signatures: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl ClassWriter {
             package_name: None,
             annotation_retention: HashMap::new(),
             all_types: None,
+            generic_signatures: None,
         }
     }
 
@@ -60,6 +64,21 @@ impl ClassWriter {
     /// Set annotation retention index for the compilation unit
     pub fn set_annotation_retention_index(&mut self, idx: HashMap<String, crate::codegen::attribute::RetentionPolicy>) {
         self.annotation_retention = idx;
+    }
+    
+    /// Set generic signatures from TransTypes phase
+    pub fn set_generic_signatures(&mut self, signatures: &HashMap<String, String>) {
+        self.generic_signatures = Some(signatures.clone());
+    }
+    
+    /// Set inner class relationships for InnerClasses attribute generation
+    pub fn set_inner_class_relationships(&mut self, relationships: &[crate::codegen::InnerClassInfo]) {
+        self.gen.set_inner_class_relationships(relationships);
+    }
+    
+    /// Set parent class name for inner class generation
+    pub fn set_parent_class_name(&mut self, parent_name: Option<String>) {
+        self.gen.set_parent_class_name(parent_name);
     }
 
     /// Enable or disable debug info generation
@@ -86,6 +105,9 @@ impl ClassWriter {
         if let Some(ref package) = self.package_name {
             self.gen.set_package_context(package.clone());
         }
+        
+        // Set generic signatures in Gen
+        self.gen.set_generic_signatures(self.generic_signatures.clone());
         
         // Set annotation retention context
         self.gen.set_annotation_retention(self.annotation_retention.clone());

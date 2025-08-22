@@ -122,7 +122,7 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target
         
         let source = fs::read_to_string(input)?;
         let ast = parse_tol(&source)?;
-        generate_bytecode(&ast, &output_str, &config)?;
+        generate_bytecode(&ast, &output_str, &config, None)?;
     } else {
         return Err(anyhow::anyhow!("Unsupported file type. Expected .java or .tol file."));
     }

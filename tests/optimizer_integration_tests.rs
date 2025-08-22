@@ -9,7 +9,7 @@ fn parse_and_compile(src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     review(&ast)?;
     let config = Config::default();
     let output_dir = "tests/";
-    generate_bytecode(&ast, output_dir, &config)?;
+    generate_bytecode(&ast, output_dir, &config, None)?;
     Ok(vec![]) // Placeholder - actual bytecode would be read from generated file
 }
 

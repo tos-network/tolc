@@ -536,6 +536,23 @@ impl<'a> Items<'a> {
             _ => typecode,
         }
     }
+    
+    /// Add method handle to constant pool
+    pub fn add_method_handle(&mut self, reference_kind: u8, class_name: &str, method_name: &str, descriptor: &str) -> u16 {
+        let method_ref_index = self.pool.add_method_ref(class_name, method_name, descriptor);
+        self.pool.add_method_handle(reference_kind, method_ref_index)
+    }
+    
+    /// Add method type to constant pool
+    pub fn add_method_type(&mut self, descriptor: &str) -> u16 {
+        self.pool.add_method_type(descriptor)
+    }
+    
+    /// Add invoke dynamic to constant pool
+    pub fn add_invoke_dynamic(&mut self, bootstrap_method_attr_index: u16, name: &str, descriptor: &str) -> u16 {
+        let name_and_type_index = self.pool.add_name_and_type(name, descriptor);
+        self.pool.add_invoke_dynamic(bootstrap_method_attr_index, name_and_type_index)
+    }
 }
 
 /// Item representing addressable entities in bytecode (100% JavaC aligned)

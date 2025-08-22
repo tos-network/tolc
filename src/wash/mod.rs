@@ -62,6 +62,11 @@ impl SemanticAnalyzer {
         eprintln!("✅ WASH: Semantic analysis pipeline complete");
         Ok(ast)
     }
+    
+    /// Get generic signatures stored during TransTypes phase
+    pub fn get_generic_signatures(&self) -> &std::collections::HashMap<String, String> {
+        &self.trans_types.generic_signatures
+    }
 }
 
 impl Default for SemanticAnalyzer {

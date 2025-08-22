@@ -3284,6 +3284,8 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::New(_) => "New",
         Expr::Parenthesized(_) => "Parenthesized",
         Expr::ArrayInitializer(_) => "ArrayInitializer",
+        Expr::Lambda(_) => "Lambda",
+        Expr::MethodReference(_) => "MethodReference",
     }
 }
 

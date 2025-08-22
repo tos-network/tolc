@@ -722,6 +722,8 @@ impl AstVisitor for AstPrinter {
                 }
                 self.output.push('}');
             }
+            Expr::Lambda(lambda) => self.visit_lambda_expr(lambda),
+            Expr::MethodReference(method_ref) => self.visit_method_reference_expr(method_ref),
         }
     }
     
@@ -894,6 +896,49 @@ impl AstVisitor for AstPrinter {
             }
             self.dedent();
             self.writeln("}");
+        }
+    }
+    
+    fn visit_lambda_expr(&mut self, lambda: &LambdaExpr) {
+        // Print parameters
+        if lambda.parameters.len() == 1 && lambda.parameters[0].type_ref.is_none() {
+            // Single parameter without type - no parentheses needed
+            self.output.push_str(&lambda.parameters[0].name);
+        } else {
+            // Multiple parameters or typed parameters - need parentheses
+            self.output.push('(');
+            for (i, param) in lambda.parameters.iter().enumerate() {
+                if i > 0 { self.output.push_str(", "); }
+                if let Some(ref type_ref) = param.type_ref {
+                    self.visit_type_ref(type_ref);
+                    self.output.push(' ');
+                }
+                self.output.push_str(&param.name);
+            }
+            self.output.push(')');
+        }
+        
+        self.output.push_str(" -> ");
+        
+        // Print body
+        match &lambda.body {
+            LambdaBody::Expression(expr) => self.visit_expr(expr),
+            LambdaBody::Block(block) => self.visit_block(block),
+        }
+    }
+    
+    fn visit_method_reference_expr(&mut self, method_ref: &MethodReferenceExpr) {
+        if let Some(ref target) = method_ref.target {
+            self.visit_expr(target);
+        } else {
+            // Static method reference - class name should be inferred from context
+            self.output.push_str("Class");
+        }
+        self.output.push_str("::");
+        if method_ref.is_constructor {
+            self.output.push_str("new");
+        } else {
+            self.output.push_str(&method_ref.method_name);
         }
     }
     

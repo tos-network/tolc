@@ -475,6 +475,13 @@ impl ConstantPool {
         self.pending.push(None);
         self.constants.len() as u16  // Indices start at 1
     }
+    
+    pub fn add_invoke_dynamic(&mut self, bootstrap_method_attr_index: u16, name_and_type_index: u16) -> u16 {
+        let constant = Constant::InvokeDynamic(bootstrap_method_attr_index, name_and_type_index);
+        self.constants.push(constant);
+        self.pending.push(None);
+        self.constants.len() as u16  // Indices start at 1
+    }
 
     /// Get the index mapping that would be used during serialization
     pub fn get_index_mapping(&self) -> HashMap<u16, u16> {

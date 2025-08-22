@@ -46,19 +46,7 @@ impl Parser {
     pub fn parse(mut self) -> Result<Ast> {
         let start_span = self.current_span();
         let _initial_gas = self.global_gas;
-        // Hard-gate unsupported Java 8+ syntaxes early: lambda (->) and method references (::)
-        // so callers get a clear, immediate error.
-        for tok in &self.tokens {
-            match tok.token_type() {
-                Token::Arrow => {
-                    return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
-                }
-                Token::DoubleColon => {
-                    return Err(ParseError::InvalidSyntax { message: "method references are not supported".to_string(), location: tok.location() }.into());
-                }
-                _ => {}
-            }
-        }
+        // Java 8+ lambda expressions and method references are now supported
         
         // Parse package declaration
         let package_decl = if self.check(&Token::Package) {
@@ -1995,12 +1983,12 @@ impl Parser {
     }
 
     fn parse_assignment_expr(&mut self) -> Result<Expr> {
-        let left = self.parse_conditional_expr()?;
-        // If a lambda arrow follows a parsed primary/parenthesized ident list, reject explicitly
-        if self.check(&Token::Arrow) {
-            let tok = self.peek();
-            return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
+        // Try lambda expression first (has low precedence, above assignment)
+        if let Ok(lambda_expr) = self.try_parse_lambda_expr() {
+            return Ok(lambda_expr);
         }
+        
+        let left = self.parse_conditional_expr()?;
         // Check for assignment or compound assignment operators
         let op = if self.match_token(&Token::Assign) {
             Some(AssignmentOp::Assign)
@@ -2298,17 +2286,8 @@ impl Parser {
 
     fn parse_postfix_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary_expr()?;
-        // Chained operations: calls, field access, array access, post-inc/dec, anonymous class after constructor
+        // Chained operations: calls, field access, array access, post-inc/dec, anonymous class after constructor, method references
         {
-            // Reject method references and lambdas encountered in postfix context
-            if self.check(&Token::DoubleColon) {
-                let tok = self.peek();
-                return Err(ParseError::InvalidSyntax { message: "method references are not supported".to_string(), location: tok.location() }.into());
-            }
-            if self.check(&Token::Arrow) {
-                let tok = self.peek();
-                return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
-            }
             let mut steps: usize = 0;
             loop {
                 if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
@@ -2327,6 +2306,34 @@ impl Parser {
                         continue;
                     }
                 }
+            }
+            // Method reference: expression::method or expression::new
+            if self.match_token(&Token::DoubleColon) {
+                let start_span = self.current_span();
+                let is_constructor = self.check(&Token::New);
+                let method_name = if is_constructor {
+                    self.advance(); // consume 'new'
+                    "new".to_string()
+                } else if self.check(&Token::Identifier) {
+                    self.parse_identifier()?
+                } else {
+                    return Err(ParseError::UnexpectedToken { 
+                        expected: "method name or 'new'".to_string(), 
+                        found: format!("{:?}", self.peek().token_type()), 
+                        location: self.current_span().start 
+                    }.into());
+                };
+                
+                let end_span = self.previous_span();
+                let span = Span::new(start_span.start, end_span.end);
+                
+                expr = Expr::MethodReference(MethodReferenceExpr {
+                    target: Some(Box::new(expr)),
+                    method_name,
+                    is_constructor,
+                    span,
+                });
+                continue;
             }
             if self.check(&Token::LParen) {
                 self.advance();
@@ -2401,15 +2408,6 @@ impl Parser {
     }
     
     fn parse_primary_expr(&mut self) -> Result<Expr> {
-        // Reject lambda and method reference syntax explicitly
-        if self.check(&Token::Arrow) {
-            let tok = self.peek();
-            return Err(ParseError::InvalidSyntax { message: "lambda expressions are not supported".to_string(), location: tok.location() }.into());
-        }
-        if self.check(&Token::DoubleColon) {
-            let tok = self.peek();
-            return Err(ParseError::InvalidSyntax { message: "method references are not supported".to_string(), location: tok.location() }.into());
-        }
         // Class literal: TypeName.class or primitiveType.class (optionally with array dims)
         {
             let save = self.current;
@@ -3144,6 +3142,129 @@ impl Parser {
             self.advance();
         }
     }
+    
+    /// Try to parse a lambda expression with backtracking
+    /// Lambda syntax: parameter(s) -> expression/block
+    /// Examples: x -> x + 1, (x, y) -> x + y, (int x) -> { return x + 1; }
+    fn try_parse_lambda_expr(&mut self) -> Result<Expr> {
+        let checkpoint = self.current;
+        
+        match self.parse_lambda_expr_internal() {
+            Ok(expr) => Ok(expr),
+            Err(_) => {
+                // Backtrack on failure
+                self.current = checkpoint;
+                Err(ParseError::InvalidSyntax { 
+                    message: "not a lambda expression".to_string(), 
+                    location: self.current_span().start 
+                }.into())
+            }
+        }
+    }
+    
+    /// Internal lambda parsing implementation
+    fn parse_lambda_expr_internal(&mut self) -> Result<Expr> {
+        let start_span = self.current_span();
+        
+        // Parse lambda parameters
+        let parameters = self.parse_lambda_parameters()?;
+        
+        // Expect arrow token
+        if !self.match_token(&Token::Arrow) {
+            return Err(ParseError::UnexpectedToken { 
+                expected: "->".to_string(), 
+                found: format!("{:?}", self.peek().token_type()), 
+                location: self.current_span().start 
+            }.into());
+        }
+        
+        // Parse lambda body
+        let body = if self.check(&Token::LBrace) {
+            // Block body
+            LambdaBody::Block(self.parse_block()?)
+        } else {
+            // Expression body
+            LambdaBody::Expression(Box::new(self.parse_assignment_expr()?))
+        };
+        
+        let end_span = self.previous_span();
+        let span = Span::new(start_span.start, end_span.end);
+        
+        Ok(Expr::Lambda(LambdaExpr {
+            parameters,
+            body,
+            span,
+        }))
+    }
+    
+    /// Parse lambda parameters: () | x | (x) | (x, y) | (int x, String y)
+    fn parse_lambda_parameters(&mut self) -> Result<Vec<LambdaParameter>> {
+        if self.match_token(&Token::LParen) {
+            // Parenthesized parameter list: () | (x) | (x, y) | (int x, String y)
+            let mut parameters = Vec::new();
+            
+            if !self.check(&Token::RParen) {
+                loop {
+                    parameters.push(self.parse_lambda_parameter()?);
+                    if !self.match_token(&Token::Comma) {
+                        break;
+                    }
+                }
+            }
+            
+            if !self.match_token(&Token::RParen) {
+                return Err(ParseError::UnexpectedToken { 
+                    expected: ")".to_string(), 
+                    found: format!("{:?}", self.peek().token_type()), 
+                    location: self.current_span().start 
+                }.into());
+            }
+            
+            Ok(parameters)
+        } else if self.check(&Token::Identifier) {
+            // Single untyped parameter: x
+            let param = self.parse_lambda_parameter()?;
+            Ok(vec![param])
+        } else {
+            return Err(ParseError::InvalidSyntax { 
+                message: "expected lambda parameters".to_string(), 
+                location: self.current_span().start 
+            }.into());
+        }
+    }
+    
+    /// Parse a single lambda parameter: x | int x
+    fn parse_lambda_parameter(&mut self) -> Result<LambdaParameter> {
+        let start_span = self.current_span();
+        
+        // Check if this parameter has a type annotation
+        let type_ref = if self.is_type_start() && self.peek_token_type(self.current + 1) == Some(&Token::Identifier) {
+            // Typed parameter: int x
+            Some(self.parse_type_ref()?)
+        } else {
+            None
+        };
+        
+        // Parse parameter name
+        if !self.check(&Token::Identifier) {
+            return Err(ParseError::UnexpectedToken { 
+                expected: "parameter name".to_string(), 
+                found: format!("{:?}", self.peek().token_type()), 
+                location: self.current_span().start 
+            }.into());
+        }
+        
+        let name = self.advance().lexeme().to_string();
+        let end_span = self.previous_span();
+        let span = Span::new(start_span.start, end_span.end);
+        
+        Ok(LambdaParameter {
+            name,
+            type_ref,
+            span,
+        })
+    }
+    
 }
 
 /// Parse source code into an AST

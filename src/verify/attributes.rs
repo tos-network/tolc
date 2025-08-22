@@ -176,8 +176,9 @@ pub fn verify(class_file: &ClassFile) -> Result<()> {
             _ => {}
         }
     }
-    // Sealed vs permitted subclasses consistency
-    let is_sealed = (class_file.access_flags & access_flags::ACC_SEALED) != 0;
+    // Sealed vs permitted subclasses consistency (only for Java 17+)
+    // Note: ACC_SEALED (0x0020) shares the same bit as ACC_SUPER but has different meaning in Java 17+
+    let is_sealed = major >= 61 && (class_file.access_flags & access_flags::ACC_SEALED) != 0;
     if is_sealed && !has_permitted_subclasses {
         return Err(AttributesVerifyError::InvalidContent("sealed class missing PermittedSubclasses"));
     }

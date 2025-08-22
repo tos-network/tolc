@@ -6,12 +6,12 @@
 use crate::ast::*;
 use crate::error::Result;
 use super::gen::{Gen, GenContext};
-use super::items_javac::{Item, CondItem, Items};
+use super::items_javac::{Item as JavacItem, CondItem, Items, typecodes};
 use super::opcodes;
 
 impl Gen {
     /// Visit literal expression - JavaC Gen.visitLiteral equivalent
-    pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<Item> {
+    pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<JavacItem> {
         // Handle constants that need constant pool first (to avoid borrowing conflicts)
         let pool_data = match &tree.value {
             Literal::String(s) => {
@@ -183,7 +183,7 @@ impl Gen {
     }
     
     /// Visit identifier expression - simplified version
-    pub fn visit_ident(&mut self, tree: &IdentifierExpr, _env: &GenContext) -> Result<Item> {
+    pub fn visit_ident(&mut self, tree: &IdentifierExpr, _env: &GenContext) -> Result<JavacItem> {
         if tree.name == "this" {
             self.with_items(|items| {
                 Ok(items.make_this_item())
@@ -221,7 +221,7 @@ impl Gen {
     }
     
     /// Visit field access expression - simplified version
-    pub fn visit_select(&mut self, tree: &FieldAccessExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_select(&mut self, tree: &FieldAccessExpr, env: &GenContext) -> Result<JavacItem> {
         // Generate target expression if present
         if let Some(ref target) = tree.target {
             let _target_item = self.visit_expr(target, env)?;
@@ -236,7 +236,7 @@ impl Gen {
     }
     
     /// Visit method call expression - simplified version
-    pub fn visit_apply(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_apply(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
         // JavaC: visitApply method implementation
         
         // Determine method call type and generate appropriate bytecode
@@ -260,46 +260,39 @@ impl Gen {
     }
     
     /// Generate static method call (invokestatic)
-    fn gen_static_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+    fn gen_static_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
         // JavaC pattern: generate arguments first
-        let mut arg_items = Vec::new();
         for arg in &tree.arguments {
-            let arg_item = self.visit_expr(arg, env)?;
-            arg_items.push(arg_item);
+            let _arg_item = self.visit_expr(arg, env)?;
         }
         
-        // Generate invokestatic instruction
+        // Determine target class and method descriptor (aligned with javac)
+        let (class_name, method_descriptor) = self.resolve_static_method_info(tree)?;
+        
+        // Add method reference to constant pool and emit invokestatic
+        let method_ref_idx = self.get_pool_mut().add_method_ref(&class_name, &tree.name, &method_descriptor);
+        
+        eprintln!("🔧 DEBUG: Generating invokestatic {}#{}", class_name, tree.name);
+        
         self.with_items(|items| {
-            // Add method to constant pool (simplified)
-            let method_name = &tree.name;
-            let class_name = if let Some(ref target) = tree.target {
-                // Extract class name from target expression
-                format!("{:?}", target) // Simplified
-            } else {
-                "java/lang/System".to_string() // Default for static calls
-            };
-            
-            eprintln!("🔧 DEBUG: Generating invokestatic {}#{}", class_name, method_name);
-            
-            // Emit invokestatic bytecode
+            // Emit invokestatic with proper constant pool reference
             items.code.emitop(super::opcodes::INVOKESTATIC);
-            items.code.emit2(1); // Method reference index (placeholder)
+            items.code.emit2(method_ref_idx);
             
-            // Determine return type (simplified)
-            let return_type = if method_name.contains("print") {
-                TypeEnum::Void
-            } else if method_name.contains("max") || method_name.contains("min") {
-                TypeEnum::Primitive(crate::ast::PrimitiveType::Int)
+            // Determine return type from descriptor
+            let return_type = Self::parse_return_type_from_descriptor(&method_descriptor);
+            
+            // Return appropriate item for the result type
+            Ok(if matches!(return_type, TypeEnum::Void) {
+                items.make_stack_item_for_type(&TypeEnum::Void)
             } else {
-                TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))
-            };
-            
-            Ok(items.make_stack_item_for_type(&return_type))
+                items.make_stack_item_for_type(&return_type)
+            })
         })
     }
     
     /// Generate constructor call (invokespecial)
-    fn gen_constructor_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+    fn gen_constructor_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
         // JavaC pattern: object reference already on stack from NEW instruction
         
         // Generate arguments
@@ -320,7 +313,7 @@ impl Gen {
     }
     
     /// Generate super method call (invokespecial)
-    fn gen_super_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+    fn gen_super_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
         // Generate 'this' reference
         self.with_items(|items| {
             items.code.emitop(super::opcodes::ALOAD_0); // Load 'this'
@@ -353,7 +346,7 @@ impl Gen {
     }
     
     /// Generate instance method call (invokevirtual or invokeinterface)
-    fn gen_instance_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<Item> {
+    fn gen_instance_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
         // Check if this is an interface method call first (before any mutable borrows)
         let is_interface = self.is_interface_method_call(tree);
         
@@ -397,11 +390,21 @@ impl Gen {
     fn is_static_method_call(&self, tree: &MethodCallExpr) -> bool {
         // Heuristics for static method detection
         // In a complete implementation, this would use symbol table information
-        tree.target.is_none() || // No receiver usually means static
-        tree.name.starts_with("System.") ||
-        tree.name.contains("Math.") ||
-        tree.name.contains("String.valueOf") ||
-        tree.name.contains("Integer.parseInt")
+        if let Some(ref target) = tree.target {
+            if let Expr::Identifier(ident) = target.as_ref() {
+                // Check for known static method patterns
+                match ident.name.as_str() {
+                    "System" | "Math" | "String" | "Integer" | "Double" | "Float" | "Long" | "Object" => true,
+                    _ => false, // Unknown class - assume instance method for safety
+                }
+            } else {
+                false // Complex target expression - likely instance method
+            }
+        } else {
+            // No target - could be current class static method or instance method with implicit 'this'
+            // For safety, assume instance method unless we know it's static
+            false
+        }
     }
     
     /// Check if this is a super method call
@@ -455,7 +458,7 @@ impl Gen {
     }
     
     /// Visit binary expression - JavaC-aligned implementation
-    pub fn visit_binary(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_binary(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<JavacItem> {
         use crate::ast::BinaryOp;
         
         // Handle short-circuit operators first (they need special logic)
@@ -598,7 +601,7 @@ impl Gen {
     }
     
     /// Visit LogicalAnd expression with proper short circuit evaluation (JavaC aligned)
-    fn visit_logical_and(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
+    fn visit_logical_and(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<JavacItem> {
         // JavaC pattern for && : if left is false, jump to false result
         let _left_item = self.visit_expr(&tree.left, env)?;
         
@@ -637,7 +640,7 @@ impl Gen {
     }
     
     /// Visit LogicalOr expression with proper short circuit evaluation (JavaC aligned)
-    fn visit_logical_or(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<Item> {
+    fn visit_logical_or(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<JavacItem> {
         // JavaC pattern for || : if left is true, jump to true result
         let _left_item = self.visit_expr(&tree.left, env)?;
         
@@ -683,7 +686,7 @@ impl Gen {
     }
     
     /// Infer binary operation result type based on operands and operator
-    fn infer_binary_result_type(&self, left_item: &Item, right_item: &Item, operator: &BinaryOp) -> TypeEnum {
+    fn infer_binary_result_type(&self, left_item: &JavacItem, right_item: &JavacItem, operator: &BinaryOp) -> TypeEnum {
         use crate::ast::BinaryOp;
         use super::items_javac::typecodes;
         
@@ -715,7 +718,7 @@ impl Gen {
     }
     
     /// Visit unary expression - JavaC-aligned implementation
-    pub fn visit_unary(&mut self, tree: &UnaryExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_unary(&mut self, tree: &UnaryExpr, env: &GenContext) -> Result<JavacItem> {
         use crate::ast::UnaryOp;
         
         // Generate operand
@@ -801,7 +804,7 @@ impl Gen {
     }
     
     /// Infer unary operation result type based on operand and operator
-    fn infer_unary_result_type(&self, operand_item: &Item, operator: &UnaryOp) -> TypeEnum {
+    fn infer_unary_result_type(&self, operand_item: &JavacItem, operator: &UnaryOp) -> TypeEnum {
         use crate::ast::UnaryOp;
         use super::items_javac::typecodes;
         
@@ -823,7 +826,7 @@ impl Gen {
     }
     
     /// Visit assignment expression - simplified version
-    pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<JavacItem> {
         // Check if target is a field access (this.field)
         if let Expr::FieldAccess(field_access) = tree.target.as_ref() {
             // Handle field assignment: this.field = value
@@ -898,7 +901,7 @@ impl Gen {
     }
     
     /// Visit type cast expression - simplified version
-    pub fn visit_type_cast(&mut self, tree: &CastExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_type_cast(&mut self, tree: &CastExpr, env: &GenContext) -> Result<JavacItem> {
         // Generate expression to cast
         let _expr_item = self.visit_expr(&tree.expr, env)?;
         
@@ -910,7 +913,7 @@ impl Gen {
     }
     
     /// Visit array access expression - simplified version
-    pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<Item> {
+    pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<JavacItem> {
         // Generate array and index
         let _array_item = self.visit_expr(&tree.array, env)?;
         let _index_item = self.visit_expr(&tree.index, env)?;
@@ -1003,6 +1006,21 @@ impl Gen {
             items.code.end_scopes(limit);
             Ok(())
         })?;
+        
+        // Check if both branches terminate execution (aligned with javac flow analysis)
+        if let Some(ref else_branch) = tree.else_branch {
+            // Both then and else branches exist - check if both terminate
+            let then_terminates = Self::stmt_guarantees_return(&tree.then_branch);
+            let else_terminates = Self::stmt_guarantees_return(else_branch);
+            
+            if then_terminates && else_terminates {
+                // Both branches terminate - mark code as dead (aligned with javac)
+                self.with_items(|items| {
+                    items.code.alive = false;
+                    Ok(())
+                })?;
+            }
+        }
         
         Ok(())
     }
@@ -1473,21 +1491,33 @@ impl Gen {
     /// Visit return statement - JavaC Gen.visitReturn equivalent
     pub fn visit_return(&mut self, tree: &ReturnStmt, env: &GenContext) -> Result<()> {
         if let Some(ref expr) = tree.value {
-            // Generate expression for return value
+            // Generate expression for return value and validate type
             let _result = self.visit_expr(expr, env)?;
             
-            // Determine return instruction based on expression type
-            // TODO: Get actual expression type for proper return instruction
-            // For now, assume int return
+            // Determine return instruction based on method return type (aligned with javac)
+            let return_opcode = if let Some(ref method) = env.method {
+                if let Some(ref return_type) = method.return_type {
+                    // TODO: Add type checking - ensure expression type is assignable to return type
+                    // This would prevent bytecode verification errors by catching type mismatches
+                    // at compile time (like javac does)
+                    Self::get_return_instruction_for_type(return_type)
+                } else {
+                    super::opcodes::RETURN // Should not happen for non-void with value
+                }
+            } else {
+                // Fallback if no method context - this shouldn't happen in well-formed code
+                super::opcodes::ARETURN // Assume object return
+            };
+            
             if let Some(code) = self.code_mut() {
-                code.emitop(super::opcodes::IRETURN);
-                code.alive = false;
+                code.emitop(return_opcode);
+                code.alive = false; // Mark code as unreachable after return
             }
         } else {
-            // Void return
+            // Void return statement
             if let Some(code) = self.code_mut() {
                 code.emitop(super::opcodes::RETURN);
-                code.alive = false;
+                code.alive = false; // Mark code as unreachable after return
             }
         }
         Ok(())
@@ -1542,18 +1572,197 @@ impl Gen {
     }
     
     /// Visit try statement - simplified version
+    /// Visit try statement - JavaC visitTry equivalent with proper exception tables
     pub fn visit_try(&mut self, tree: &TryStmt, env: &GenContext) -> Result<()> {
-        self.visit_block(&tree.try_block, env)?;
+        self.generate_try_catch_bytecode(tree, env)
+    }
+    
+    /// Generate proper try-catch-finally bytecode with exception tables
+    /// Based on JavaC Gen.genTry implementation
+    fn generate_try_catch_bytecode(&mut self, tree: &TryStmt, env: &GenContext) -> Result<()> {
+        // Pre-allocate local variable indices to avoid borrowing conflicts
+        let catch_var_indices: Vec<u16> = (0..tree.catch_clauses.len())
+            .map(|_| {
+                let idx = self.method_context.next_local;
+                self.method_context.next_local += 1;
+                idx
+            })
+            .collect();
+            
+        let finally_var_index = if tree.finally_block.is_some() {
+            let idx = self.method_context.next_local;
+            self.method_context.next_local += 1;
+            Some(idx)
+        } else {
+            None
+        };
         
-        for catch_clause in &tree.catch_clauses {
-            self.visit_block(&catch_clause.block, env)?;
-        }
+        // Pre-allocate exception type constant pool indices
+        let exception_type_indices: Vec<u16> = tree.catch_clauses.iter()
+            .map(|catch_clause| {
+                let class_name = &catch_clause.parameter.type_ref.name;
+                self.get_pool_mut().add_class(class_name)
+            })
+            .collect();
+        
+        // Generate try-catch structure with proper control flow
+        self.gen_try_with_control_flow(tree, env, &catch_var_indices, finally_var_index, &exception_type_indices)
+    }
+    
+    /// Generate try block with proper control flow and exception table
+    fn gen_try_with_control_flow(
+        &mut self, 
+        tree: &TryStmt, 
+        env: &GenContext,
+        catch_var_indices: &[u16],
+        finally_var_index: Option<u16>,
+        exception_type_indices: &[u16]
+    ) -> Result<()> {
+        // Step 1: Generate try block and capture PC ranges
+        let start_pc = self.get_current_pc()?;
+        self.visit_block(&tree.try_block, env)?;
+        let end_pc = self.get_current_pc()?;
+        
+        // Step 2: Generate normal exit path (skip catch handlers)
+        let normal_exit_jump = self.emit_goto_placeholder()?;
+        
+        // Step 3: Generate catch handlers
+        let catch_handler_pcs = self.generate_catch_handlers(tree, env, catch_var_indices)?;
+        
+        // Step 4: Generate finally block for normal path
+        let finally_normal_pc = if tree.finally_block.is_some() {
+            Some(self.get_current_pc()?)
+        } else {
+            None
+        };
         
         if let Some(ref finally_block) = tree.finally_block {
             self.visit_block(finally_block, env)?;
         }
         
+        // Step 5: Patch normal exit jump to point here
+        let exit_target = self.get_current_pc()?;
+        self.patch_goto_jump(normal_exit_jump, exit_target)?;
+        
+        // Step 6: Generate finally catch-all handler if needed
+        if let (Some(finally_block), Some(finally_var_idx)) = (&tree.finally_block, finally_var_index) {
+            let catchall_pc = self.get_current_pc()?;
+            
+            // Store exception in local variable
+            self.emit_astore(finally_var_idx)?;
+            
+            // Execute finally block
+            self.visit_block(finally_block, env)?;
+            
+            // Re-throw exception
+            self.emit_aload(finally_var_idx)?;
+            self.emit_athrow()?;
+            
+            // Add catch-all exception table entry for finally
+            self.add_exception_table_entry(start_pc, end_pc, catchall_pc, 0)?; // 0 = catch all
+        }
+        
+        // Step 7: Add exception table entries for catch clauses
+        for (i, _catch_clause) in tree.catch_clauses.iter().enumerate() {
+            let handler_pc = catch_handler_pcs[i];
+            let exception_type_index = exception_type_indices[i];
+            self.add_exception_table_entry(start_pc, end_pc, handler_pc, exception_type_index)?;
+        }
+        
         Ok(())
+    }
+    
+    /// Generate catch handlers and return their PC positions
+    fn generate_catch_handlers(
+        &mut self,
+        tree: &TryStmt,
+        env: &GenContext,
+        catch_var_indices: &[u16]
+    ) -> Result<Vec<u16>> {
+        let mut handler_pcs = Vec::new();
+        
+        for (i, catch_clause) in tree.catch_clauses.iter().enumerate() {
+            let handler_pc = self.get_current_pc()?;
+            handler_pcs.push(handler_pc);
+            
+            // Store exception in catch parameter local variable
+            let var_index = catch_var_indices[i];
+            self.emit_astore(var_index)?;
+            
+            // Generate catch block body
+            self.visit_block(&catch_clause.block, env)?;
+            
+            // Generate goto to finally/exit (will be patched later)
+            let _catch_exit_jump = self.emit_goto_placeholder()?;
+        }
+        
+        Ok(handler_pcs)
+    }
+    
+    // Helper methods for bytecode generation
+    fn get_current_pc(&mut self) -> Result<u16> {
+        if let Some(code) = self.code_mut() {
+            Ok(code.get_cp())
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
+    }
+    
+    fn emit_goto_placeholder(&mut self) -> Result<u16> {
+        if let Some(code) = self.code_mut() {
+            let jump_pc = code.get_cp();
+            code.emitop(super::opcodes::GOTO);
+            code.emit2(0); // Placeholder offset
+            Ok(jump_pc)
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
+    }
+    
+    fn patch_goto_jump(&mut self, jump_pc: u16, target_pc: u16) -> Result<()> {
+        if let Some(code) = self.code_mut() {
+            let offset = (target_pc as i32 - jump_pc as i32 - 3) as i16;
+            code.put2(jump_pc + 1, offset);
+            Ok(())
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
+    }
+    
+    fn emit_astore(&mut self, var_index: u16) -> Result<()> {
+        if let Some(code) = self.code_mut() {
+            code.emitop1(super::opcodes::ASTORE, var_index as u8);
+            Ok(())
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
+    }
+    
+    fn emit_aload(&mut self, var_index: u16) -> Result<()> {
+        if let Some(code) = self.code_mut() {
+            code.emitop1(super::opcodes::ALOAD, var_index as u8);
+            Ok(())
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
+    }
+    
+    fn emit_athrow(&mut self) -> Result<()> {
+        if let Some(code) = self.code_mut() {
+            code.emitop(super::opcodes::ATHROW);
+            Ok(())
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
+    }
+    
+    fn add_exception_table_entry(&mut self, start_pc: u16, end_pc: u16, handler_pc: u16, catch_type: u16) -> Result<()> {
+        if let Some(code) = self.code_mut() {
+            code.add_exception_handler(start_pc, end_pc, handler_pc, catch_type);
+            Ok(())
+        } else {
+            Err(crate::error::Error::CodeGen { message: "No code context available".into() })
+        }
     }
     
     /// Visit break statement - JavaC visitBreak equivalent (Gen.java:1793-1798)  
@@ -1700,4 +1909,301 @@ impl Gen {
         
         Ok(())
     }
+    
+    /// Visit throw statement - JavaC Gen.visitThrow equivalent
+    pub fn visit_throw(&mut self, tree: &ThrowStmt, env: &GenContext) -> Result<()> {
+        // Generate expression for exception object (aligned with javac Gen.visitThrow)
+        let _result = self.visit_expr(&tree.expr, env)?;
+        
+        // Emit athrow instruction (aligned with javac: code.emitop0(athrow))
+        if let Some(code) = self.code_mut() {
+            code.emitop(super::opcodes::ATHROW);
+            code.alive = false; // Code after throw is unreachable
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if a statement guarantees return/termination (aligned with javac flow analysis)
+    fn stmt_guarantees_return(stmt: &Stmt) -> bool {
+        let result = match stmt {
+            Stmt::Return(_) => true,
+            Stmt::Throw(_) => true,
+            Stmt::Block(b) => Self::block_guarantees_return(b),
+            Stmt::If(ifstmt) => {
+                if let Some(else_b) = &ifstmt.else_branch {
+                    // require both branches to guarantee return
+                    Self::stmt_guarantees_return(&ifstmt.then_branch) && Self::stmt_guarantees_return(else_b)
+                } else {
+                    false
+                }
+            }
+            _ => false, // Other statements don't guarantee return
+        };
+        result
+    }
+    
+    /// Check if a block guarantees return (aligned with javac flow analysis)
+    fn block_guarantees_return(block: &Block) -> bool {
+        // A block guarantees return if any contained statement guarantees return
+        for s in &block.statements {
+            if Self::stmt_guarantees_return(s) { 
+                return true; 
+            }
+        }
+        // If the last statement guarantees return
+        if let Some(last) = block.statements.last() {
+            return Self::stmt_guarantees_return(last);
+        }
+        false
+    }
+    
+    /// Get return instruction for type (aligned with javac Code.typecode + ireturn pattern)
+    fn get_return_instruction_for_type(type_ref: &TypeRef) -> u8 {
+        // Convert TypeRef to TypeEnum using the existing TypeExt trait
+        let type_enum = type_ref.as_type_enum();
+        
+        let opcode = match type_enum {
+            TypeEnum::Void => super::opcodes::RETURN,
+            TypeEnum::Primitive(prim_type) => match prim_type {
+                PrimitiveType::Boolean | 
+                PrimitiveType::Byte | 
+                PrimitiveType::Char | 
+                PrimitiveType::Short | 
+                PrimitiveType::Int => super::opcodes::IRETURN,
+                PrimitiveType::Long => super::opcodes::LRETURN,
+                PrimitiveType::Float => super::opcodes::FRETURN,
+                PrimitiveType::Double => super::opcodes::DRETURN,
+            },
+            TypeEnum::Reference(_) => super::opcodes::ARETURN,
+        };
+        
+        opcode
+    }
+    
+    /// Resolve static method class and descriptor (aligned with javac symbol resolution)
+    fn resolve_static_method_info(&self, tree: &MethodCallExpr) -> Result<(String, String)> {
+        // Determine target class
+        let class_name = if let Some(ref target) = tree.target {
+            // TODO: Proper expression evaluation to get class name
+            // For now, handle simple identifiers and common static calls
+            match target.as_ref() {
+                Expr::Identifier(id) => {
+                    match id.name.as_str() {
+                        "System" => "java/lang/System".to_string(),
+                        "Math" => "java/lang/Math".to_string(),
+                        "String" => "java/lang/String".to_string(),
+                        "Integer" => "java/lang/Integer".to_string(),
+                        "Object" => "java/lang/Object".to_string(),
+                        _ => format!("java/lang/{}", id.name), // Assume java.lang for unknown classes
+                    }
+                }
+                _ => "java/lang/System".to_string(), // Default fallback
+            }
+        } else {
+            // No target means current class static method
+            "TODO_CURRENT_CLASS".to_string()
+        };
+        
+        // Generate method descriptor based on method name and arguments
+        let descriptor = self.generate_method_descriptor(&tree.name, &tree.arguments);
+        
+        Ok((class_name, descriptor))
+    }
+    
+    /// Generate method descriptor from arguments (simplified version)
+    fn generate_method_descriptor(&self, method_name: &str, arguments: &[Expr]) -> String {
+        // JavaC would use proper type resolution, but for now use heuristics
+        let param_types = arguments.iter().map(|_| "Ljava/lang/Object;").collect::<String>();
+        
+        // Return type based on method name (heuristics)
+        let return_type = match method_name {
+            "println" | "print" => "V",
+            "max" | "min" | "abs" => "I",
+            "toString" | "valueOf" => "Ljava/lang/String;",
+            "getClass" => "Ljava/lang/Class;",
+            _ => "Ljava/lang/Object;", // Default to Object
+        };
+        
+        format!("({}){}",  param_types, return_type)
+    }
+    
+    /// Parse return type from method descriptor
+    fn parse_return_type_from_descriptor(descriptor: &str) -> TypeEnum {
+        // Find return type after the closing ')'
+        if let Some(return_part) = descriptor.split(')').nth(1) {
+            match return_part {
+                "V" => TypeEnum::Void,
+                "I" => TypeEnum::Primitive(PrimitiveType::Int),
+                "J" => TypeEnum::Primitive(PrimitiveType::Long),
+                "F" => TypeEnum::Primitive(PrimitiveType::Float),
+                "D" => TypeEnum::Primitive(PrimitiveType::Double),
+                "Z" => TypeEnum::Primitive(PrimitiveType::Boolean),
+                "B" => TypeEnum::Primitive(PrimitiveType::Byte),
+                "C" => TypeEnum::Primitive(PrimitiveType::Char),
+                "S" => TypeEnum::Primitive(PrimitiveType::Short),
+                s if s.starts_with('L') && s.ends_with(';') => {
+                    let class_name = s[1..s.len()-1].to_string();
+                    TypeEnum::Reference(ReferenceType::Class(class_name))
+                }
+                s if s.starts_with('[') => {
+                    // Array type - simplified handling
+                    TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string()))
+                }
+                _ => TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string())),
+            }
+        } else {
+            TypeEnum::Void
+        }
+    }
+    
+    /// Visit lambda expression - Generate invokedynamic instruction
+    pub fn visit_lambda(&mut self, lambda: &LambdaExpr, env: &GenContext) -> Result<JavacItem> {
+        // Generate unique lambda method name
+        let lambda_method_name = format!("lambda$main${}", self.lambda_counter);
+        self.lambda_counter += 1;
+        
+        // Determine functional interface and method based on lambda
+        let functional_interface = self.infer_functional_interface(lambda)?;
+        let sam_method_name = functional_interface.method_name.clone();
+        let sam_descriptor = functional_interface.method_descriptor.clone();
+        
+        // Prepare data before generating bytecode
+        let current_class_name = env.clazz.as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "UnknownClass".to_string());
+        let lambda_descriptor = self.generate_lambda_descriptor(lambda);
+        
+        // Generate bootstrap method indices and invokedynamic instruction
+        let (bootstrap_method_index, invoke_dynamic_index) = {
+            let mut bootstrap_args = Vec::new();
+            
+            self.with_items(|items| {
+                // 1. Create LambdaMetafactory.metafactory method handle  
+                let bootstrap_method_handle = items.add_method_handle(
+                    6, // REF_invokeStatic
+                    "java/lang/invoke/LambdaMetafactory",
+                    "metafactory",
+                    "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;"
+                );
+                
+                // 2. Create SAM method type (functional interface method signature)
+                let sam_method_type = items.add_method_type(&sam_descriptor);
+                
+                // 3. Create lambda implementation method handle
+                let impl_method_handle = items.add_method_handle(
+                    6, // REF_invokeStatic (synthetic static method)
+                    &current_class_name,
+                    &lambda_method_name,
+                    &lambda_descriptor
+                );
+                
+                // 4. Create instantiated method type (same as SAM for simple cases)
+                let instantiated_method_type = sam_method_type;
+                
+                // 5. Prepare bootstrap method arguments
+                bootstrap_args = vec![
+                    bootstrap_method_handle,
+                    sam_method_type,
+                    impl_method_handle,
+                    instantiated_method_type,
+                ];
+                
+                Ok(())
+            })?;
+            
+            // 6. Add bootstrap method and generate invokedynamic
+            let bootstrap_index = self.add_bootstrap_method(bootstrap_args);
+            let invoke_dynamic_index = self.with_items(|items| {
+                Ok(items.add_invoke_dynamic(bootstrap_index, &sam_method_name, &sam_descriptor))
+            })?;
+            
+            (bootstrap_index, invoke_dynamic_index)
+        };
+        
+        // 7. Emit invokedynamic instruction using generated indices
+        self.with_items(|items| {
+            items.code.emitop(opcodes::INVOKEDYNAMIC);
+            items.code.emit2(invoke_dynamic_index);
+            items.code.emit2(0); // Must be zero for invokedynamic
+            Ok(())
+        })?;
+        
+        // TODO: Generate synthetic lambda method implementation
+        self.generate_lambda_method(lambda, &lambda_method_name, env)?;
+        
+        // Return functional interface type
+        Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
+    }
+    
+    /// Visit method reference - Generate method handle
+    pub fn visit_method_reference(&mut self, method_ref: &MethodReferenceExpr, env: &GenContext) -> Result<JavacItem> {
+        // Placeholder implementation for method reference
+        // Full implementation will need:
+        // 1. Method handle creation for different reference types
+        // 2. invokedynamic instruction generation
+        // 3. LambdaMetafactory integration for functional interfaces
+        
+        self.with_items(|items| {
+            // Placeholder: Load null as the method reference implementation
+            items.code.emitop(opcodes::ACONST_NULL);
+            Ok(())
+        })?;
+        
+        Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
+    }
+    
+    /// Generate synthetic method for lambda implementation
+    fn generate_lambda_method(&mut self, lambda: &LambdaExpr, method_name: &str, env: &GenContext) -> Result<()> {
+        // For now, create a placeholder implementation
+        // Full method generation will be implemented when method creation infrastructure is ready
+        
+        // TODO: Generate actual synthetic method for lambda implementation
+        // This requires:
+        // 1. Method creation in class file
+        // 2. Code generation for lambda body
+        // 3. Proper return value handling
+        // 4. Bootstrap method registration
+        
+        // Placeholder: Just register that we need to generate this method
+        // The actual implementation will need to integrate with the class file generation
+        
+        Ok(())
+    }
+    
+    /// Infer functional interface for lambda expression
+    fn infer_functional_interface(&self, lambda: &LambdaExpr) -> Result<FunctionalInterface> {
+        // Simplified: assume Function interface for now
+        // In a full implementation, this would analyze the context to determine the target type
+        Ok(FunctionalInterface {
+            interface_name: "java/util/function/Function".to_string(),
+            interface_descriptor: "Ljava/util/function/Function;".to_string(),
+            method_name: "apply".to_string(),
+            method_descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
+        })
+    }
+    
+    /// Generate method descriptor for lambda implementation
+    fn generate_lambda_descriptor(&self, lambda: &LambdaExpr) -> String {
+        // Simplified: generate based on parameter count
+        let param_count = lambda.parameters.len();
+        let params = "Ljava/lang/Object;".repeat(param_count);
+        format!("({})Ljava/lang/Object;", params)
+    }
+    
+    /// Add bootstrap method to the bootstrap methods table
+    fn add_bootstrap_method(&mut self, method_arguments: Vec<u16>) -> u16 {
+        let index = self.bootstrap_methods.len() as u16;
+        self.bootstrap_methods.push(method_arguments);
+        index
+    }
+}
+
+/// Functional interface information for lambda compilation
+#[derive(Debug, Clone)]
+struct FunctionalInterface {
+    interface_name: String,
+    interface_descriptor: String,
+    method_name: String,
+    method_descriptor: String,
 }

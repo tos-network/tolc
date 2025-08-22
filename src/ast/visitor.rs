@@ -42,6 +42,8 @@ pub trait AstVisitor {
     fn visit_instance_of_expr(&mut self, instance_of: &InstanceOfExpr) -> Self::Output;
     fn visit_conditional_expr(&mut self, conditional: &ConditionalExpr) -> Self::Output;
     fn visit_new_expr(&mut self, new: &NewExpr) -> Self::Output;
+    fn visit_lambda_expr(&mut self, lambda: &LambdaExpr) -> Self::Output;
+    fn visit_method_reference_expr(&mut self, method_ref: &MethodReferenceExpr) -> Self::Output;
     
     // Types
     fn visit_type_ref(&mut self, type_ref: &TypeRef) -> Self::Output;
@@ -397,6 +399,8 @@ where
                 for v in values { self.visit_expr(v); }
                 T::default()
             }
+            Expr::Lambda(lambda) => self.visit_lambda_expr(lambda),
+            Expr::MethodReference(method_ref) => self.visit_method_reference_expr(method_ref),
         }
     }
     
@@ -475,6 +479,31 @@ where
         self.visit_type_ref(&new.target_type);
         for arg in &new.arguments {
             self.visit_expr(arg);
+        }
+        T::default()
+    }
+    
+    fn visit_lambda_expr(&mut self, lambda: &LambdaExpr) -> Self::Output {
+        // Visit lambda parameters
+        for param in &lambda.parameters {
+            if let Some(ref type_ref) = param.type_ref {
+                self.visit_type_ref(type_ref);
+            }
+        }
+        
+        // Visit lambda body
+        match &lambda.body {
+            LambdaBody::Expression(expr) => self.visit_expr(expr),
+            LambdaBody::Block(block) => self.visit_block(block),
+        };
+        
+        T::default()
+    }
+    
+    fn visit_method_reference_expr(&mut self, method_ref: &MethodReferenceExpr) -> Self::Output {
+        // Visit target expression if present
+        if let Some(ref target) = method_ref.target {
+            self.visit_expr(target);
         }
         T::default()
     }

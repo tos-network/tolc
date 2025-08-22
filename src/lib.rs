@@ -55,7 +55,8 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
     
     // Phase 3: In-memory Bytecode Generation
     eprintln!("⚙️  TOLC: Phase 3 - In-memory bytecode generation");
-    let bytecode = codegen::generate_bytecode_inmemory(&ast, config)?;
+    let signatures = semantic_analyzer.get_generic_signatures();
+    let bytecode = codegen::generate_bytecode_inmemory(&ast, config, Some(signatures))?;
     eprintln!("✅ TOLC: In-memory bytecode generation complete");
     
     eprintln!("🎉 TOLC: In-memory Java compilation finished successfully");
@@ -82,7 +83,8 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
     
     // Phase 3: Code Generation
     eprintln!("⚙️  TOLC: Phase 3 - Bytecode generation");
-    codegen::generate_bytecode(&ast, output_dir, config)?;
+    let signatures = semantic_analyzer.get_generic_signatures();
+    codegen::generate_bytecode(&ast, output_dir, config, Some(signatures))?;
     eprintln!("✅ TOLC: Bytecode generation complete");
     
     eprintln!("🎉 TOLC: Java compilation pipeline finished successfully");
@@ -122,7 +124,7 @@ pub fn compile_tol_file(input_path: &str, output_dir: &str, config: &Config) -> 
     let ast = parser::parse_tol(&source)?;
     
     // Skip wash pipeline for legacy .tol files for now
-    codegen::generate_bytecode(&ast, output_dir, config)?;
+    codegen::generate_bytecode(&ast, output_dir, config, None)?;
     
     Ok(())
 }
