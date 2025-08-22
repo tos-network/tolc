@@ -252,6 +252,7 @@ impl Code {
     /// Emit two bytes of code (javac emit2)
     pub fn emit2(&mut self, od: u16) {
         if !self.alive {
+            eprintln!("🔧 DEBUG: emit2 - code not alive, skipping");
             return;
         }
         
@@ -315,6 +316,23 @@ impl Code {
             }
             
             self.emit1(op);
+            
+            // Update stack state based on instruction
+            match op {
+                // Return instructions consume their operands
+                opcodes::IRETURN | opcodes::FRETURN | opcodes::ARETURN => {
+                    self.state.pop(1); // Pop return value
+                }
+                opcodes::LRETURN | opcodes::DRETURN => {
+                    self.state.pop(2); // Pop return value (long/double takes 2 slots)
+                }
+                opcodes::RETURN => {
+                    // No stack change for void return
+                }
+                // Note: Method invocation instructions (INVOKEVIRTUAL, etc.) are handled
+                // manually after emitop() with proper signature information
+                _ => {}
+            }
             
             // Mark code as dead after terminal instructions (JavaC pattern)
             match op {

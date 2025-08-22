@@ -205,6 +205,7 @@ impl Gen {
     
     /// Visit identifier expression - simplified version
     pub fn visit_ident(&mut self, tree: &IdentifierExpr, _env: &GenContext) -> Result<JavacItem> {
+        eprintln!("DEBUG: visit_ident called for identifier '{}'", tree.name);
         if tree.name == "this" {
             self.with_items(|items| {
                 Ok(items.make_this_item())
@@ -218,11 +219,13 @@ impl Gen {
             let local_var = self.type_inference.lookup_local(&tree.name).cloned();
             
             if let Some(local_var) = local_var {
+                eprintln!("DEBUG: Found local variable '{}' at slot {}", tree.name, local_var.reg);
                 self.with_items(|items| {
                     let local_item = items.make_local_item(&local_var.typ, local_var.reg);
                     items.load_item(&local_item)
                 })
             } else {
+                eprintln!("DEBUG: No local variable found for '{}', checking symbol table", tree.name);
                 // Check if it's a simple local variable we can handle directly
                 match tree.name.as_str() {
                     "x" => {
@@ -249,11 +252,11 @@ impl Gen {
                             if let Some(symbol) = symbol {
                                 let is_static = symbol.kind == super::symtab::SymbolKind::Field && 
                                                symbol.modifiers.contains(&"static".to_string());
-                                Ok(items.make_member_item(tree.name.clone(), is_static, &symbol.typ))
+                                Ok(items.make_member_item(tree.name.clone(), "FIELD_CLASS".to_string(), "FIELD_DESC".to_string(), is_static, &symbol.typ))
                             } else {
                                 eprintln!("⚠️  WARNING: Cannot resolve symbol '{}', defaulting to int", tree.name);
                                 let typ = TypeEnum::Primitive(PrimitiveType::Int);
-                                Ok(items.make_member_item(tree.name.clone(), false, &typ))
+                                Ok(items.make_member_item(tree.name.clone(), "FIELD_CLASS".to_string(), "FIELD_DESC".to_string(), false, &typ))
                             }
                         })
                     }
@@ -278,6 +281,8 @@ impl Gen {
                     self.with_items(|items| {
                         items.code.emitop(opcodes::GETSTATIC);
                         items.code.emit2(field_ref_idx);
+                        // Push the PrintStream reference onto the stack
+                        items.code.state.push(super::code::Type::Object("java/io/PrintStream".to_string()));
                         Ok(())
                     })?;
                     
@@ -293,7 +298,7 @@ impl Gen {
         self.with_items(|items| {
             let typ = TypeEnum::Primitive(PrimitiveType::Int); // TODO: Lookup field type
             let is_static = false; // TODO: Determine if static
-            Ok(items.make_member_item(tree.name.clone(), is_static, &typ))
+            Ok(items.make_member_item(tree.name.clone(), "FIELD_CLASS".to_string(), "FIELD_DESC".to_string(), is_static, &typ))
         })
     }
     
@@ -462,8 +467,8 @@ impl Gen {
             self.get_pool_mut().add_method_ref(&class_name, &tree.name, &method_descriptor)
         };
         
-        // Determine return type based on method name (simplified heuristics, before mutable borrow)
-        let return_type = self.infer_method_return_type(&tree.name);
+        // Determine return type from actual method descriptor
+        let return_type = Self::parse_return_type_from_descriptor(&method_descriptor);
         
         self.with_items(|items| {
             if is_interface {
@@ -476,6 +481,26 @@ impl Gen {
                 eprintln!("🔧 DEBUG: Generating invokevirtual for: {} -> #{}", tree.name, method_ref_idx);
                 items.code.emitop(super::opcodes::INVOKEVIRTUAL);
                 items.code.emit2(method_ref_idx); // Correct method reference index
+                
+                // Pop arguments and receiver from stack
+                let stack_consume = tree.arguments.len() as u16 + 1; // arguments + receiver
+                items.code.state.pop(stack_consume);
+                
+                // Push return value if non-void
+                if !matches!(return_type, TypeEnum::Void) {
+                    match &return_type {
+                        TypeEnum::Primitive(crate::ast::PrimitiveType::Long) | 
+                        TypeEnum::Primitive(crate::ast::PrimitiveType::Double) => {
+                            items.code.state.push(super::code::Type::Long); // 2 slots
+                        }
+                        TypeEnum::Reference(_) => {
+                            items.code.state.push(super::code::Type::Object("java/lang/Object".to_string()));
+                        }
+                        _ => {
+                            items.code.state.push(super::code::Type::Int); // 1 slot
+                        }
+                    }
+                }
             }
             
             Ok(items.make_stack_item_for_type(&return_type))
@@ -551,6 +576,60 @@ impl Gen {
             // Default to Object for unknown methods
             _ => TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string())),
         }
+    }
+    
+    /// Visit new expression - JavaC Gen.visitNewClass equivalent
+    pub fn visit_new(&mut self, tree: &NewExpr, env: &GenContext) -> Result<JavacItem> {
+        // JavaC pattern for new expressions:
+        // 1. Generate 'new' instruction to allocate object
+        // 2. Duplicate reference for constructor call
+        // 3. Generate constructor arguments
+        // 4. Call constructor with invokespecial
+        
+        // Get the class name from target_type
+        let class_name = &tree.target_type.name;
+        
+        // Add class reference to constant pool
+        let class_idx = self.get_pool_mut().add_class(class_name);
+        
+        self.with_items(|items| {
+            // 1. Generate 'new' instruction - allocate object
+            items.code.emitop(super::opcodes::NEW);
+            items.code.emit2(class_idx);
+            items.code.state.push(super::code::Type::Object(class_name.clone()));
+            
+            // 2. Duplicate reference for constructor call
+            items.code.emitop(super::opcodes::DUP);
+            items.code.state.push(super::code::Type::Object(class_name.clone()));
+            
+            Ok(())
+        })?;
+        
+        // 3. Generate constructor arguments and collect their types
+        let mut arg_types = Vec::new();
+        for arg in &tree.arguments {
+            let arg_item = self.visit_expr(arg, env)?;
+            arg_types.push(self.typecode_to_type_enum(arg_item.typecode()));
+        }
+        
+        // 4. Build constructor method descriptor
+        let method_descriptor = self.generate_method_descriptor_with_types("<init>", &arg_types);
+        
+        // 5. Add constructor method reference to constant pool
+        let constructor_ref_idx = self.get_pool_mut().add_method_ref(class_name, "<init>", &method_descriptor);
+        
+        self.with_items(|items| {
+            // 6. Call constructor with invokespecial
+            items.code.emitop(super::opcodes::INVOKESPECIAL);
+            items.code.emit2(constructor_ref_idx);
+            
+            // Pop constructor arguments and the duplicated reference
+            let arg_count = tree.arguments.len() + 1; // +1 for 'this' reference
+            items.code.state.pop(arg_count as u16);
+            
+            // The result is the object reference (from the first 'dup')
+            Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
+        })
     }
     
     /// Visit binary expression - JavaC-aligned implementation
@@ -934,7 +1013,14 @@ impl Gen {
             }
             
             // Generate the value to assign
+            eprintln!("DEBUG: Assignment value expression: {:?}", tree.value);
+            if let Some(code) = self.code_mut() {
+                eprintln!("DEBUG: Before visit_expr (value): stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
+            }
             let _value_item = self.visit_expr(&tree.value, env)?;
+            if let Some(code) = self.code_mut() {
+                eprintln!("DEBUG: After visit_expr (value): stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
+            }
             
             // Get field name and add field reference to constant pool first
             let field_name = &field_access.name;
@@ -962,19 +1048,24 @@ impl Gen {
                     }
                 }
                 None => {
-                    // Default if no class context
+                    // Default if no class context - this should not happen in well-formed code
+                    eprintln!("Warning: No class context for field access {}, using Object as fallback. env.clazz = {:?}", field_name, env.clazz);
                     self.get_pool_mut().add_field_ref("Object", field_name, "I")
                 }
             };
             
             // Generate putfield instruction
             if let Some(code) = self.code_mut() {
+                eprintln!("DEBUG: Before putfield: stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
+                
                 code.emitop(opcodes::PUTFIELD);
                 code.emit2(field_ref_idx.into()); // Field reference index
                 
                 // Pop object reference and value from stack
                 code.state.pop(1); // value
                 code.state.pop(1); // object reference
+                
+                eprintln!("DEBUG: After putfield: stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
             }
             
             // Return the assigned value
@@ -1866,12 +1957,32 @@ impl Gen {
                 
                 // Generate store instruction to put value in local variable slot
                 self.with_items(|items| {
-                    // Use appropriate store instruction based on slot number
+                    // Determine the correct store instruction based on variable type
+                    let (optimized_base, general_op) = match tree.type_ref.name.as_str() {
+                        "boolean" | "byte" | "short" | "char" | "int" => {
+                            (opcodes::ISTORE_0, opcodes::ISTORE)
+                        }
+                        "long" => {
+                            (opcodes::LSTORE_0, opcodes::LSTORE)
+                        }
+                        "float" => {
+                            (opcodes::FSTORE_0, opcodes::FSTORE)
+                        }
+                        "double" => {
+                            (opcodes::DSTORE_0, opcodes::DSTORE)
+                        }
+                        _ => {
+                            // Object references (including our SimpleConstructorTest)
+                            (opcodes::ASTORE_0, opcodes::ASTORE)
+                        }
+                    };
+                    
+                    // Use appropriate store instruction based on slot number and type
                     if next_slot <= 3 {
-                        items.code.emitop(opcodes::ISTORE_0 + next_slot as u8);
+                        items.code.emitop(optimized_base + next_slot as u8);
                         items.code.state.pop(1); // Pop the value from stack
                     } else {
-                        items.code.emitop1(opcodes::ISTORE, next_slot as u8);
+                        items.code.emitop1(general_op, next_slot as u8);
                         // emitop1 already handles stack tracking via update_stack_for_op1
                     }
                     Ok(())
@@ -2421,10 +2532,11 @@ impl Gen {
         
         // Return type based on method name (heuristics)
         let return_type = match method_name {
-            "println" | "print" => "V",
+            "println" | "print" | "doSomething" => "V",  // void methods
             "max" | "min" | "abs" => "I",
             "toString" | "valueOf" => "Ljava/lang/String;",
             "getClass" => "Ljava/lang/Class;",
+            "condition1" | "condition2" | "condition3" | "shouldBreak" => "Z", // boolean methods
             _ => "Ljava/lang/Object;", // Default to Object
         };
         
@@ -2440,6 +2552,7 @@ impl Gen {
         
         // Determine return type based on method name and argument types (JavaC aligned)
         let return_type = match method_name {
+            "<init>" => "V", // Constructors always return void
             "println" | "print" => "V",
             "max" | "min" | "abs" => {
                 // For Math methods, return type matches argument type

@@ -103,22 +103,26 @@ impl<'a> Items<'a> {
     }
     
     /// Make member item (JavaC makeMemberItem)
-    pub fn make_member_item(&self, member_name: String, is_static: bool, typ: &TypeEnum) -> Item {
+    pub fn make_member_item(&self, member_name: String, class_name: String, descriptor: String, is_static: bool, typ: &TypeEnum) -> Item {
         let typecode = self.type_to_typecode(typ);
         Item::Member { 
             typecode, 
             member_name, 
+            class_name,
+            descriptor,
             is_static,
             nonvirtual: false, // Default to virtual calls
         }
     }
     
     /// Make member item with virtual/non-virtual control (JavaC makeMemberItem with nonvirtual)
-    pub fn make_member_item_nonvirtual(&self, member_name: String, is_static: bool, typ: &TypeEnum, nonvirtual: bool) -> Item {
+    pub fn make_member_item_nonvirtual(&self, member_name: String, class_name: String, descriptor: String, is_static: bool, typ: &TypeEnum, nonvirtual: bool) -> Item {
         let typecode = self.type_to_typecode(typ);
         Item::Member { 
             typecode, 
             member_name, 
+            class_name,
+            descriptor,
             is_static,
             nonvirtual,
         }
@@ -163,8 +167,9 @@ impl<'a> Items<'a> {
                 Ok(Item::Stack { typecode: *typecode })
             }
             
-            Item::Member { typecode, member_name, is_static, .. } => {
-                self.emit_load_member(*typecode, member_name, *is_static)?;
+            Item::Member { typecode, member_name, class_name, descriptor, is_static, .. } => {
+                // For field access, use the class_name and descriptor
+                self.emit_load_member(*typecode, member_name, class_name, descriptor, *is_static)?;
                 Ok(Item::Stack { typecode: *typecode })
             }
             
@@ -189,8 +194,9 @@ impl<'a> Items<'a> {
                 self.emit_store_local(*typecode, *reg)
             }
             
-            Item::Member { typecode, member_name, is_static, .. } => {
-                self.emit_store_member(*typecode, member_name, *is_static)
+            Item::Member { typecode, member_name, class_name, descriptor, is_static, .. } => {
+                // For field stores, use the class_name and descriptor
+                self.emit_store_member(*typecode, member_name, class_name, descriptor, *is_static)
             }
             
             Item::Indexed { typecode } => {
@@ -206,8 +212,8 @@ impl<'a> Items<'a> {
     /// Generate method invocation (JavaC invoke)
     pub fn invoke_item(&mut self, item: &Item) -> Result<Item> {
         match item {
-            Item::Member { typecode, member_name, is_static, nonvirtual } => {
-                self.emit_invoke_member(*typecode, member_name, *is_static, *nonvirtual)?;
+            Item::Member { typecode, member_name, class_name, descriptor, is_static, nonvirtual } => {
+                self.emit_invoke_member(*typecode, member_name, class_name, descriptor, *is_static, *nonvirtual)?;
                 Ok(Item::Stack { typecode: *typecode })
             }
             
@@ -282,6 +288,16 @@ impl<'a> Items<'a> {
                 _ => opcodes::ALOAD_0,
             };
             self.code.emitop(base_op + reg as u8);
+            
+            // Update stack state - push the loaded value onto the stack
+            let stack_type = match typecode {
+                typecodes::INT | typecodes::BYTE | typecodes::SHORT | typecodes::CHAR => super::code::Type::Int,
+                typecodes::LONG => super::code::Type::Long,
+                typecodes::FLOAT => super::code::Type::Float,
+                typecodes::DOUBLE => super::code::Type::Double,
+                _ => super::code::Type::Object("object".to_string()),
+            };
+            self.code.state.push(stack_type);
         } else {
             // Use general form with register
             let load_op = match typecode {
@@ -292,6 +308,17 @@ impl<'a> Items<'a> {
                 _ => opcodes::ALOAD,
             };
             self.code.emitop1w(load_op, reg);
+            
+            // For general form, emitop1w should handle stack updates automatically
+            // But let's add it for safety until we verify emitop1w behavior
+            let stack_type = match typecode {
+                typecodes::INT | typecodes::BYTE | typecodes::SHORT | typecodes::CHAR => super::code::Type::Int,
+                typecodes::LONG => super::code::Type::Long,
+                typecodes::FLOAT => super::code::Type::Float,
+                typecodes::DOUBLE => super::code::Type::Double,
+                _ => super::code::Type::Object("object".to_string()),
+            };
+            self.code.state.push(stack_type);
         }
         Ok(())
     }
@@ -345,9 +372,9 @@ impl<'a> Items<'a> {
                     }
                     _ => {
                         // Add to constant pool and use LDC
-                        // TODO: Implement constant pool integration
+                        let cp_index = self.pool.add_integer(*val as i32);
                         self.code.emitop(opcodes::LDC);
-                        self.code.emit1(0); // Placeholder CP index
+                        self.code.emit1(cp_index as u8); // Use actual CP index
                     }
                 }
             }
@@ -358,8 +385,9 @@ impl<'a> Items<'a> {
                     1 => self.code.emitop(opcodes::LCONST_1),
                     _ => {
                         // Use LDC2_W for long constants
+                        let cp_index = self.pool.add_long(*val);
                         self.code.emitop(opcodes::LDC2_W);
-                        self.code.emit2(0); // Placeholder CP index
+                        self.code.emit2(cp_index); // Use actual CP index
                     }
                 }
             }
@@ -372,8 +400,9 @@ impl<'a> Items<'a> {
                 } else if *val == 2.0 {
                     self.code.emitop(opcodes::FCONST_2);
                 } else {
+                    let cp_index = self.pool.add_float(*val as f32);
                     self.code.emitop(opcodes::LDC);
-                    self.code.emit1(0); // Placeholder CP index
+                    self.code.emit1(cp_index as u8); // Use actual CP index
                 }
             }
             
@@ -383,8 +412,9 @@ impl<'a> Items<'a> {
                 } else if *val == 1.0 {
                     self.code.emitop(opcodes::DCONST_1);
                 } else {
+                    let cp_index = self.pool.add_double(*val);
                     self.code.emitop(opcodes::LDC2_W);
-                    self.code.emit2(0); // Placeholder CP index
+                    self.code.emit2(cp_index); // Use actual CP index
                 }
             }
             
@@ -413,8 +443,9 @@ impl<'a> Items<'a> {
                             self.code.emitop_with_operand(opcodes::SIPUSH, &[(char_value >> 8) as u8, char_value as u8]);
                         } else {
                             // Use ldc for larger values
+                            let cp_index = self.pool.add_integer(char_value as i32);
                             self.code.emitop(opcodes::LDC);
-                            self.code.emit1(0); // Placeholder CP index
+                            self.code.emit1(cp_index as u8); // Use actual CP index
                         }
                     }
                 }
@@ -424,10 +455,11 @@ impl<'a> Items<'a> {
                 self.code.emitop(opcodes::ACONST_NULL);
             }
             
-            Literal::String(_) => {
+            Literal::String(s) => {
                 // String constants use LDC
+                let cp_index = self.pool.add_string(s);
                 self.code.emitop(opcodes::LDC);
-                self.code.emit1(0); // Placeholder CP index
+                self.code.emit1(cp_index as u8); // Use actual CP index
             }
         }
         
@@ -435,24 +467,30 @@ impl<'a> Items<'a> {
     }
     
     /// Emit member field access
-    fn emit_load_member(&mut self, _typecode: u8, _member_name: &str, is_static: bool) -> Result<()> {
+    fn emit_load_member(&mut self, _typecode: u8, member_name: &str, class_name: &str, field_descriptor: &str, is_static: bool) -> Result<()> {
+        // Add field reference to constant pool
+        let field_ref_idx = self.pool.add_field_ref(class_name, member_name, field_descriptor);
+        
         if is_static {
             self.code.emitop(opcodes::GETSTATIC);
         } else {
             self.code.emitop(opcodes::GETFIELD);
         }
-        self.code.emit2(0); // Placeholder CP index
+        self.code.emit2(field_ref_idx); // Use actual CP index
         Ok(())
     }
     
     /// Emit member field store
-    fn emit_store_member(&mut self, _typecode: u8, _member_name: &str, is_static: bool) -> Result<()> {
+    fn emit_store_member(&mut self, _typecode: u8, member_name: &str, class_name: &str, field_descriptor: &str, is_static: bool) -> Result<()> {
+        // Add field reference to constant pool
+        let field_ref_idx = self.pool.add_field_ref(class_name, member_name, field_descriptor);
+        
         if is_static {
             self.code.emitop(opcodes::PUTSTATIC);
         } else {
             self.code.emitop(opcodes::PUTFIELD);
         }
-        self.code.emit2(0); // Placeholder CP index
+        self.code.emit2(field_ref_idx); // Use actual CP index
         Ok(())
     }
     
@@ -489,7 +527,12 @@ impl<'a> Items<'a> {
     }
     
     /// Emit method invocation (JavaC invoke pattern)
-    fn emit_invoke_member(&mut self, _typecode: u8, _member_name: &str, is_static: bool, nonvirtual: bool) -> Result<()> {
+    fn emit_invoke_member(&mut self, _typecode: u8, member_name: &str, class_name: &str, method_descriptor: &str, is_static: bool, nonvirtual: bool) -> Result<()> {
+        // Add method reference to constant pool
+        let method_ref_idx = self.pool.add_method_ref(class_name, member_name, method_descriptor);
+        
+        eprintln!("🔧 DEBUG: emit_invoke_member - class: {}, method: {}, descriptor: {}, idx: {}", class_name, member_name, method_descriptor, method_ref_idx);
+        
         if is_static {
             self.code.emitop(opcodes::INVOKESTATIC);
         } else if nonvirtual {
@@ -498,7 +541,7 @@ impl<'a> Items<'a> {
             self.code.emitop(opcodes::INVOKEVIRTUAL);
             // TODO: Add interface method detection for INVOKEINTERFACE
         }
-        self.code.emit2(0); // Placeholder CP index
+        self.code.emit2(method_ref_idx); // Proper constant pool index
         Ok(())
     }
     
@@ -571,6 +614,8 @@ pub enum Item {
     Member { 
         typecode: u8, 
         member_name: String, 
+        class_name: String,        // Target class for method/field access
+        descriptor: String,        // Method descriptor for invocations
         is_static: bool,
         nonvirtual: bool, // JavaC nonvirtual flag
     },

@@ -411,7 +411,7 @@ impl TypeInference {
     /// Infer cast type - JavaC visitTypeCast equivalent
     fn infer_cast_type(&mut self, cast: &CastExpr) -> Result<InferenceResult> {
         let operand_result = self.infer_expr_type(&cast.expr)?;
-        let target_type = TypeEnum::from(cast.target_type.clone()); // TODO: Proper conversion
+        let target_type = TypeEnum::from(cast.target_type.clone());
         
         // Check if cast is legal
         let conversion = self.types.conversion_kind(&operand_result.typ, &target_type);

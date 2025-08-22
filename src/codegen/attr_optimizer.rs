@@ -155,7 +155,7 @@ impl AttrOptimizer {
         
         // Check for constant cast optimization
         if let Expr::Literal(lit) = &expr {
-            let target_type = TypeEnum::from(cast.target_type.clone()); // TODO: Proper conversion
+            let target_type = TypeEnum::from(cast.target_type.clone());
             
             // JavaC: owntype = cfolder.coerce(exprtype, owntype);
             if let Some(coerced_value) = self.cfolder.coerce(&lit.value, &target_type) {

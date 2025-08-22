@@ -310,6 +310,7 @@ impl Gen {
         ));
         
         // Store generation environment (JavaC env parameter)
+        eprintln!("DEBUG: init_code: Method '{}', Setting self.env with clazz = {:?}", method.name, env.clazz.as_ref().map(|c| &c.name));
         self.env = Some(env.clone());
         
         // Note: Items will be created on-demand with proper lifetimes
@@ -534,15 +535,22 @@ impl Gen {
     
     /// Generate expression - delegates to visitor methods with optimization integration
     pub fn gen_expr(&mut self, expr: &Expr) -> Result<JavacItem> {
-        let env = self.env.clone().unwrap_or_else(|| GenContext {
-            method: None,
-            clazz: None,
-            fatcode: false,
-            debug_code: false,
-            exit: None,
-            cont: None,
-            is_switch: false,
+        let env = self.env.clone().unwrap_or_else(|| {
+            eprintln!("DEBUG: gen_expr: self.env is None, creating default env");
+            GenContext {
+                method: None,
+                clazz: None,
+                fatcode: false,
+                debug_code: false,
+                exit: None,
+                cont: None,
+                is_switch: false,
+            }
         });
+        
+        if let Expr::Assignment(_) = expr {
+            eprintln!("DEBUG: gen_expr: Processing assignment, env.clazz = {:?}", env.clazz.as_ref().map(|c| &c.name));
+        }
         
         // JavaC pattern: Apply optimizations before generation
         let optimized_expr = self.apply_expression_optimizations(expr)?;
@@ -851,17 +859,17 @@ impl Gen {
         let method_symbol = super::symtab::MethodSymbol {
             name: method.name.clone(),
             return_type: if let Some(ref ret_type) = method.return_type {
-                TypeEnum::from(ret_type.clone()) // TODO: Proper conversion
+                TypeEnum::from(ret_type.clone())
             } else {
                 TypeEnum::Void
             },
             parameter_types: method.parameters.iter().map(|p| {
-                TypeEnum::from(p.type_ref.clone()) // TODO: Proper conversion
+                TypeEnum::from(p.type_ref.clone())
             }).collect(),
             parameter_names: method.parameters.iter().map(|p| p.name.clone()).collect(),
             is_static: method.modifiers.iter().any(|m| matches!(m, Modifier::Static)),
             is_virtual: !method.modifiers.iter().any(|m| matches!(m, Modifier::Static | Modifier::Final | Modifier::Private)),
-            owner_class: "TODO".to_string(), // TODO: Get actual class name
+            owner_class: env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "java/lang/Object".to_string()),
         };
         
         self.type_inference.enter_method(method_symbol)?;
@@ -878,6 +886,13 @@ impl Gen {
         } else {
             // Generate method body if present (non-native methods)
             if let Some(ref body) = method.body {
+                // For constructors, add automatic super() call if not already present
+                if method.name == "<init>" {
+                    // TODO: Check if first statement is already this() or super() call
+                    // For now, always add super() call
+                    self.add_default_super_call()?;
+                }
+                
                 self.gen_stmt(&Stmt::Block(body.clone()))?;
             }
             
@@ -908,6 +923,11 @@ impl Gen {
         }
         
         // Create method info and add to class file
+        if method.name == "<init>" {
+            if let Some(code) = &self.code {
+                eprintln!("DEBUG: Constructor '{}' final stack: max_stack={}", method.name, code.state.max_stacksize);
+            }
+        }
         self.create_method_info_from_code(method)?;
         
         // JavaC pattern: endScopes and cleanup
@@ -932,6 +952,8 @@ impl Gen {
             cont: None,
             is_switch: false,
         };
+        
+        eprintln!("DEBUG: gen_def_class: Created class_env for class '{}', clazz = {:?}", class.name, class_env.clazz.as_ref().map(|c| &c.name));
         
         // Initialize class context
         self.class_context.class = Some(class.clone());
@@ -958,6 +980,7 @@ impl Gen {
                         body: Some(constructor.body.clone()),
                         span: constructor.span.clone(),
                     };
+                    eprintln!("DEBUG: gen_def_class: Calling gen_def_method for constructor with class_env.clazz = {:?}", class_env.clazz.as_ref().map(|c| &c.name));
                     self.gen_def_method(&ctor_method, &class_env)?;
                 }
                 ClassMember::TypeDecl(nested_type) => {
@@ -1304,14 +1327,24 @@ impl Gen {
             self.generate_default_constructor(class)?;
         }
         
-        // 7. Generate all methods
+        // 7. Generate all methods with proper class context
+        let class_env = GenContext {
+            method: None,
+            clazz: Some(class.clone()),
+            fatcode: false,
+            debug_code: false,
+            exit: None,
+            cont: None,
+            is_switch: false,
+        };
+        
         for member in &class.body {
             match member {
                 ClassMember::Method(method) => {
-                    self.gen_def_method(method, &GenContext::default())?;
+                    self.gen_def_method(method, &class_env)?;
                 }
                 ClassMember::Field(field) => {
-                    self.gen_def_field(field, &GenContext::default())?;
+                    self.gen_def_field(field, &class_env)?;
                 }
                 ClassMember::Constructor(constructor) => {
                     // Convert constructor to method for generation
@@ -1326,7 +1359,7 @@ impl Gen {
                         body: Some(constructor.body.clone()),
                         span: constructor.span.clone(),
                     };
-                    self.gen_def_method(&ctor_method, &GenContext::default())?;
+                    self.gen_def_method(&ctor_method, &class_env)?;
                 }
                 _ => {
                     // TODO: Handle other member types (inner classes, etc.)
@@ -2272,6 +2305,29 @@ impl Gen {
         })
     }
     
+    /// Add default super() call to constructor
+    fn add_default_super_call(&mut self) -> Result<()> {
+        // Generate: aload_0; invokespecial Object.<init>:()V
+        
+        // Add method reference to Object.<init>:()V first (before borrowing code)
+        let super_method_ref = self.pool.add_method_ref("java/lang/Object", "<init>", "()V");
+        
+        if let Some(code) = self.code_mut() {
+            // Load 'this' reference
+            code.emitop(opcodes::ALOAD_0);
+            code.state.push(super::code::Type::Object("java/lang/Object".to_string()));
+            
+            // Call super constructor
+            code.emitop(opcodes::INVOKESPECIAL);
+            code.emit2(super_method_ref.into());
+            
+            // Pop 'this' reference from stack (constructor returns void)
+            code.state.pop(1);
+        }
+        
+        Ok(())
+    }
+    
     /// Generate default constructor: public ClassName() { super(); }
     fn generate_default_constructor(&mut self, _class: &ClassDecl) -> Result<()> {
         use super::attribute::CodeAttribute;
@@ -2343,6 +2399,7 @@ impl Gen {
             Expr::Assignment(assign) => self.visit_assign(assign, env),
             Expr::Cast(cast) => self.visit_type_cast(cast, env),
             Expr::ArrayAccess(access) => self.visit_indexed(access, env),
+            Expr::New(new_expr) => self.visit_new(new_expr, env),
             _ => {
                 // For expressions not yet implemented, return a placeholder
                 self.with_items(|items| {

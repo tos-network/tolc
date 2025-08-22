@@ -55,7 +55,6 @@ public class SimpleLogical {
 
 /// Test JavaC alignment for complex logical operations
 #[test]
-#[ignore] // TODO: Fix stack simulation error
 fn test_javac_alignment_complex_logical() {
     let source = r#"
 package test;
@@ -124,7 +123,6 @@ public class ComplexLogical {
 
 /// Test JavaC alignment for constant folding
 #[test]
-#[ignore] // TODO: Fix stack simulation error
 fn test_javac_alignment_constant_folding() {
     let source = r#"
 package test;
