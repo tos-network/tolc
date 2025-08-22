@@ -8,7 +8,7 @@
 //! attribution logic as JavaC's Attr.java.
 
 use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, Expr, Stmt, BinaryOp};
-use crate::error::{Result, Error};
+use crate::common::error::{Result, Error};
 use crate::wash::enter::SymbolEnvironment;
 use std::collections::{HashMap, HashSet};
 

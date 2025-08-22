@@ -1,7 +1,7 @@
 use tolc::parser::parse_tol;
 use tolc::review::review;
 use tolc::codegen::generate_bytecode;
-use tolc::config::Config;
+use tolc::common::config::Config;
 use std::path::Path;
 
 fn parse_and_compile(src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

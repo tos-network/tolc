@@ -380,6 +380,7 @@ pub enum Stmt {
     While(WhileStmt),
     DoWhile(DoWhileStmt),
     For(ForStmt),
+    EnhancedFor(EnhancedForStmt),
     Switch(SwitchStmt),
     Return(ReturnStmt),
     Break(BreakStmt),
@@ -442,6 +443,15 @@ pub struct ForStmt {
     pub init: Vec<Stmt>,
     pub condition: Option<Expr>,
     pub update: Vec<ExprStmt>,
+    pub body: Box<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnhancedForStmt {
+    pub variable_type: TypeRef,
+    pub variable_name: String,
+    pub iterable: Expr,
     pub body: Box<Stmt>,
     pub span: Span,
 }

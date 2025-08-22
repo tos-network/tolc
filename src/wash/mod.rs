@@ -16,7 +16,7 @@ pub mod trans_types;
 pub mod lower;
 
 use crate::ast::Ast;
-use crate::error::Result;
+use crate::common::error::Result;
 
 /// Main semantic analysis pipeline that orchestrates all phases
 /// Follows JavaC's compilation flow: Enter → Attr → Flow → TransTypes → Lower

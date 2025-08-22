@@ -9,7 +9,7 @@
 //! - Local variable capture analysis (effectively final analysis)
 
 use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, Stmt, Expr};
-use crate::error::Result;
+use crate::common::error::Result;
 use std::collections::{HashMap, HashSet};
 
 /// Flow analysis mode for definite assignment

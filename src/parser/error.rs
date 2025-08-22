@@ -1,5 +1,5 @@
 use crate::ast::Location;
-use crate::error::Error;
+use crate::common::error::Error;
 use std::fmt;
 
 #[derive(Debug, Clone)]

@@ -4,7 +4,7 @@
 //! with Items directly operating on the Code buffer for maximum compatibility.
 
 use crate::ast::{Literal, TypeEnum};
-use crate::error::Result;
+use crate::common::error::Result;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
@@ -197,7 +197,7 @@ impl<'a> Items<'a> {
                 self.emit_store_indexed(*typecode)
             }
             
-            _ => Err(crate::error::Error::CodeGen {
+            _ => Err(crate::common::error::Error::CodeGen {
                 message: format!("Cannot store into {:?}", item)
             })
         }
@@ -211,7 +211,7 @@ impl<'a> Items<'a> {
                 Ok(Item::Stack { typecode: *typecode })
             }
             
-            _ => Err(crate::error::Error::CodeGen {
+            _ => Err(crate::common::error::Error::CodeGen {
                 message: format!("Cannot invoke {:?}", item)
             })
         }

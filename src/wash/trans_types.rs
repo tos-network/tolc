@@ -5,7 +5,7 @@
 //! bridge methods to maintain binary compatibility.
 
 use crate::ast::*;
-use crate::error::Result;
+use crate::common::error::Result;
 use std::collections::HashMap;
 
 /// TransTypes phase processor - corresponds to JavaC's TransTypes class

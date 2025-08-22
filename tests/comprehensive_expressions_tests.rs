@@ -1,7 +1,7 @@
 use tolc::ast::*;
 use tolc::codegen::*;
 use tolc::parser::Parser;
-use tolc::error::Result;
+use tolc::common::error::Result;
 
 #[test]
 fn test_arithmetic_binary_expressions() -> Result<()> {

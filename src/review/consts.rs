@@ -1,6 +1,6 @@
 // Re-export central exception classification lists from crate-level consts
 // so review passes can refer to super::consts::* consistently.
-pub use crate::consts::{
+pub use crate::common::consts::{
     UNCHECKED_BASE_EXCEPTIONS,
     UNCHECKED_COMMON_SUBCLASSES,
 };

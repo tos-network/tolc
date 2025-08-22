@@ -4,7 +4,7 @@
 //! javac CondItem class, providing unified handling of conditional expressions with
 //! true/false jump chains for sophisticated control flow management.
 
-use crate::error::Result;
+use crate::common::error::Result;
 use crate::codegen::{
     chain::{Chain, ChainOps},
     opcodes,

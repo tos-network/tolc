@@ -11,7 +11,7 @@
 //! - Assertions → conditional throws
 
 use crate::ast::{Ast, TypeDecl, ClassDecl, Stmt, Expr, MethodDecl, ConstructorDecl};
-use crate::error::Result;
+use crate::common::error::Result;
 use std::collections::HashMap;
 
 /// Lowering statistics

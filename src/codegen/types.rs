@@ -5,7 +5,7 @@
 
 use crate::ast::{TypeEnum, PrimitiveType, ReferenceType, BinaryOp, TypeExt};
 use super::symtab::Symtab;
-use crate::error::{Result, Error};
+use crate::common::error::{Result, Error};
 
 /// Types system - 100% JavaC Types equivalent
 /// Handles type operations, conversions, and subtyping

@@ -700,7 +700,7 @@ fn resolve_type_name_to_fq(name: &str, idx: &GlobalMemberIndex) -> String {
     }
 
     // 4.5) Special case for well-known java.lang types that might not be in the index
-    if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&name) {
+    if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&name) {
         return java_lang_fq;
     }
 

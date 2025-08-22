@@ -5,7 +5,7 @@
 //! pipeline pattern and provides unified control over optimization passes.
 
 use crate::ast::*;
-use crate::error::Result;
+use crate::common::error::Result;
 use crate::codegen::{
     instruction_optimizer::{InstructionOptimizer, PeepholeOptimizer},
     pending_jumps::PendingJumpsManager,

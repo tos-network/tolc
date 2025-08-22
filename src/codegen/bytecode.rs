@@ -314,9 +314,9 @@ impl LocalType {
                 // Prefer classpath mappings for simple names (e.g., List -> java/util/List).
                 let is_simple = !class_name.contains('/') && !class_name.contains('.') && !class_name.is_empty();
                 let internal = if is_simple {
-                    if let Some(mapped) = crate::codegen::classpath::resolve_class_name(class_name) {
+                    if let Some(mapped) = crate::common::classpath::resolve_class_name(class_name) {
                         mapped.to_string()
-                    } else if crate::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
+                    } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
                         format!("java/lang/{}", class_name)
                     } else {
                         class_name.replace('.', "/")

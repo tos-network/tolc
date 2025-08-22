@@ -556,6 +556,17 @@ impl AstVisitor for AstPrinter {
                 self.output.push_str(") ");
                 self.visit_stmt(&for_stmt.body);
             }
+            Stmt::EnhancedFor(enhanced_for_stmt) => {
+                self.write_indent();
+                self.output.push_str("for (");
+                self.visit_type_ref(&enhanced_for_stmt.variable_type);
+                self.output.push_str(" ");
+                self.output.push_str(&enhanced_for_stmt.variable_name);
+                self.output.push_str(" : ");
+                self.visit_expr(&enhanced_for_stmt.iterable);
+                self.output.push_str(") ");
+                self.visit_stmt(&enhanced_for_stmt.body);
+            }
             Stmt::Return(return_stmt) => {
                 self.write_indent();
                 self.output.push_str("return");

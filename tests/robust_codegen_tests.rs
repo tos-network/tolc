@@ -4,7 +4,7 @@ use tolc::codegen::*;
 use tolc::codegen::defs::{MAGIC, major_versions};
 use tolc::codegen::flag::access_flags;
 use tolc::codegen::bytecode::{ClassIndex, StringIndex, NameAndTypeIndex, ConstPoolIndex};
-use tolc::error::Error;
+use tolc::common::error::Error;
 
 /// Test the new trait-based serialization system
 #[test]

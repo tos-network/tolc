@@ -26,13 +26,9 @@ pub mod wash;
 pub mod codegen;
 pub mod verify;
 pub mod review;
-pub mod error;
-pub mod config;
-pub mod consts;
-pub mod rt;
+pub mod common;
 
-pub use error::{Result, Error};
-pub use config::Config;
+pub use common::{Config, Result, Error};
 
 /// Compile Java source to bytecode without writing to files
 /// 

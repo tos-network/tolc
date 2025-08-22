@@ -4,7 +4,7 @@
 //! following the exact same algorithms as Oracle's javac.
 
 use crate::ast::*;
-use crate::error::{Result, Error};
+use crate::common::error::{Result, Error};
 use super::symtab::{Symtab, MethodSymbol, LocalVarSymbol};
 use super::types::{Types, ConversionKind};
 use std::collections::HashMap;

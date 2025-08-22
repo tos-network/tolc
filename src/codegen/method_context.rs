@@ -5,7 +5,7 @@
 //! generation context that persists throughout method compilation.
 
 use crate::ast::*;
-use crate::error::Result;
+use crate::common::error::Result;
 use std::collections::HashMap;
 
 /// Method-level generation context
@@ -434,7 +434,7 @@ impl MethodContext {
     /// Validate stack state for operation
     pub fn validate_stack_for_operation(&self, required_types: &[&str]) -> Result<()> {
         if self.stack_types.len() < required_types.len() {
-            return Err(crate::error::Error::CodeGen {
+            return Err(crate::common::error::Error::CodeGen {
                 message: format!("Stack underflow: need {} types, have {}", 
                                 required_types.len(), self.stack_types.len()),
             });
@@ -446,7 +446,7 @@ impl MethodContext {
             let actual_type = &self.stack_types[stack_index];
             
             if !self.types_compatible(actual_type, required_type) {
-                return Err(crate::error::Error::CodeGen {
+                return Err(crate::common::error::Error::CodeGen {
                     message: format!("Type mismatch: expected {}, found {}", 
                                     required_type, actual_type),
                 });

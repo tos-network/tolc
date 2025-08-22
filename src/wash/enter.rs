@@ -4,8 +4,9 @@
 //! This phase builds symbol tables for all compilation units, establishes
 //! inheritance relationships, and handles import statements.
 
-use crate::ast::{Ast, TypeDecl, ClassDecl, InterfaceDecl, TypeParam, TypeRef};
-use crate::error::Result;
+use crate::ast::{Ast, TypeDecl, ClassDecl, InterfaceDecl, EnumDecl, AnnotationDecl, TypeParam, TypeRef};
+use crate::common::error::Result;
+use crate::common::classpath;
 use std::collections::HashMap;
 
 /// Type parameter symbol for generic types
@@ -29,13 +30,15 @@ pub struct MethodSymbol {
     pub is_generic: bool,
 }
 
-/// Symbol table entry for a class or interface
+/// Symbol table entry for a class, interface, enum, or annotation
 #[derive(Debug, Clone)]
 pub struct ClassSymbol {
     pub name: String,
     pub fully_qualified_name: String,
     pub package_name: Option<String>,
     pub is_interface: bool,
+    pub is_enum: bool,
+    pub is_annotation: bool,
     pub super_class: Option<String>,
     pub interfaces: Vec<String>,
     pub modifiers: Vec<String>,
@@ -45,6 +48,8 @@ pub struct ClassSymbol {
     pub is_generic: bool,
     /// Methods declared in this class (including generic methods)
     pub methods: HashMap<String, MethodSymbol>,
+    /// Enum constants (only for enums)
+    pub enum_constants: Vec<String>,
 }
 
 /// Global symbol environment containing all symbols
@@ -52,8 +57,14 @@ pub struct ClassSymbol {
 pub struct SymbolEnvironment {
     /// Map from class name to ClassSymbol
     pub classes: HashMap<String, ClassSymbol>,
-    /// Import statements resolved to fully qualified names
+    /// Import statements resolved to fully qualified names (single-type imports)
     pub imports: HashMap<String, String>,
+    /// Wildcard imports - list of package names for on-demand imports
+    pub wildcard_imports: Vec<String>,
+    /// Static imports - map from simple name to fully qualified name
+    pub static_imports: HashMap<String, String>,
+    /// Static wildcard imports - list of class names for static on-demand imports
+    pub static_wildcard_imports: Vec<String>,
     /// Current package being processed
     pub current_package: Option<String>,
     /// Map from type parameter name to its symbol (scoped by owner)
@@ -106,23 +117,68 @@ impl Enter {
         Ok(ast)
     }
     
-    /// Process import declaration
+    /// Process import declaration - JavaC style import resolution
+    /// Handles both static and wildcard imports following JavaC's MemberEnter.visitImport pattern
     fn process_import(&mut self, import: &crate::ast::ImportDecl) -> Result<()> {
-        if import.is_static {
-            eprintln!("⚠️  ENTER: Static imports not yet implemented: {}", import.name);
-            return Ok(());
-        }
-        
         if import.is_wildcard {
-            eprintln!("⚠️  ENTER: Wildcard imports not yet implemented: {}.*", import.name);
-            return Ok(());
+            // Import on demand (wildcard import)
+            if import.is_static {
+                // Static wildcard import: import static Class.*
+                eprintln!("📦 ENTER: Static wildcard import: {}.*", import.name);
+                self.symbol_env.static_wildcard_imports.push(import.name.clone());
+                self.import_static_all(&import.name)?;
+            } else {
+                // Package wildcard import: import package.*
+                eprintln!("📦 ENTER: Wildcard import: {}.*", import.name);
+                self.symbol_env.wildcard_imports.push(import.name.clone());
+                self.import_all(&import.name)?;
+            }
+        } else {
+            // Named import
+            if import.is_static {
+                // Static named import: import static Class.member
+                eprintln!("📥 ENTER: Static import: {}", import.name);
+                self.import_named_static(&import.name)?;
+            } else {
+                // Single type import: import Class
+                eprintln!("📥 ENTER: Type import: {}", import.name);
+                self.import_named(&import.name)?;
+            }
         }
         
-        // Single type import
-        let simple_name = import.name.split('.').last().unwrap_or(&import.name);
-        self.symbol_env.imports.insert(simple_name.to_string(), import.name.clone());
-        eprintln!("📥 ENTER: Import: {} -> {}", simple_name, import.name);
-        
+        Ok(())
+    }
+    
+    /// Import a single named type (JavaC importNamed equivalent)
+    fn import_named(&mut self, qualified_name: &str) -> Result<()> {
+        let simple_name = qualified_name.split('.').last().unwrap_or(qualified_name);
+        self.symbol_env.imports.insert(simple_name.to_string(), qualified_name.to_string());
+        eprintln!("✅ ENTER: Imported type: {} -> {}", simple_name, qualified_name);
+        Ok(())
+    }
+    
+    /// Import all types from a package (JavaC importAll equivalent)
+    fn import_all(&mut self, package_name: &str) -> Result<()> {
+        // For wildcard imports, we store the package name and resolve types on demand
+        // This matches JavaC's behavior where wildcard imports are resolved during symbol lookup
+        eprintln!("✅ ENTER: Added wildcard import for package: {}", package_name);
+        Ok(())
+    }
+    
+    /// Import a single static member (JavaC importNamedStatic equivalent)
+    fn import_named_static(&mut self, qualified_name: &str) -> Result<()> {
+        if let Some(member_name) = qualified_name.split('.').last() {
+            self.symbol_env.static_imports.insert(member_name.to_string(), qualified_name.to_string());
+            eprintln!("✅ ENTER: Imported static member: {} -> {}", member_name, qualified_name);
+        }
+        Ok(())
+    }
+    
+    /// Import all static members from a class (JavaC importStaticAll equivalent)
+    fn import_static_all(&mut self, class_name: &str) -> Result<()> {
+        // For static wildcard imports, we store the class name and resolve members on demand
+        // This matches JavaC's behavior for static import resolution
+        eprintln!("✅ ENTER: Added static wildcard import for class: {}", class_name);
         Ok(())
     }
     
@@ -135,8 +191,11 @@ impl Enter {
             TypeDecl::Interface(interface_decl) => {
                 self.process_interface_decl(interface_decl)?;
             }
-            _ => {
-                eprintln!("⚠️  ENTER: Type declaration not yet implemented");
+            TypeDecl::Enum(enum_decl) => {
+                self.process_enum_decl(enum_decl)?;
+            }
+            TypeDecl::Annotation(annotation_decl) => {
+                self.process_annotation_decl(annotation_decl)?;
             }
         }
         Ok(())
@@ -191,12 +250,15 @@ impl Enter {
             fully_qualified_name: fully_qualified_name.clone(),
             package_name: self.symbol_env.current_package.clone(),
             is_interface: false,
+            is_enum: false,
+            is_annotation: false,
             super_class,
             interfaces,
             modifiers: class_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
             type_parameters,
             is_generic,
             methods,
+            enum_constants: Vec::new(),
         };
         
         // Store class symbol
@@ -236,12 +298,15 @@ impl Enter {
             fully_qualified_name: fully_qualified_name.clone(),
             package_name: self.symbol_env.current_package.clone(),
             is_interface: true,
+            is_enum: false,
+            is_annotation: false,
             super_class: Some("java.lang.Object".to_string()),
             interfaces,
             modifiers: interface_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
             type_parameters,
             is_generic,
             methods: HashMap::new(),
+            enum_constants: Vec::new(),
         };
         
         self.symbol_env.classes.insert(interface_decl.name.clone(), interface_symbol);
@@ -314,18 +379,62 @@ impl Enter {
         Ok(method_symbol)
     }
     
-    /// Resolve type name from TypeRef to string representation
+    /// Resolve type name from TypeRef to string representation (JavaC aligned with import resolution)
     fn resolve_type_name(&self, type_ref: &TypeRef) -> String {
-        if type_ref.type_args.is_empty() {
-            // Simple type
-            type_ref.name.clone()
+        let base_name = if type_ref.type_args.is_empty() {
+            // Simple type - resolve through import hierarchy (JavaC pattern)
+            self.resolve_simple_type_name(&type_ref.name)
         } else {
             // Generic type with type arguments
+            let resolved_base = self.resolve_simple_type_name(&type_ref.name);
             let args: Vec<String> = type_ref.type_args.iter()
                 .map(|arg| self.resolve_type_arg(arg))
                 .collect();
-            format!("{}<{}>", type_ref.name, args.join(", "))
+            format!("{}<{}>", resolved_base, args.join(", "))
+        };
+        
+        eprintln!("🔍 ENTER: Resolved type '{}' -> '{}'", type_ref.name, base_name);
+        base_name
+    }
+    
+    /// Resolve a simple type name through the import resolution hierarchy
+    /// Following JavaC's symbol resolution order: single imports -> wildcard imports -> classpath
+    fn resolve_simple_type_name(&self, simple_name: &str) -> String {
+        // 1. Check single-type imports (highest precedence)
+        if let Some(qualified_name) = self.symbol_env.imports.get(simple_name) {
+            eprintln!("🎯 ENTER: Found in single imports: {} -> {}", simple_name, qualified_name);
+            return qualified_name.clone();
         }
+        
+        // 2. Check wildcard imports (on-demand)
+        for package_name in &self.symbol_env.wildcard_imports {
+            let candidate = format!("{}.{}", package_name, simple_name);
+            // Try to resolve this candidate through classpath
+            if let Some(resolved) = classpath::resolve_class_name(&candidate) {
+                eprintln!("🎯 ENTER: Found via wildcard import: {} -> {}", simple_name, resolved);
+                return resolved.to_string();
+            }
+        }
+        
+        // 3. Check current package
+        if let Some(ref current_pkg) = self.symbol_env.current_package {
+            let candidate = format!("{}.{}", current_pkg, simple_name);
+            if let Some(resolved) = classpath::resolve_class_name(&candidate) {
+                eprintln!("🎯 ENTER: Found in current package: {} -> {}", simple_name, resolved);
+                return resolved.to_string();
+            }
+        }
+        
+        // 4. Try direct classpath resolution (for java.lang.* types)
+        if let Some(resolved) = classpath::resolve_class_name(simple_name) {
+            eprintln!("🎯 ENTER: Found in classpath: {} -> {}", simple_name, resolved);
+            return resolved.to_string();
+        }
+        
+        // 5. Fallback to package-based resolution
+        let fallback = classpath::resolve_class_name_with_fallback(simple_name, self.symbol_env.current_package.as_deref());
+        eprintln!("🔍 ENTER: Using fallback resolution: {} -> {}", simple_name, fallback);
+        fallback
     }
     
     /// Resolve type argument to string representation
@@ -344,6 +453,86 @@ impl Enter {
                 }
             }
         }
+    }
+    
+    /// Process enum declaration - corresponds to JavaC's visitClassDef for enums
+    fn process_enum_decl(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        let fully_qualified_name = if let Some(ref package) = self.symbol_env.current_package {
+            format!("{}.{}", package, enum_decl.name)
+        } else {
+            enum_decl.name.clone()
+        };
+        
+        eprintln!("🔢 ENTER: Processing enum: {}", fully_qualified_name);
+        
+        // Collect enum constants
+        let enum_constants: Vec<String> = enum_decl.constants
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        
+        eprintln!("📝 ENTER: Enum constants: {:?}", enum_constants);
+        
+        // Process interfaces implemented by the enum
+        let interfaces: Vec<String> = enum_decl.implements
+            .iter()
+            .map(|iface| self.resolve_type_name(iface))
+            .collect();
+        
+        // Create enum symbol (enums extend java.lang.Enum)
+        let enum_symbol = ClassSymbol {
+            name: enum_decl.name.clone(),
+            fully_qualified_name: fully_qualified_name.clone(),
+            package_name: self.symbol_env.current_package.clone(),
+            is_interface: false,
+            is_enum: true,
+            is_annotation: false,
+            super_class: Some("java.lang.Enum".to_string()),
+            interfaces,
+            modifiers: enum_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+            type_parameters: Vec::new(), // Enums cannot have type parameters
+            is_generic: false,
+            methods: HashMap::new(),
+            enum_constants,
+        };
+        
+        self.symbol_env.classes.insert(enum_decl.name.clone(), enum_symbol);
+        
+        eprintln!("✅ ENTER: Enum {} processed", enum_decl.name);
+        Ok(())
+    }
+    
+    /// Process annotation declaration - corresponds to JavaC's visitClassDef for annotations
+    fn process_annotation_decl(&mut self, annotation_decl: &AnnotationDecl) -> Result<()> {
+        let fully_qualified_name = if let Some(ref package) = self.symbol_env.current_package {
+            format!("{}.{}", package, annotation_decl.name)
+        } else {
+            annotation_decl.name.clone()
+        };
+        
+        eprintln!("📋 ENTER: Processing annotation: {}", fully_qualified_name);
+        
+        // Create annotation symbol (annotations extend java.lang.annotation.Annotation)
+        let annotation_symbol = ClassSymbol {
+            name: annotation_decl.name.clone(),
+            fully_qualified_name: fully_qualified_name.clone(),
+            package_name: self.symbol_env.current_package.clone(),
+            is_interface: true, // Annotations are special interfaces
+            is_enum: false,
+            is_annotation: true,
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec!["java.lang.annotation.Annotation".to_string()],
+            modifiers: annotation_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+            type_parameters: Vec::new(), // Annotations cannot have type parameters
+            is_generic: false,
+            methods: HashMap::new(),
+            enum_constants: Vec::new(),
+        };
+        
+        self.symbol_env.classes.insert(annotation_decl.name.clone(), annotation_symbol);
+        
+        eprintln!("✅ ENTER: Annotation {} processed", annotation_decl.name);
+        Ok(())
     }
     
     /// Get symbol environment for use by subsequent phases

@@ -45,7 +45,6 @@ pub mod class;
 // Backed up: pub mod conditional_optimizer;
 // Backed up: pub mod gen_cond;
 pub mod class_writer;
-pub mod classpath;
 pub mod constant_optimizer;
 pub mod constpool;
 pub mod defs;
@@ -131,8 +130,8 @@ pub use typed_index::{
 pub use writer::class_file_to_bytes;
 
 use crate::ast::*;
-use crate::error::Result;
-use crate::config::Config;
+use crate::common::error::Result;
+use crate::common::config::Config;
 use std::path::Path;
 use std::collections::HashMap;
 
@@ -173,7 +172,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signature
                 class_writer.generate_class(&class)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
-                    .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                    .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 
                 // Determine the class file name (for inner classes: OuterClass$InnerClass.class)
                 let class_file_name = if let Some(outer_class) = &parent_class_name {
@@ -196,7 +195,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signature
                 class_writer.generate_interface(&interface)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
-                    .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                    .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let class_file_path = output_path.join(format!("{}.class", interface.name));
                 let bytes = class_file_to_bytes(&class_file);
                 std::fs::write(&class_file_path, bytes)?;
@@ -211,7 +210,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signature
                 class_writer.generate_enum(&enum_decl)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
-                    .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                    .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let class_file_path = output_path.join(format!("{}.class", enum_decl.name));
                 let bytes = class_file_to_bytes(&class_file);
                 std::fs::write(&class_file_path, bytes)?;
@@ -222,7 +221,7 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signature
                 class_writer.generate_annotation(&annotation)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
-                    .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                    .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let class_file_path = output_path.join(format!("{}.class", annotation.name));
                 let bytes = class_file_to_bytes(&class_file);
                 std::fs::write(&class_file_path, bytes)?;
@@ -422,7 +421,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
-                //     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                //     .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let bytes = class_file_to_bytes(&class_file);
                 return Ok(bytes);
             }
@@ -438,7 +437,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
-                //     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                //     .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let bytes = class_file_to_bytes(&class_file);
                 return Ok(bytes);
             }
@@ -453,7 +452,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
-                //     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                //     .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let bytes = class_file_to_bytes(&class_file);
                 return Ok(bytes);
             }
@@ -468,7 +467,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option
                 let class_file = class_writer.get_class_file();
                 // Temporarily disable verification for in-memory compilation
                 // crate::verify::verify(&class_file)
-                //     .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+                //     .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
                 let bytes = class_file_to_bytes(&class_file);
                 return Ok(bytes);
             }
@@ -476,7 +475,7 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option
     }
     
     // No type declarations found
-    Err(crate::error::Error::CodeGen { 
+    Err(crate::common::error::Error::CodeGen { 
         message: "No type declarations found to compile".to_string() 
     })
 }
@@ -493,7 +492,7 @@ fn generate_interface_bytecode(interface: &InterfaceDecl, output_dir: &Path, con
     // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
     crate::verify::verify(&class_file)
-        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+        .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", interface.name));
     
     let bytes = class_file_to_bytes(&class_file);
@@ -513,7 +512,7 @@ fn generate_enum_bytecode(enum_decl: &EnumDecl, output_dir: &Path, config: &Conf
     // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
     crate::verify::verify(&class_file)
-        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+        .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", enum_decl.name));
     
     let bytes = class_file_to_bytes(&class_file);
@@ -533,7 +532,7 @@ fn generate_annotation_bytecode(annotation: &AnnotationDecl, output_dir: &Path, 
     // Get the generated class file and verify before writing
     let class_file = class_writer.get_class_file();
     crate::verify::verify(&class_file)
-        .map_err(|e| crate::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
+        .map_err(|e| crate::common::error::Error::CodeGen { message: format!("ClassFile verify failed: {}", e) })?;
     let class_file_path = output_dir.join(format!("{}.class", annotation.name));
     
     let bytes = class_file_to_bytes(&class_file);

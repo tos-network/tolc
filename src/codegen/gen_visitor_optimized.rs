@@ -12,7 +12,7 @@ use crate::codegen::{
     constpool_optimized::OptimizedConstantPool,
     opcodes,
 };
-use crate::error::Result;
+use crate::common::error::Result;
 use std::collections::HashMap;
 
 /// Optimized visitor context with pooled allocations
@@ -603,6 +603,10 @@ impl OptimizedGenVisitor {
             
             Stmt::If(if_stmt) => self.visit_if_optimized(if_stmt),
             Stmt::For(for_stmt) => self.visit_for_optimized(for_stmt),
+            Stmt::EnhancedFor(_enhanced_for_stmt) => {
+                // Enhanced-for optimization not implemented yet - use standard path
+                Ok(())
+            },
             Stmt::Block(block) => self.visit_block_optimized(block),
             
             _ => Ok(()), // Handle other statement types

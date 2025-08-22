@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-// Import rt.rs data
+// Import rt.rs data from same module
 mod rt {
-    include!("../rt.rs");
+    include!("rt.rs");
 }
 
 /// Global classpath mapping from simple class names to full internal names

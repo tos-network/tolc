@@ -3,7 +3,7 @@
 //! This module provides comprehensive verification that tolc's optimizer architecture
 //! is 100% aligned with Oracle's javac optimizer implementation.
 
-use crate::error::Result;
+use crate::common::error::Result;
 
 /// JavaC Optimizer Alignment Verifier
 pub struct JavaCOptimizerAlignment;

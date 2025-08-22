@@ -10,7 +10,7 @@ pub fn is_valid_class_signature(s: &str) -> bool {
     // Safety cap: prevent pathological loops on malformed signatures
     let mut steps: usize = 0;
     while p.more() {
-        if steps > crate::consts::VERIFY_MAX_SIGNATURE_ITERS { return false; }
+        if steps > crate::common::consts::VERIFY_MAX_SIGNATURE_ITERS { return false; }
         steps += 1;
         // superinterfaces
         if !p.parse_class_type_signature() { return false; }
@@ -84,7 +84,7 @@ impl<'a> Parser<'a> {
         // Safety cap inside bounds loop
         let mut bsteps: usize = 0;
         while self.consume(':') {
-            if bsteps > crate::consts::VERIFY_MAX_SIGNATURE_ITERS { return false; }
+            if bsteps > crate::common::consts::VERIFY_MAX_SIGNATURE_ITERS { return false; }
             bsteps += 1;
                 if !self.parse_field_type_signature() { return false; }
             }

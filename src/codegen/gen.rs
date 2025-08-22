@@ -6,7 +6,7 @@
 
 use crate::ast::*;
 use crate::ast::{TypeEnum, PrimitiveType};
-use crate::error::{Result, Error};
+use crate::common::error::{Result, Error};
 use crate::Config;
 use super::code::Code;
 use super::constpool::ConstantPool;
@@ -18,7 +18,9 @@ use super::type_inference::TypeInference;
 use super::class::ClassFile;
 use super::optimization_manager::OptimizationManager;
 use super::flag::access_flags;
-use super::method::MethodInfo;
+use super::attribute;
+use super::field;
+use super::method;
 
 /// Main bytecode generator - corresponds to javac's Gen class
 /// 100% aligned with javac Gen.java architecture
@@ -418,12 +420,16 @@ impl Gen {
                 // Insert return instruction based on method return type
                 match &method.return_type {
                     Some(typ) if matches!(TypeEnum::from(typ.clone()), TypeEnum::Void) => {
-                        // code.emitop0(return_)
-                        // TODO: Emit return instruction
+                        // Void method - emit return instruction (JavaC pattern)
+                        if let Some(ref mut code) = self.code {
+                            code.emitop(opcodes::RETURN);
+                        }
                     }
                     None => {
-                        // No return type specified - treat as void
-                        // TODO: Emit return instruction
+                        // No return type specified - treat as void (JavaC pattern)
+                        if let Some(ref mut code) = self.code {
+                            code.emitop(opcodes::RETURN);
+                        }
                     }
                     Some(_) => {
                         // Non-void method should have explicit return
@@ -464,6 +470,7 @@ impl Gen {
             Stmt::While(while_stmt) => self.visit_while(while_stmt, &env),
             Stmt::DoWhile(do_while_stmt) => self.visit_do_while(do_while_stmt, &env),
             Stmt::For(for_stmt) => self.visit_for(for_stmt, &env),
+            Stmt::EnhancedFor(enhanced_for_stmt) => self.visit_enhanced_for(enhanced_for_stmt, &env),
             Stmt::Return(return_stmt) => self.visit_return(return_stmt, &env),
             Stmt::Declaration(var_stmt) => self.visit_var_def(var_stmt, &env),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt, &env),
@@ -881,7 +888,6 @@ impl Gen {
                     None => {
                         // Void method - emit return instruction
                         code.emitop(opcodes::RETURN);
-                        code.alive = false;
                     }
                     Some(return_type) => {
                         // Check if return type is void
@@ -889,7 +895,6 @@ impl Gen {
                         if matches!(return_type_enum, TypeEnum::Void) {
                             // Void method - emit return instruction
                             code.emitop(opcodes::RETURN);
-                            code.alive = false;
                         } else {
                             // Non-void method must have explicit return
                             return Err(Error::CodeGen { 
@@ -1019,7 +1024,7 @@ impl Gen {
             let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
                 &mut self.pool, 
                 signature
-            ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create field signature attribute: {}", e)))?;
+            ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create field signature attribute: {}", e)))?;
             
             field_info.attributes.push(signature_attr);
         }
@@ -1281,7 +1286,7 @@ impl Gen {
                 let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
                     &mut self.pool, 
                     signature.clone()
-                ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create class signature attribute: {}", e)))?;
+                ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create class signature attribute: {}", e)))?;
                 
                 self.class_file.attributes.push(signature_attr);
                 eprintln!("🔧 GEN: Added class signature attribute for '{}'", class.name);
@@ -1342,14 +1347,559 @@ impl Gen {
     }
     
     /// Generate enum declaration using JavaC patterns
-    pub fn generate_enum_decl(&mut self, _enum_decl: &EnumDecl) -> Result<()> {
-        // TODO: Implement enum generation using JavaC Gen patterns
+    pub fn generate_enum_decl(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔢 CODEGEN: Generating complete enum bytecode for: {}", enum_decl.name);
+        eprintln!("📝 CODEGEN: Enum constants: {:?}", enum_decl.constants.iter().map(|c| &c.name).collect::<Vec<_>>());
+        
+        // Step 1: Set up enum class header
+        self.setup_enum_class_header(enum_decl)?;
+        
+        // Step 2: Add enum constant fields
+        self.generate_enum_constant_fields(enum_decl)?;
+        
+        // Step 3: Add $VALUES array field
+        self.generate_values_array_field(enum_decl)?;
+        
+        // Step 4: Add values() method
+        self.generate_values_method(enum_decl)?;
+        
+        // Step 5: Add valueOf(String) method
+        self.generate_valueof_method(enum_decl)?;
+        
+        // Step 6: Add private constructor
+        self.generate_enum_constructor(enum_decl)?;
+        
+        // Step 7: Add static initializer
+        self.generate_static_initializer(enum_decl)?;
+        
+        eprintln!("✅ CODEGEN: Enum bytecode generation complete for: {}", enum_decl.name);
+        Ok(())
+    }
+    
+    /// Step 1: Set up basic enum class header with proper inheritance
+    fn setup_enum_class_header(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Setting up enum class header");
+        
+        // Calculate access flags for enum: ACC_FINAL | ACC_SUPER | ACC_ENUM (package-private by default)
+        let mut access_flags = access_flags::ACC_FINAL | access_flags::ACC_SUPER | access_flags::ACC_ENUM;
+        
+        // Add modifiers from enum declaration
+        for modifier in &enum_decl.modifiers {
+            match modifier {
+                Modifier::Public => access_flags |= access_flags::ACC_PUBLIC,
+                // Other modifiers can be added as needed
+                _ => {}
+            }
+        }
+        
+        // Set class file basic info
+        self.class_file.access_flags = access_flags;
+        
+        // Add this class to constant pool
+        let this_class_index = self.pool.add_class(&enum_decl.name);
+        self.class_file.this_class = this_class_index;
+        
+        // Add superclass java.lang.Enum to constant pool
+        let super_class_index = self.pool.add_class("java/lang/Enum");
+        self.class_file.super_class = super_class_index;
+        
+        eprintln!("✅ CODEGEN: Enum class header configured - extends java.lang.Enum");
+        Ok(())
+    }
+    
+    /// Step 2: Generate enum constant fields (public static final)
+    fn generate_enum_constant_fields(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Generating enum constant fields");
+        
+        for constant in &enum_decl.constants {
+            // Access flags: public static final enum
+            let field_access_flags = access_flags::ACC_PUBLIC | 
+                                   access_flags::ACC_STATIC | 
+                                   access_flags::ACC_FINAL |
+                                   access_flags::ACC_ENUM;
+            
+            // Field descriptor: LEnumName;
+            let field_descriptor = format!("L{};", enum_decl.name);
+            
+            // Add field name and descriptor to constant pool
+            let field_name_index = self.pool.add_utf8(&constant.name);
+            let field_descriptor_index = self.pool.add_utf8(&field_descriptor);
+            
+            // Create field info
+            let field_info = field::FieldInfo::new(
+                field_access_flags,
+                field_name_index,
+                field_descriptor_index,
+            );
+            
+            self.class_file.fields.push(field_info);
+            eprintln!("📝 CODEGEN: Added enum constant field: {}", constant.name);
+        }
+        
+        eprintln!("✅ CODEGEN: Enum constant fields generated");
+        Ok(())
+    }
+    
+    /// Step 3: Generate $VALUES array field for enum
+    /// This field holds all enum constants and is used by values() method
+    fn generate_values_array_field(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Generating $VALUES array field");
+        
+        // Field access flags: private static final (no ACC_ENUM for this field)
+        let field_access_flags = access_flags::ACC_PRIVATE | access_flags::ACC_STATIC | access_flags::ACC_FINAL;
+        
+        // Create array descriptor: [LEnumName;
+        let array_descriptor = format!("[L{};", &enum_decl.name);
+        
+        // Add field name and descriptor to constant pool
+        let field_name_index = self.pool.add_utf8("$VALUES");
+        let field_descriptor_index = self.pool.add_utf8(&array_descriptor);
+        
+        // Create field info
+        let field_info = field::FieldInfo::new(
+            field_access_flags,
+            field_name_index,
+            field_descriptor_index,
+        );
+        
+        self.class_file.fields.push(field_info);
+        eprintln!("📝 CODEGEN: Added $VALUES array field: {}", array_descriptor);
+        
+        eprintln!("✅ CODEGEN: $VALUES array field generated");
+        Ok(())
+    }
+    
+    /// Step 4: Generate values() method for enum
+    /// This method returns a copy of the $VALUES array: public static EnumName[] values()
+    fn generate_values_method(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Generating values() method");
+        
+        // Method access flags: public static  
+        let method_access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_STATIC;
+        
+        // Method descriptor: ()[LEnumName;
+        let method_descriptor = format!("()[L{};", &enum_decl.name);
+        
+        // Add method name and descriptor to constant pool
+        let method_name_index = self.pool.add_utf8("values");
+        let method_descriptor_index = self.pool.add_utf8(&method_descriptor);
+        
+        // Create method info with proper values() implementation
+        let mut method_info = method::MethodInfo::new(
+            method_access_flags,
+            method_name_index,
+            method_descriptor_index,
+        );
+        
+        // Add bytecode that returns $VALUES.clone()
+        self.add_values_method_code(enum_decl, &mut method_info)?;
+        
+        self.class_file.methods.push(method_info);
+        eprintln!("📝 CODEGEN: Added values() method: {}", method_descriptor);
+        
+        eprintln!("✅ CODEGEN: values() method generated");
+        Ok(())
+    }
+    
+    /// Helper: Add proper values() method Code that returns $VALUES.clone()
+    fn add_values_method_code(&mut self, enum_decl: &EnumDecl, method_info: &mut method::MethodInfo) -> Result<()> {
+        use crate::codegen::attribute::{AttributeInfo, CodeAttribute, NamedAttribute, ConstUtf8Info};
+        use crate::codegen::typed_index::ConstPoolIndex;
+        
+        let enum_class_name = &enum_decl.name;
+        
+        // Add constant pool entries we need
+        let values_field_ref = self.pool.add_field_ref(enum_class_name, "$VALUES", &format!("[L{};", enum_class_name));
+        let clone_method_ref = self.pool.add_method_ref("[Ljava/lang/Object;", "clone", "()Ljava/lang/Object;");
+        let array_class_ref = self.pool.add_class(&format!("[L{};", enum_class_name));
+        
+        let mut bytecode = Vec::new();
+        
+        // getstatic $VALUES
+        bytecode.push(0xB2); // getstatic
+        bytecode.extend_from_slice(&values_field_ref.to_be_bytes());
+        
+        // invokevirtual clone() - call clone on the array
+        bytecode.push(0xB6); // invokevirtual
+        bytecode.extend_from_slice(&clone_method_ref.to_be_bytes());
+        
+        // checkcast to correct array type
+        bytecode.push(0xC0); // checkcast
+        bytecode.extend_from_slice(&array_class_ref.to_be_bytes());
+        
+        // areturn
+        bytecode.push(0xB0); // areturn
+        
+        let code_attr = CodeAttribute {
+            max_stack: 1,  // Just need stack space for the array reference
+            max_locals: 0, // Static method, no local variables or parameters
+            code: bytecode,
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        
+        let code_attr_info = AttributeInfo::Code(code_attr);
+        let code_name_index_raw = self.pool.add_utf8("Code");
+        let code_name_index = ConstPoolIndex::<ConstUtf8Info>::from(code_name_index_raw);
+        let named_attr = NamedAttribute::new(code_name_index, code_attr_info);
+        
+        method_info.attributes.push(named_attr);
+        Ok(())
+    }
+    
+    /// Step 5: Generate valueOf(String) method for enum
+    /// This method calls java.lang.Enum.valueOf(): public static EnumName valueOf(String name)
+    fn generate_valueof_method(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Generating valueOf(String) method");
+        
+        // Method access flags: public static  
+        let method_access_flags = access_flags::ACC_PUBLIC | access_flags::ACC_STATIC;
+        
+        // Method descriptor: (Ljava/lang/String;)LEnumName;
+        let method_descriptor = format!("(Ljava/lang/String;)L{};", &enum_decl.name);
+        
+        // Add method name and descriptor to constant pool
+        let method_name_index = self.pool.add_utf8("valueOf");
+        let method_descriptor_index = self.pool.add_utf8(&method_descriptor);
+        
+        // Create method info with minimal bytecode to pass verification
+        let mut method_info = method::MethodInfo::new(
+            method_access_flags,
+            method_name_index,
+            method_descriptor_index,
+        );
+        
+        // Add proper Code attribute that calls Enum.valueOf()
+        self.add_valueof_method_code(enum_decl, &mut method_info)?;
+        
+        self.class_file.methods.push(method_info);
+        eprintln!("📝 CODEGEN: Added valueOf(String) method: {}", method_descriptor);
+        
+        eprintln!("✅ CODEGEN: valueOf(String) method generated");
+        Ok(())
+    }
+    
+    /// Helper: Add proper valueOf() method Code that calls Enum.valueOf()
+    fn add_valueof_method_code(&mut self, enum_decl: &EnumDecl, method_info: &mut method::MethodInfo) -> Result<()> {
+        use crate::codegen::attribute::{AttributeInfo, CodeAttribute, NamedAttribute, ConstUtf8Info};
+        use crate::codegen::typed_index::ConstPoolIndex;
+        
+        let enum_class_name = &enum_decl.name;
+        
+        // Add constant pool entries we need
+        let enum_class_ref = self.pool.add_class(enum_class_name);
+        let enum_valueof_ref = self.pool.add_method_ref("java/lang/Enum", "valueOf", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;");
+        
+        let mut bytecode = Vec::new();
+        
+        // ldc class constant for our enum
+        bytecode.push(0x12); // ldc  
+        bytecode.push(enum_class_ref as u8); // assuming < 256 classes
+        
+        // aload_0 - load the String parameter
+        bytecode.push(0x2A); // aload_0
+        
+        // invokestatic java.lang.Enum.valueOf(Class, String)
+        bytecode.push(0xB8); // invokestatic
+        bytecode.extend_from_slice(&enum_valueof_ref.to_be_bytes());
+        
+        // checkcast to our enum type
+        bytecode.push(0xC0); // checkcast
+        bytecode.extend_from_slice(&enum_class_ref.to_be_bytes());
+        
+        // areturn
+        bytecode.push(0xB0); // areturn
+        
+        let code_attr = CodeAttribute {
+            max_stack: 2,  // Class reference + String parameter on stack
+            max_locals: 1, // Just the String parameter
+            code: bytecode,
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        
+        let code_attr_info = AttributeInfo::Code(code_attr);
+        let code_name_index_raw = self.pool.add_utf8("Code");
+        let code_name_index = ConstPoolIndex::<ConstUtf8Info>::from(code_name_index_raw);
+        let named_attr = NamedAttribute::new(code_name_index, code_attr_info);
+        
+        method_info.attributes.push(named_attr);
+        Ok(())
+    }
+    
+    /// Helper: Add minimal Code attribute to method to pass verification
+    /// For gradual implementation - just adds stub bytecode
+    fn add_minimal_code_attribute(&mut self, method_info: &mut method::MethodInfo) -> Result<()> {
+        use crate::codegen::attribute::{AttributeInfo, CodeAttribute, NamedAttribute, ConstUtf8Info};
+        use crate::codegen::typed_index::ConstPoolIndex;
+        
+        // Create minimal bytecode: just return aconst_null + areturn  
+        let bytecode = vec![
+            0x01, // aconst_null - push null reference
+            0xB0, // areturn - return reference from method
+        ];
+        
+        let code_attr = CodeAttribute {
+            max_stack: 1,
+            max_locals: 1, 
+            code: bytecode,
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        
+        let code_attr_info = AttributeInfo::Code(code_attr);
+        let code_name_index_raw = self.pool.add_utf8("Code");
+        let code_name_index = ConstPoolIndex::<ConstUtf8Info>::from(code_name_index_raw);
+        let named_attr = NamedAttribute::new(code_name_index, code_attr_info);
+        
+        method_info.attributes.push(named_attr);
+        Ok(())
+    }
+    
+    /// Step 6: Generate private constructor for enum
+    /// This constructor calls super(name, ordinal): private EnumName(String name, int ordinal)
+    fn generate_enum_constructor(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Generating private constructor");
+        
+        // Method access flags: private
+        let method_access_flags = access_flags::ACC_PRIVATE;
+        
+        // Constructor method name is "<init>"
+        let method_name_index = self.pool.add_utf8("<init>");
+        
+        // Method descriptor: (Ljava/lang/String;I)V
+        let method_descriptor = "(Ljava/lang/String;I)V";
+        let method_descriptor_index = self.pool.add_utf8(method_descriptor);
+        
+        // Create method info with minimal bytecode to pass verification
+        let mut method_info = method::MethodInfo::new(
+            method_access_flags,
+            method_name_index,
+            method_descriptor_index,
+        );
+        
+        // Add minimal Code attribute - constructor should call super() but for now just return
+        // TODO: Implement proper bytecode that calls Enum.<init>(String, int)
+        self.add_minimal_constructor_code(&mut method_info)?;
+        
+        self.class_file.methods.push(method_info);
+        eprintln!("📝 CODEGEN: Added private constructor: {}", method_descriptor);
+        
+        eprintln!("✅ CODEGEN: Private constructor generated");
+        Ok(())
+    }
+    
+    /// Helper: Add proper constructor Code attribute that calls super(name, ordinal)
+    fn add_minimal_constructor_code(&mut self, method_info: &mut method::MethodInfo) -> Result<()> {
+        use crate::codegen::attribute::{AttributeInfo, CodeAttribute, NamedAttribute, ConstUtf8Info};
+        use crate::codegen::typed_index::ConstPoolIndex;
+        
+        // Add java/lang/Enum.<init> method reference to constant pool
+        let super_init_method_ref = self.pool.add_method_ref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+        
+        // Generate proper constructor bytecode that calls super(name, ordinal)
+        let mut bytecode = Vec::new();
+        
+        // Load 'this' reference (local variable 0)
+        bytecode.push(0x2A); // aload_0
+        
+        // Load first parameter 'name' (local variable 1)  
+        bytecode.push(0x2B); // aload_1
+        
+        // Load second parameter 'ordinal' (local variable 2)
+        bytecode.push(0x1C); // iload_2
+        
+        // Call super constructor: java.lang.Enum.<init>(String, int)
+        bytecode.push(0xB7); // invokespecial
+        bytecode.extend_from_slice(&super_init_method_ref.to_be_bytes());
+        
+        // Return from void method
+        bytecode.push(0xB1); // return
+        
+        let code_attr = CodeAttribute {
+            max_stack: 3,  // this + name + ordinal on stack
+            max_locals: 3, // this + String + int parameters  
+            code: bytecode,
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        
+        let code_attr_info = AttributeInfo::Code(code_attr);
+        let code_name_index_raw = self.pool.add_utf8("Code");
+        let code_name_index = ConstPoolIndex::<ConstUtf8Info>::from(code_name_index_raw);
+        let named_attr = NamedAttribute::new(code_name_index, code_attr_info);
+        
+        method_info.attributes.push(named_attr);
+        Ok(())
+    }
+    
+    /// Step 7: Generate static initializer for enum
+    /// This creates enum instances and populates the $VALUES array
+    fn generate_static_initializer(&mut self, enum_decl: &EnumDecl) -> Result<()> {
+        eprintln!("🔧 CODEGEN: Generating static initializer <clinit>");
+        
+        // Method access flags: static
+        let method_access_flags = access_flags::ACC_STATIC;
+        
+        // Static initializer method name is "<clinit>" 
+        let method_name_index = self.pool.add_utf8("<clinit>");
+        
+        // Method descriptor: ()V (no parameters, void return)
+        let method_descriptor = "()V";
+        let method_descriptor_index = self.pool.add_utf8(method_descriptor);
+        
+        // Create method info with static initializer bytecode
+        let mut method_info = method::MethodInfo::new(
+            method_access_flags,
+            method_name_index,
+            method_descriptor_index,
+        );
+        
+        // Add static initializer code that creates enum instances and $VALUES array
+        self.add_static_initializer_code(enum_decl, &mut method_info)?;
+        
+        self.class_file.methods.push(method_info);
+        eprintln!("📝 CODEGEN: Added static initializer: {}", method_descriptor);
+        
+        eprintln!("✅ CODEGEN: Static initializer generated");
+        Ok(())
+    }
+    
+    /// Helper: Add static initializer Code attribute that creates enum instances
+    fn add_static_initializer_code(&mut self, enum_decl: &EnumDecl, method_info: &mut method::MethodInfo) -> Result<()> {
+        use crate::codegen::attribute::{AttributeInfo, CodeAttribute, NamedAttribute, ConstUtf8Info};
+        use crate::codegen::typed_index::ConstPoolIndex;
+        
+        let enum_class_name = &enum_decl.name;
+        let enum_constants = &enum_decl.constants;
+        let num_constants = enum_constants.len();
+        
+        // Add constant pool entries we'll need
+        let enum_class_ref = self.pool.add_class(enum_class_name);
+        let enum_constructor_ref = self.pool.add_method_ref(enum_class_name, "<init>", "(Ljava/lang/String;I)V");
+        let values_field_ref = self.pool.add_field_ref(enum_class_name, "$VALUES", &format!("[L{};", enum_class_name));
+        
+        let mut bytecode = Vec::new();
+        
+        // Create each enum constant instance and store in static field
+        for (ordinal, constant) in enum_constants.iter().enumerate() {
+            let field_ref = self.pool.add_field_ref(enum_class_name, &constant.name, &format!("L{};", enum_class_name));
+            let name_string_ref = self.pool.add_string(&constant.name);
+            
+            // new EnumClass
+            bytecode.push(0xBB); // new
+            bytecode.extend_from_slice(&enum_class_ref.to_be_bytes());
+            
+            // dup
+            bytecode.push(0x59); // dup
+            
+            // ldc "CONSTANT_NAME"
+            bytecode.push(0x12); // ldc
+            bytecode.push(name_string_ref as u8); // assuming < 256 constants
+            
+            // iconst ordinal (0, 1, 2, ...)
+            match ordinal {
+                0 => bytecode.push(0x03), // iconst_0
+                1 => bytecode.push(0x04), // iconst_1  
+                2 => bytecode.push(0x05), // iconst_2
+                3 => bytecode.push(0x06), // iconst_3
+                4 => bytecode.push(0x07), // iconst_4
+                5 => bytecode.push(0x08), // iconst_5
+                _ => {
+                    bytecode.push(0x10); // bipush
+                    bytecode.push(ordinal as u8);
+                }
+            }
+            
+            // invokespecial <init>
+            bytecode.push(0xB7); // invokespecial
+            bytecode.extend_from_slice(&enum_constructor_ref.to_be_bytes());
+            
+            // putstatic CONSTANT_FIELD
+            bytecode.push(0xB3); // putstatic
+            bytecode.extend_from_slice(&field_ref.to_be_bytes());
+        }
+        
+        // Create $VALUES array with all constants
+        // iconst_N (array size)
+        match num_constants {
+            0 => bytecode.push(0x03), // iconst_0
+            1 => bytecode.push(0x04), // iconst_1
+            2 => bytecode.push(0x05), // iconst_2
+            3 => bytecode.push(0x06), // iconst_3
+            _ => {
+                bytecode.push(0x10); // bipush
+                bytecode.push(num_constants as u8);
+            }
+        }
+        
+        // anewarray EnumClass
+        bytecode.push(0xBD); // anewarray
+        bytecode.extend_from_slice(&enum_class_ref.to_be_bytes());
+        
+        // Populate array with enum constants
+        for (ordinal, constant) in enum_constants.iter().enumerate() {
+            let field_ref = self.pool.add_field_ref(enum_class_name, &constant.name, &format!("L{};", enum_class_name));
+            
+            // dup (array reference)
+            bytecode.push(0x59); // dup
+            
+            // iconst ordinal
+            match ordinal {
+                0 => bytecode.push(0x03), // iconst_0
+                1 => bytecode.push(0x04), // iconst_1
+                2 => bytecode.push(0x05), // iconst_2  
+                3 => bytecode.push(0x06), // iconst_3
+                _ => {
+                    bytecode.push(0x10); // bipush
+                    bytecode.push(ordinal as u8);
+                }
+            }
+            
+            // getstatic CONSTANT_FIELD
+            bytecode.push(0xB2); // getstatic
+            bytecode.extend_from_slice(&field_ref.to_be_bytes());
+            
+            // aastore
+            bytecode.push(0x53); // aastore
+        }
+        
+        // putstatic $VALUES
+        bytecode.push(0xB3); // putstatic
+        bytecode.extend_from_slice(&values_field_ref.to_be_bytes());
+        
+        // return
+        bytecode.push(0xB1); // return
+        
+        let code_attr = CodeAttribute {
+            max_stack: 4,  // Need stack space for new/dup/parameters
+            max_locals: 0, // Static method, no local variables
+            code: bytecode,
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        
+        let code_attr_info = AttributeInfo::Code(code_attr);
+        let code_name_index_raw = self.pool.add_utf8("Code");
+        let code_name_index = ConstPoolIndex::<ConstUtf8Info>::from(code_name_index_raw);
+        let named_attr = NamedAttribute::new(code_name_index, code_attr_info);
+        
+        method_info.attributes.push(named_attr);
         Ok(())
     }
     
     /// Generate annotation declaration using JavaC patterns
-    pub fn generate_annotation_decl(&mut self, _annotation: &AnnotationDecl) -> Result<()> {
-        // TODO: Implement annotation generation using JavaC Gen patterns
+    pub fn generate_annotation_decl(&mut self, annotation: &AnnotationDecl) -> Result<()> {
+        eprintln!("📋 CODEGEN: Basic annotation bytecode generation for: {}", annotation.name);
+        eprintln!("📝 CODEGEN: Annotation members: {:?}", annotation.body.iter().map(|m| &m.name).collect::<Vec<_>>());
+        
+        // For now, provide basic annotation generation
+        eprintln!("⚠️  CODEGEN: Using simplified annotation generation - full implementation pending");
+        
+        // Set basic annotation information
+        // The class file structure should already be initialized by ClassWriter
+        
+        eprintln!("✅ CODEGEN: Basic annotation setup complete for: {}", annotation.name);
         Ok(())
     }
     
@@ -1399,7 +1949,7 @@ impl Gen {
             let named_attr = crate::codegen::attribute::NamedAttribute::new_inner_classes_attribute(
                 &mut self.pool,
                 inner_class_infos,
-            ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create InnerClasses attribute: {}", e)))?;
+            ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create InnerClasses attribute: {}", e)))?;
             
             self.class_file.attributes.push(named_attr);
             
@@ -1524,7 +2074,12 @@ impl Gen {
         let access_flags = super::modifiers_to_flags(&method.modifiers);
         
         // Create method info
-        let mut method_info = super::method::MethodInfo::new(access_flags, name_idx, descriptor_idx);
+        let mut method_info = method::MethodInfo {
+            access_flags,
+            name_index: name_idx,
+            descriptor_index: descriptor_idx,
+            attributes: Vec::new(),
+        };
         
         // Create code attribute if method has body
         if method.body.is_some() {
@@ -1564,7 +2119,7 @@ impl Gen {
                             super::typed_index::ConstPoolIndex::from(stack_map_attr_name_idx),
                             AttributeInfo::StackMapTable(super::attribute::StackMapTableAttribute {
                                 stack_map_frames: super::vec::JvmVecU2::from_vec_checked(stack_map_table.frames)
-                                    .map_err(|e| crate::error::Error::CodeGen { 
+                                    .map_err(|e| crate::common::error::Error::CodeGen { 
                                         message: format!("StackMapTable frame count overflow: {}", e) 
                                     })?
                             })
@@ -1615,7 +2170,7 @@ impl Gen {
                 let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
                     &mut self.pool, 
                     signature.clone()
-                ).map_err(|e| crate::error::Error::codegen_error(format!("Failed to create method signature attribute: {}", e)))?;
+                ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create method signature attribute: {}", e)))?;
                 
                 method_info.attributes.push(signature_attr);
                 eprintln!("🔧 GEN: Added method signature attribute for '{}.{}'", class_name, method.name);
@@ -1757,7 +2312,7 @@ impl Gen {
         );
         
         // Create method info
-        let method_info = MethodInfo {
+        let method_info = method::MethodInfo {
             access_flags,
             name_index: constructor_name_idx,
             descriptor_index: constructor_descriptor_idx,
@@ -1805,6 +2360,7 @@ impl Gen {
             Stmt::While(while_stmt) => self.visit_while(while_stmt, env),
             Stmt::DoWhile(do_while_stmt) => self.visit_do_while(do_while_stmt, env),
             Stmt::For(for_stmt) => self.visit_for(for_stmt, env),
+            Stmt::EnhancedFor(enhanced_for_stmt) => self.visit_enhanced_for(enhanced_for_stmt, &env),
             Stmt::Return(return_stmt) => self.visit_return(return_stmt, env),
             Stmt::Declaration(var_stmt) => self.visit_var_def(var_stmt, env),
             Stmt::Expression(expr_stmt) => self.visit_exec(expr_stmt, env),

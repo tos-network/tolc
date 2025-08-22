@@ -1,7 +1,7 @@
 use tolc::ast::*;
 use tolc::codegen::*;
 use tolc::parser::Parser;
-use tolc::error::Result;
+use tolc::common::error::Result;
 
 #[test]
 fn test_method_call_with_current_class() -> Result<()> {

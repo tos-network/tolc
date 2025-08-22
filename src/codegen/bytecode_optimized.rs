@@ -7,7 +7,7 @@
 //! - Cache-friendly instruction layout
 
 use crate::codegen::opcodes;
-use crate::error::Result;
+use crate::common::error::Result;
 use std::io::Write;
 
 /// Optimized bytecode buffer with intelligent growth strategy

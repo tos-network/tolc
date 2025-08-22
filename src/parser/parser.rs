@@ -5,7 +5,7 @@
 use super::{lexer::{Lexer, LexicalToken, Token}, error::ParseError};
 use crate::ast::*;
 use crate::ast::{TypeArg, BoundKind};
-use crate::error::Result;
+use crate::common::error::Result;
 
 /// Parser for Terminos Language
 pub struct Parser {
@@ -37,7 +37,7 @@ impl Parser {
             label_stack: Vec::new(),
             pending_members: Vec::new(),
             global_steps: 0,
-            global_gas: std::env::var("TOLC_PARSER_MAX_GAS").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::consts::PARSER_MAX_GAS),
+            global_gas: std::env::var("TOLC_PARSER_MAX_GAS").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::common::consts::PARSER_MAX_GAS),
             class_name_stack: Vec::new(),
         })
     }
@@ -59,7 +59,7 @@ impl Parser {
         let mut imports = Vec::new();
         let mut steps_imports: usize = 0;
         while self.check(&Token::Import) {
-            if steps_imports > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            if steps_imports > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
             steps_imports += 1;
             imports.push(self.parse_import_decl()?);
         }
@@ -107,7 +107,7 @@ impl Parser {
                 }
             }
             steps_toplevel = steps_toplevel.saturating_add(1);
-            if steps_toplevel > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            if steps_toplevel > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
         }
         if had_error {
             return Err(super::error::ParseError::InvalidSyntax {
@@ -174,7 +174,7 @@ impl Parser {
         if !self.is_at_end() {
             // Increment global step counter and stop advancing if we exceed cap
             self.global_steps = self.global_steps.saturating_add(1);
-            if self.global_steps > crate::consts::PARSER_MAX_LOOP_ITERS { self.current = self.tokens.len(); return self.previous(); }
+            if self.global_steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { self.current = self.tokens.len(); return self.previous(); }
             // Consume global gas; if exhausted, abort parse with InvalidSyntax
             if self.global_gas == 0 {
                 // Force end and mark error via setting current to end; caller will observe EOF
@@ -383,7 +383,7 @@ impl Parser {
         // Safety cap to prevent non-progress loops in large classes
         let mut steps_in_body: usize = 0;
         while !self.check(&Token::RBrace) && !self.is_at_end() {
-            if steps_in_body > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            if steps_in_body > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
             steps_in_body += 1;
             match self.parse_class_member() {
                 Ok(m) => body.push(m),
@@ -505,7 +505,7 @@ impl Parser {
         // Parse remaining parts separated by dots
         let mut steps: usize = 0;
         while self.match_token(&Token::Dot) {
-            if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
             steps += 1;
             parts.push(self.parse_identifier()?);
         }
@@ -520,7 +520,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let before = self.current;
             params.push(self.parse_type_parameter()?);
@@ -582,7 +582,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while self.match_token(&Token::Amp) {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let before = self.current;
             types.push(self.parse_type_ref()?);
@@ -624,7 +624,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 // Consume any annotations appearing before an array dimension
                 if self.check(&Token::At) {
@@ -664,7 +664,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             if self.check(&Token::Question) {
                 let loc = self.advance().location();
@@ -695,7 +695,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             types.push(self.parse_type_ref()?);
             
@@ -1101,7 +1101,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 members.push(self.parse_interface_member()?);
             }
@@ -1147,7 +1147,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 constants.push(self.parse_enum_constant()?);
             
@@ -1167,7 +1167,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 members.push(self.parse_class_member()?);
             }
@@ -1206,7 +1206,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 members.push(self.parse_annotation_member()?);
             }
@@ -1570,7 +1570,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let modifiers = self.parse_modifiers()?;
             let annotations = self.parse_annotations()?;
@@ -1621,7 +1621,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             arguments.push(self.parse_expression()?);
             
@@ -1641,7 +1641,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 let before = self.current;
             match self.parse_class_member() {
@@ -1685,70 +1685,71 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
-            // Skip empty statements and semicolons
-            if self.check(&Token::Semicolon) {
-                self.advance();
-                continue;
-            }
-            log::debug!("parse_block: statement start at token {:?} '{}'", self.peek().token_type(), self.peek().lexeme());
-            // Return statement
-            if self.check(&Token::Return) {
-                let start = self.current_span();
-                self.advance();
-                let value = if !self.check(&Token::Semicolon) { Some(self.parse_expression()?) } else { None };
-                self.consume(&Token::Semicolon, "Expected ';' after return")?;
-                let end = self.previous_span();
-                let span = Span::new(start.start, end.end);
-                statements.push(Stmt::Return(ReturnStmt { value, span }));
-                continue;
-            }
-            // If statement
-            if self.check(&Token::If) {
-                statements.push(self.parse_if_stmt()?);
-                continue;
-            }
-            // While statement
-            if self.check(&Token::While) {
-                statements.push(self.parse_while_stmt()?);
-                continue;
-            }
-            // For statement
-            if self.check(&Token::For) {
-                statements.push(self.parse_for_stmt()?);
-                continue;
-            }
-            // Try-catch-finally
-            if self.check(&Token::Try) {
-                statements.push(self.parse_try_stmt()?);
-                continue;
-            }
-            // Switch
-            if self.check(&Token::Switch) {
-                statements.push(self.parse_switch_stmt()?);
-                continue;
-            }
-            
-            // If we encounter a closing brace, break out of the loop
-            if self.check(&Token::RBrace) {
-                break;
-            }
-            
-            let before = self.current;
-            match self.parse_statement() {
-                Ok(stmt) => statements.push(stmt),
-                Err(e) => {
-                    // Error recovery inside blocks
-                    log::debug!("parse_block: statement error at token {:?} '{}' -> {}", self.peek().token_type(), self.peek().lexeme(), e);
-                    self.synchronize_in_block();
+                
+                // Skip empty statements and semicolons
+                if self.check(&Token::Semicolon) {
+                    self.advance();
                     continue;
                 }
-            }
-            if self.current == before {
-                // Ensure progress to avoid infinite loops
-                if !self.is_at_end() { self.advance(); }
-            }
+                log::debug!("parse_block: statement start at token {:?} '{}'", self.peek().token_type(), self.peek().lexeme());
+                // Return statement
+                if self.check(&Token::Return) {
+                    let start = self.current_span();
+                    self.advance();
+                    let value = if !self.check(&Token::Semicolon) { Some(self.parse_expression()?) } else { None };
+                    self.consume(&Token::Semicolon, "Expected ';' after return")?;
+                    let end = self.previous_span();
+                    let span = Span::new(start.start, end.end);
+                    statements.push(Stmt::Return(ReturnStmt { value, span }));
+                    continue;
+                }
+                // If statement
+                if self.check(&Token::If) {
+                    statements.push(self.parse_if_stmt()?);
+                    continue;
+                }
+                // While statement
+                if self.check(&Token::While) {
+                    statements.push(self.parse_while_stmt()?);
+                    continue;
+                }
+                // For statement
+                if self.check(&Token::For) {
+                    statements.push(self.parse_for_stmt()?);
+                    continue;
+                }
+                // Try-catch-finally
+                if self.check(&Token::Try) {
+                    statements.push(self.parse_try_stmt()?);
+                    continue;
+                }
+                // Switch
+                if self.check(&Token::Switch) {
+                    statements.push(self.parse_switch_stmt()?);
+                    continue;
+                }
+                
+                // If we encounter a closing brace, break out of the loop
+                if self.check(&Token::RBrace) {
+                    break;
+                }
+                
+                let before = self.current;
+                match self.parse_statement() {
+                    Ok(stmt) => statements.push(stmt),
+                    Err(e) => {
+                        // Error recovery inside blocks
+                        log::debug!("parse_block: statement error at token {:?} '{}' -> {}", self.peek().token_type(), self.peek().lexeme(), e);
+                        self.synchronize_in_block();
+                        continue;
+                    }
+                }
+                if self.current == before {
+                    // Ensure progress to avoid infinite loops
+                    if !self.is_at_end() { self.advance(); }
+                }
             }
         }
         
@@ -1951,7 +1952,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let before = self.current;
             let name = self.parse_identifier()?;
@@ -2082,7 +2083,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while self.match_token(&Token::Caret) {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let right = self.parse_bitwise_and_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -2097,7 +2098,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while self.match_token(&Token::Amp) {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let right = self.parse_equality_expr()?;
             let span = Span::new(self.current_span().start, self.previous_span().end);
@@ -2112,7 +2113,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             if self.match_token(&Token::Eq) {
                 let right = self.parse_relational_expr()?;
@@ -2133,7 +2134,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             if self.match_token(&Token::Lt) {
                 let right = self.parse_shift_expr()?;
@@ -2166,7 +2167,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             if self.match_token(&Token::LShift) {
                 let right = self.parse_additive_expr()?;
@@ -2191,7 +2192,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             if self.match_token(&Token::Plus) {
                 let right = self.parse_multiplicative_expr()?;
@@ -2212,7 +2213,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             if self.match_token(&Token::Star) {
                 let right = self.parse_unary_expr()?;
@@ -2290,7 +2291,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             // If we have just parsed a constructor call like `new T(args)` and the next token is '{',
             // treat it as an anonymous class body attached to the previous NewExpr.
@@ -2605,6 +2606,27 @@ impl Parser {
             }));
         }
         
+        // Parse array initializers: { expr1, expr2, ... }
+        if self.check(&Token::LBrace) {
+            let start = self.current_span();
+            self.advance(); // consume '{'
+            let mut values: Vec<Expr> = Vec::new();
+            
+            if !self.check(&Token::RBrace) {
+                loop {
+                    values.push(self.parse_expression()?);
+                    if !self.match_token(&Token::Comma) { break; }
+                    // Allow trailing comma
+                    if self.check(&Token::RBrace) { break; }
+                }
+            }
+            
+            self.consume(&Token::RBrace, "Expected '}' to close array initializer")?;
+            let end = self.previous_span();
+            let span = Span::new(start.start, end.end);
+            return Ok(Expr::ArrayInitializer(values));
+        }
+        
         // Fallback: produce a zero literal but avoid consuming unexpected tokens to keep recovery stable
         let span = self.current_span();
         Ok(Expr::Literal(LiteralExpr { value: Literal::Integer(0), span }))
@@ -2728,20 +2750,18 @@ impl Parser {
                     let var_type = self.parse_type_ref()?;
                     let var_name = self.parse_identifier()?;
                     self.consume(&Token::Colon, "Expected ':' in enhanced for")?;
-                    let iterable_expr = self.parse_expression()?; // Store the iterable expression
+                    let iterable_expr = self.parse_expression()?;
                     self.consume(&Token::RParen, "Expected ')' after enhanced for header")?;
                     // Parse body
                     let body = if self.check(&Token::LBrace) { Box::new(Stmt::Block(self.parse_block()?)) } else { Box::new(self.parse_statement()?) };
                     let span = Span::new(start.start, self.previous_span().end);
-                    // Represent as a generic for-statement with declaration in init and no condition/update
-                    // Store the iterable expression in the initializer as a temporary solution
-                    let decl = VarDeclStmt {
-                        modifiers: Vec::new(),
-                        type_ref: var_type,
-                        variables: vec![VariableDeclarator { name: var_name, array_dims: 0, initializer: Some(iterable_expr), span }],
+                    return Ok(Stmt::EnhancedFor(EnhancedForStmt {
+                        variable_type: var_type,
+                        variable_name: var_name,
+                        iterable: iterable_expr,
+                        body,
                         span,
-                    };
-                    return Ok(Stmt::For(ForStmt { init: vec![Stmt::Declaration(decl)], condition: None, update: Vec::new(), body, span }));
+                    }));
                 }
             }
         }
@@ -2791,7 +2811,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             loop {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
                 let name = self.parse_identifier()?;
                 let mut array_dims = 0;
@@ -2897,7 +2917,7 @@ impl Parser {
         {
             let mut steps: usize = 0;
             while !self.check(&Token::RBrace) && !self.is_at_end() {
-                if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+                if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
                 steps += 1;
             let mut labels: Vec<Expr> = Vec::new();
             // Collect consecutive case/default labels (aggregate multiple labels for same group)
@@ -2957,7 +2977,7 @@ impl Parser {
         let mut steps: usize = 0;
         loop {
             if !self.check(&Token::At) { break; }
-            if steps > crate::consts::PARSER_MAX_LOOP_ITERS { break; }
+            if steps > crate::common::consts::PARSER_MAX_LOOP_ITERS { break; }
             steps += 1;
             let start = self.current_span();
             self.advance(); // consume '@'

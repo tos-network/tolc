@@ -157,11 +157,57 @@ where
         T::default()
     }
     
-    fn visit_enum_decl(&mut self, _enum_decl: &EnumDecl) -> Self::Output {
+    fn visit_enum_decl(&mut self, enum_decl: &EnumDecl) -> Self::Output {
+        // Visit annotations
+        for annotation in &enum_decl.annotations {
+            self.visit_annotation(annotation);
+        }
+        
+        // Visit implements clauses
+        for implements in &enum_decl.implements {
+            self.visit_type_ref(implements);
+        }
+        
+        // Visit enum constants
+        for constant in &enum_decl.constants {
+            for arg in &constant.arguments {
+                self.visit_expr(arg);
+            }
+        }
+        
+        // Visit enum body (methods, fields, etc.)
+        for member in &enum_decl.body {
+            match member {
+                ClassMember::Field(f) => self.visit_field_decl(f),
+                ClassMember::Method(m) => self.visit_method_decl(m),
+                ClassMember::Constructor(c) => self.visit_constructor_decl(c),
+                ClassMember::Initializer(i) => self.visit_block(&i.body),
+                ClassMember::TypeDecl(t) => match t {
+                    TypeDecl::Class(c) => self.visit_class_decl(c),
+                    TypeDecl::Interface(i) => self.visit_interface_decl(i),
+                    TypeDecl::Enum(e) => self.visit_enum_decl(e),
+                    TypeDecl::Annotation(a) => self.visit_annotation_decl(a),
+                },
+            };
+        }
+        
         T::default()
     }
     
-    fn visit_annotation_decl(&mut self, _annotation: &AnnotationDecl) -> Self::Output {
+    fn visit_annotation_decl(&mut self, annotation_decl: &AnnotationDecl) -> Self::Output {
+        // Visit annotations on this annotation declaration
+        for annotation in &annotation_decl.annotations {
+            self.visit_annotation(annotation);
+        }
+        
+        // Visit annotation members
+        for member in &annotation_decl.body {
+            self.visit_type_ref(&member.type_ref);
+            if let Some(ref default_value) = member.default_value {
+                self.visit_expr(default_value);
+            }
+        }
+        
         T::default()
     }
     
@@ -312,6 +358,12 @@ where
                     self.visit_expr(&update.expr);
                 }
                 self.visit_stmt(&for_stmt.body);
+                T::default()
+            }
+            Stmt::EnhancedFor(enhanced_for_stmt) => {
+                self.visit_type_ref(&enhanced_for_stmt.variable_type);
+                self.visit_expr(&enhanced_for_stmt.iterable);
+                self.visit_stmt(&enhanced_for_stmt.body);
                 T::default()
             }
             Stmt::Switch(switch_stmt) => {

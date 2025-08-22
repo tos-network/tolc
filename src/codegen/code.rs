@@ -315,6 +315,16 @@ impl Code {
             }
             
             self.emit1(op);
+            
+            // Mark code as dead after terminal instructions (JavaC pattern)
+            match op {
+                opcodes::RETURN | opcodes::IRETURN | opcodes::LRETURN | 
+                opcodes::FRETURN | opcodes::DRETURN | opcodes::ARETURN | 
+                opcodes::ATHROW | opcodes::GOTO => {
+                    self.alive = false;
+                }
+                _ => {}
+            }
         }
     }
     
@@ -453,7 +463,7 @@ impl Code {
     // ============================================================================
 
     /// Smart branch merging - merge execution paths intelligently (javac pattern)
-    pub fn merge_state(&mut self, branch_state: &State) -> crate::error::Result<()> {
+    pub fn merge_state(&mut self, branch_state: &State) -> crate::common::error::Result<()> {
         if !self.alive {
             // If current path is dead, adopt the branch state
             self.state = branch_state.dup();
@@ -463,7 +473,7 @@ impl Code {
 
         // Both paths are alive - need to merge carefully
         if self.state.stacksize != branch_state.stacksize {
-            return Err(crate::error::Error::CodeGen {
+            return Err(crate::common::error::Error::CodeGen {
                 message: format!(
                     "Stack size mismatch: current={}, branch={}", 
                     self.state.stacksize, 

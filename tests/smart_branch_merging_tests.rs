@@ -67,7 +67,7 @@ fn test_stack_size_mismatch_error() {
     assert!(result.is_err());
     if let Err(e) = result {
         match e {
-            tolc::error::Error::CodeGen { message } => {
+            tolc::common::error::Error::CodeGen { message } => {
                 assert!(message.contains("Stack size mismatch"));
             }
             _ => panic!("Expected CodeGen error")

@@ -1,8 +1,8 @@
 //! Utilities to build method/field descriptors
 
 use crate::ast::TypeRef;
-use crate::consts::JAVA_LANG_SIMPLE_TYPES;
-use super::classpath;
+use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
+use crate::common::classpath;
 
 pub fn type_to_descriptor(ty: &TypeRef) -> String {
     let mut desc = String::new();

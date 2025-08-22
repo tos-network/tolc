@@ -109,9 +109,9 @@ impl Config {
     }
     
     /// Validate the configuration
-    pub fn validate(&self) -> crate::error::Result<()> {
+    pub fn validate(&self) -> crate::common::error::Result<()> {
         if self.target_java_version < 6 || self.target_java_version > 17 {
-            return Err(crate::error::Error::InvalidJavaVersion {
+            return Err(crate::common::error::Error::InvalidJavaVersion {
                 version: self.target_java_version.to_string(),
             });
         }

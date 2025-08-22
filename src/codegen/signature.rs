@@ -6,8 +6,8 @@
 //! Based on javac's SignatureGenerator implementation in Types.java and ClassWriter.java
 
 use crate::ast::*;
-use crate::consts::JAVA_LANG_SIMPLE_TYPES;
-use super::classpath;
+use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
+use crate::common::classpath;
 use std::collections::HashMap;
 
 /// Global type name resolver that maps simple type names to their fully qualified names

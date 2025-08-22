@@ -13,7 +13,7 @@ pub use error::{ParseError, ErrorRecovery};
 pub use span::{Span, Location, HasSpan};
 
 use crate::ast::Ast;
-use crate::error::Result;
+use crate::common::error::Result;
 
 // Planned split modules (incremental migration)
 // mod core;
@@ -73,7 +73,7 @@ pub fn parse_java_lenient(source: &str) -> Result<Ast> { Parser::new(source)?.pa
 pub fn parse_and_verify(source: &str) -> Result<Ast> {
     let ast = parser::parse(source)?;
     crate::review::review(&ast)
-        .map_err(|e| crate::error::Error::Semantic { message: e.to_string() })?;
+        .map_err(|e| crate::common::error::Error::Semantic { message: e.to_string() })?;
     Ok(ast)
 }
 

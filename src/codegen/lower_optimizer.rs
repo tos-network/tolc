@@ -4,7 +4,7 @@
 //! following the exact same patterns as Oracle's javac Lower.java.
 
 use crate::ast::*;
-use crate::error::Result;
+use crate::common::error::Result;
 use super::const_fold_javac::ConstFoldJavaC;
 use super::symtab::Symtab;
 use super::types::Types;

@@ -4,7 +4,7 @@
 //! and transformations before bytecode generation.
 
 use crate::ast::*;
-use crate::error::Result;
+use crate::common::error::Result;
 use super::constant_optimizer::ConstantOptimizer;
 use super::string_optimizer::StringOptimizer;
 use super::loop_optimizer::LoopOptimizer;
@@ -132,6 +132,7 @@ impl Lower {
             Stmt::If(if_stmt) => self.lower_if_stmt(if_stmt),
             Stmt::While(while_stmt) => self.lower_while_stmt(while_stmt),
             Stmt::For(for_stmt) => self.lower_for_stmt(for_stmt),
+            Stmt::EnhancedFor(_enhanced_for_stmt) => Ok(()), // No lowering needed yet
             Stmt::Return(return_stmt) => self.lower_return_stmt(return_stmt),
             Stmt::Declaration(var_stmt) => self.lower_var_stmt(var_stmt),
             Stmt::Try(try_stmt) => self.lower_try_stmt(try_stmt),

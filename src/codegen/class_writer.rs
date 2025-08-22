@@ -5,9 +5,9 @@
 
 use super::gen::Gen;
 use crate::codegen::ClassFile;
-use crate::config::Config;
+use crate::common::config::Config;
 use crate::ast::*;
-use crate::error::Result;
+use crate::common::error::Result;
 use std::collections::HashMap;
 
 /// JavaC-aligned Class writer for generating Java bytecode
