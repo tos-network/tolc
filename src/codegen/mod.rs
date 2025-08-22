@@ -135,8 +135,32 @@ use crate::common::config::Config;
 use std::path::Path;
 use std::collections::HashMap;
 
-/// Generate Java bytecode from an AST
+/// Generate Java bytecode from an AST with wash results
+pub fn generate_bytecode_with_wash(
+    ast: &Ast, 
+    output_dir: &str, 
+    config: &Config, 
+    signatures: Option<&std::collections::HashMap<String, String>>,
+    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+) -> Result<()> {
+    generate_bytecode_impl(ast, output_dir, config, signatures, wash_type_info, wash_symbol_env)
+}
+
+/// Generate Java bytecode from an AST (legacy interface)
 pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signatures: Option<&std::collections::HashMap<String, String>>) -> Result<()> {
+    generate_bytecode_impl(ast, output_dir, config, signatures, None, None)
+}
+
+/// Internal implementation for bytecode generation
+fn generate_bytecode_impl(
+    ast: &Ast, 
+    output_dir: &str, 
+    config: &Config, 
+    signatures: Option<&std::collections::HashMap<String, String>>,
+    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+) -> Result<()> {
     let output_path = Path::new(output_dir);
     
     // Ensure output directory exists
@@ -157,6 +181,10 @@ pub fn generate_bytecode(ast: &Ast, output_dir: &str, config: &Config, signature
                 class_writer.set_all_types(ast.type_decls.clone());
                 if let Some(sigs) = signatures {
                     class_writer.set_generic_signatures(sigs);
+                }
+                // Set wash results if available
+                if let (Some(type_info), Some(symbol_env)) = (&wash_type_info, &wash_symbol_env) {
+                    class_writer.set_wash_results(type_info.clone(), symbol_env.clone());
                 }
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
@@ -389,7 +417,30 @@ fn calculate_access_flags(type_decl: &TypeDecl) -> u16 {
 
 /// Generate Java bytecode from an AST and return as Vec<u8> (in-memory compilation)
 /// Returns the bytecode of the first type declaration found
+/// Generate bytecode in memory with wash results
+pub fn generate_bytecode_inmemory_with_wash(
+    ast: &Ast, 
+    config: &Config, 
+    signatures: Option<&std::collections::HashMap<String, String>>,
+    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+) -> Result<Vec<u8>> {
+    generate_bytecode_inmemory_impl(ast, config, signatures, wash_type_info, wash_symbol_env)
+}
+
+/// Generate bytecode in memory (legacy interface)
 pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option<&std::collections::HashMap<String, String>>) -> Result<Vec<u8>> {
+    generate_bytecode_inmemory_impl(ast, config, signatures, None, None)
+}
+
+/// Internal implementation for in-memory bytecode generation
+fn generate_bytecode_inmemory_impl(
+    ast: &Ast, 
+    config: &Config, 
+    signatures: Option<&std::collections::HashMap<String, String>>,
+    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+) -> Result<Vec<u8>> {
     // Build compilation-unit level annotation retention index
     let cu_retention = build_annotation_retention_index_from_cu(ast);
 
@@ -405,6 +456,10 @@ pub fn generate_bytecode_inmemory(ast: &Ast, config: &Config, signatures: Option
                 class_writer.set_all_types(ast.type_decls.clone());
                 if let Some(sigs) = signatures {
                     class_writer.set_generic_signatures(sigs);
+                }
+                // Set wash results if available
+                if let (Some(type_info), Some(symbol_env)) = (&wash_type_info, &wash_symbol_env) {
+                    class_writer.set_wash_results(type_info.clone(), symbol_env.clone());
                 }
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {

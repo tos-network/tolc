@@ -73,6 +73,12 @@ pub struct Gen {
     /// Generic signatures stored during TransTypes phase
     generic_signatures: Option<std::collections::HashMap<String, String>>,
     
+    /// Type information from wash/attr phase for type-aware code generation
+    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
+    
+    /// Symbol environment from wash/enter phase for symbol resolution
+    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>,
+    
     /// Inner class relationships for InnerClasses attribute generation
     inner_class_relationships: Vec<crate::codegen::InnerClassInfo>,
     
@@ -266,6 +272,8 @@ impl Gen {
             loop_context_stack: Vec::new(),          // Optimized loop context stack
             scope_manager: LoopScopeManager::new(), // Enhanced scope management
             generic_signatures: None,               // Generic signatures from TransTypes
+            wash_type_info: None,                    // Type information from wash/attr phase
+            wash_symbol_env: None,                   // Symbol environment from wash/enter phase
             inner_class_relationships: Vec::new(),  // Inner class relationships for InnerClasses attribute
             parent_class_name: None,                 // Parent class name for inner classes
             lambda_counter: 0,                       // Lambda method counter for unique names
@@ -283,6 +291,26 @@ impl Gen {
     /// Set generic signatures from TransTypes phase
     pub fn set_generic_signatures(&mut self, signatures: Option<std::collections::HashMap<String, String>>) {
         self.generic_signatures = signatures;
+    }
+    
+    /// Set wash phase results for type-aware code generation
+    pub fn set_wash_results(
+        &mut self, 
+        type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType>,
+        symbol_env: crate::wash::enter::SymbolEnvironment
+    ) {
+        self.wash_type_info = Some(type_info);
+        self.wash_symbol_env = Some(symbol_env);
+    }
+    
+    /// Get type information from wash/attr phase
+    pub fn get_wash_type_info(&self) -> Option<&std::collections::HashMap<String, crate::wash::attr::ResolvedType>> {
+        self.wash_type_info.as_ref()
+    }
+    
+    /// Get symbol environment from wash/enter phase  
+    pub fn get_wash_symbol_env(&self) -> Option<&crate::wash::enter::SymbolEnvironment> {
+        self.wash_symbol_env.as_ref()
     }
     
     /// Set inner class relationships for InnerClasses attribute generation

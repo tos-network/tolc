@@ -50,9 +50,18 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
     eprintln!("✅ TOLC: Semantic analysis complete");
     
     // Phase 3: In-memory Bytecode Generation
-    eprintln!("⚙️  TOLC: Phase 3 - In-memory bytecode generation");
+    eprintln!("⚙️  TOLC: Phase 3 - In-memory bytecode generation with wash integration");
     let signatures = semantic_analyzer.get_generic_signatures();
-    let bytecode = codegen::generate_bytecode_inmemory(&ast, config, Some(signatures))?;
+    let type_info_raw = semantic_analyzer.attr.get_type_information();
+    let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
+    
+    // Convert HashMap<usize, ResolvedType> to HashMap<String, ResolvedType> for codegen
+    let type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType> = type_info_raw
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    
+    let bytecode = codegen::generate_bytecode_inmemory_with_wash(&ast, config, Some(signatures), Some(type_info), Some(symbol_env))?;
     eprintln!("✅ TOLC: In-memory bytecode generation complete");
     
     eprintln!("🎉 TOLC: In-memory Java compilation finished successfully");
@@ -78,9 +87,17 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
     eprintln!("✅ TOLC: Semantic analysis complete");
     
     // Phase 3: Code Generation
-    eprintln!("⚙️  TOLC: Phase 3 - Bytecode generation");
+    eprintln!("⚙️  TOLC: Phase 3 - Bytecode generation with wash integration");
     let signatures = semantic_analyzer.get_generic_signatures();
-    codegen::generate_bytecode(&ast, output_dir, config, Some(signatures))?;
+    let type_info_raw = semantic_analyzer.attr.get_type_information();
+    let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
+    
+    // Convert HashMap<usize, ResolvedType> to HashMap<String, ResolvedType> for codegen
+    let type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType> = type_info_raw
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    codegen::generate_bytecode_with_wash(&ast, output_dir, config, Some(signatures), Some(type_info), Some(symbol_env))?;
     eprintln!("✅ TOLC: Bytecode generation complete");
     
     eprintln!("🎉 TOLC: Java compilation pipeline finished successfully");

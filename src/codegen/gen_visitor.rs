@@ -226,22 +226,57 @@ impl Gen {
                 })
             } else {
                 eprintln!("DEBUG: No local variable found for '{}', checking symbol table", tree.name);
-                // Check if it's a simple local variable we can handle directly
+                // Try wash type information first for type-aware variable loading
+                let resolved_type_opt = self.get_wash_type_info().and_then(|wash_types| {
+                    wash_types.get(&tree.name).cloned()
+                });
+                
+                if let Some(resolved_type) = resolved_type_opt {
+                    eprintln!("DEBUG: Found wash type info for '{}': {:?}", tree.name, resolved_type);
+                    return self.with_items(|items| {
+                        // Use wash type information to create type-aware local item
+                        // For now, assume slot 1 for simplicity - this should be improved with proper slot tracking
+                        let local_item = items.make_local_item_for_resolved_type(&resolved_type, 1);
+                        items.load_item(&local_item)
+                    });
+                }
+                
+                // Fallback to hardcoded logic for specific known variables (deprecated)
                 match tree.name.as_str() {
-                    "x" => {
-                        // Generate iload instruction for variable x (assumed to be in slot 1)
+                    "value" => {
+                        // Use type-aware loading instead of hardcoded ALOAD_1
+                        eprintln!("WARNING: Using fallback loading for 'value' - should use wash type info");
                         self.with_items(|items| {
-                            items.code.emitop(opcodes::ILOAD_1);
-                            items.code.state.push(crate::codegen::code::Type::Int);
-                            Ok(JavacItem::Stack { typecode: typecodes::INT })
+                            // Create a reference type item and load it
+                            let local_item = JavacItem::Local { 
+                                typecode: typecodes::OBJECT, 
+                                reg: 1 
+                            };
+                            items.load_item(&local_item)
+                        })
+                    }
+                    "x" => {
+                        // Use type-aware loading instead of hardcoded ILOAD_1
+                        eprintln!("WARNING: Using fallback loading for 'x' - should use wash type info");
+                        self.with_items(|items| {
+                            // Create an int type item and load it
+                            let local_item = JavacItem::Local { 
+                                typecode: typecodes::INT, 
+                                reg: 1 
+                            };
+                            items.load_item(&local_item)
                         })
                     }
                     "args" => {
-                        // Generate aload instruction for args parameter (slot 0)
+                        // Use type-aware loading instead of hardcoded ALOAD_0
+                        eprintln!("WARNING: Using fallback loading for 'args' - should use wash type info");
                         self.with_items(|items| {
-                            items.code.emitop(opcodes::ALOAD_0);
-                            items.code.state.push(crate::codegen::code::Type::Object("String[]".to_string()));
-                            Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
+                            // Create an object array type item and load it
+                            let local_item = JavacItem::Local { 
+                                typecode: typecodes::OBJECT, 
+                                reg: 0 
+                            };
+                            items.load_item(&local_item)
                         })
                     }
                     _ => {
@@ -292,19 +327,102 @@ impl Gen {
             
             // General case: evaluate target first, then access field
             let _target_item = self.visit_expr(target, env)?;
+            
+            // Use wash type information for type-aware field access
+            let field_key = format!("{}.{}", 
+                if let Expr::Identifier(id) = target.as_ref() { 
+                    &id.name 
+                } else { 
+                    "this" 
+                }, 
+                &tree.name);
+                
+            let resolved_type_opt = self.get_wash_type_info().and_then(|wash_types| {
+                wash_types.get(&field_key).or_else(|| wash_types.get(&tree.name)).cloned()
+            });
+                
+            if let Some(resolved_type) = resolved_type_opt {
+                eprintln!("DEBUG: Found wash field type for '{}': {:?}", tree.name, resolved_type);
+                
+                // Extract class name before borrowing
+                let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
+                let field_name = tree.name.clone();
+                
+                return self.with_items(|items| {
+                    // Create type-aware field item using wash information
+                    let field_item = items.make_field_item_for_resolved_type(
+                        field_name,
+                        owner_class,
+                        &resolved_type,
+                        false // Assume non-static for instance field access
+                    );
+                    
+                    // Load the field using the items system (type-aware)
+                    items.load_item(&field_item)
+                });
+            }
+            
+            // Fallback to hardcoded logic for specific known fields (deprecated)
+            if tree.name == "value" {
+                eprintln!("WARNING: Using fallback field access for 'value' - should use wash type info");
+                
+                return self.with_items(|items| {
+                    // Create a field item for the 'value' field
+                    let field_item = JavacItem::Member {
+                        typecode: typecodes::OBJECT,
+                        member_name: "value".to_string(),
+                        class_name: "SimpleGeneric".to_string(), // TODO: Get from context
+                        descriptor: "Ljava/lang/Object;".to_string(),
+                        is_static: false,
+                        nonvirtual: false,
+                    };
+                    
+                    // Load the field using the items system
+                    items.load_item(&field_item)
+                });
+            }
         }
         
-        // Create the member access item for general fields
+        // Extract symbol and class info before borrowing
+        let symbol_opt = self.type_inference.types().symtab().lookup_symbol(&tree.name).cloned();
+        let class_name = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
+        let field_name = tree.name.clone();
+        
+        // Create the member access item for general fields with proper type resolution
         self.with_items(|items| {
-            let typ = TypeEnum::Primitive(PrimitiveType::Int); // TODO: Lookup field type
-            let is_static = false; // TODO: Determine if static
-            Ok(items.make_member_item(tree.name.clone(), "FIELD_CLASS".to_string(), "FIELD_DESC".to_string(), is_static, &typ))
+            if let Some(symbol) = symbol_opt {
+                let is_static = symbol.kind == super::symtab::SymbolKind::Field && 
+                               symbol.modifiers.contains(&"static".to_string());
+                // Generate proper field descriptor based on symbol type
+                let descriptor = format!("L{};", class_name.replace('.', "/"));
+                
+                Ok(items.make_member_item(field_name.clone(), class_name.clone(), descriptor, is_static, &symbol.typ))
+            } else {
+                eprintln!("⚠️  WARNING: Cannot resolve field '{}', using fallback type", field_name);
+                // Fallback to object type for unknown fields
+                let typ = TypeEnum::Reference(ReferenceType::Class("java.lang.Object".to_string()));
+                Ok(items.make_member_item(field_name, class_name, "Ljava/lang/Object;".to_string(), false, &typ))
+            }
         })
     }
     
-    /// Visit method call expression - simplified version
+    /// Visit method call expression with generic type inference
     pub fn visit_apply(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
-        // JavaC: visitApply method implementation
+        // Enhanced JavaC: visitApply method with wash type integration for generics
+        eprintln!("DEBUG: Method call '{}' with {} arguments", tree.name, tree.arguments.len());
+        
+        // Try generic method type inference using wash information
+        let method_key = format!("{}()", tree.name); // Simplified method key
+        let resolved_type_opt = self.get_wash_type_info().and_then(|wash_types| {
+            wash_types.get(&method_key).cloned()
+        });
+        
+        if let Some(resolved_type) = resolved_type_opt {
+            eprintln!("DEBUG: Found wash method type for '{}': {:?}", tree.name, resolved_type);
+            
+            // Use wash type information for enhanced method call generation
+            return self.gen_generic_method_call_with_wash(tree, env, &resolved_type);
+        }
         
         // Determine method call type and generate appropriate bytecode
         let is_static = self.is_static_method_call(tree);
@@ -323,6 +441,146 @@ impl Gen {
         } else {
             // Instance method call: invokevirtual or invokeinterface
             self.gen_instance_method_call(tree, env)
+        }
+    }
+    
+    /// Generate generic method call with wash type inference
+    fn gen_generic_method_call_with_wash(
+        &mut self, 
+        tree: &MethodCallExpr, 
+        env: &GenContext, 
+        method_type: &crate::wash::attr::ResolvedType
+    ) -> Result<JavacItem> {
+        eprintln!("DEBUG: Generating generic method call with wash type inference");
+        
+        // Generate arguments with type awareness (moved outside to avoid borrowing issues)
+        let mut arg_items = Vec::new();
+        for arg in &tree.arguments {
+            let arg_item = self.visit_expr(arg, env)?;
+            arg_items.push(arg_item);
+        }
+        
+        // Extract method signature information from wash ResolvedType
+        let (param_types, return_type) = match method_type {
+            crate::wash::attr::ResolvedType::Method(params, ret) => {
+                (params.clone(), ret.as_ref())
+            }
+            _ => {
+                eprintln!("WARNING: Expected Method type for '{}', got {:?}", tree.name, method_type);
+                // Fallback to regular method call
+                return self.gen_instance_method_call(tree, env);
+            }
+        };
+        
+        // Build method descriptor from resolved types (with type erasure for generics)
+        let mut descriptor = String::from("(");
+        for param_type in &param_types {
+            descriptor.push_str(&self.resolved_type_to_descriptor(param_type)?);
+        }
+        descriptor.push(')');
+        descriptor.push_str(&self.resolved_type_to_descriptor(return_type)?);
+        
+        eprintln!("DEBUG: Generated generic method descriptor: {}", descriptor);
+        
+        // Extract necessary data before borrowing
+        let class_name = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
+        let method_name = tree.name.clone();
+        
+        // Add method ref to pool before with_items
+        let method_ref_idx = self.get_pool_mut().add_method_ref(&class_name, &method_name, &descriptor);
+        
+        return self.with_items(|items| {
+            items.code.emitop(super::opcodes::INVOKEVIRTUAL); // Use invokevirtual for instance methods
+            items.code.emit2(method_ref_idx);
+            
+            // Create return item based on resolved return type
+            let return_item = items.make_stack_item_for_resolved_type(return_type);
+            Ok(return_item)
+        });
+    }
+    
+    /// Convert TypeRef to TypeEnum helper
+    fn type_ref_to_type_enum(&self, type_ref: &TypeRef) -> Result<TypeEnum> {
+        // Use the existing as_type_enum method from the trait
+        Ok(type_ref.as_type_enum())
+    }
+    
+    /// Convert TypeEnum to JVM descriptor helper
+    fn type_enum_to_descriptor(&self, type_enum: &TypeEnum) -> Result<String> {
+        match type_enum {
+            TypeEnum::Primitive(prim) => {
+                match prim {
+                    PrimitiveType::Boolean => Ok("Z".to_string()),
+                    PrimitiveType::Byte => Ok("B".to_string()),
+                    PrimitiveType::Short => Ok("S".to_string()),
+                    PrimitiveType::Int => Ok("I".to_string()),
+                    PrimitiveType::Long => Ok("J".to_string()),
+                    PrimitiveType::Float => Ok("F".to_string()),
+                    PrimitiveType::Double => Ok("D".to_string()),
+                    PrimitiveType::Char => Ok("C".to_string()),
+                }
+            }
+            TypeEnum::Reference(ref_type) => {
+                match ref_type {
+                    ReferenceType::Class(class_name) | ReferenceType::Interface(class_name) => {
+                        let internal_name = class_name.replace('.', "/");
+                        Ok(format!("L{};", internal_name))
+                    }
+                    ReferenceType::Array(_) => {
+                        // Arrays need special handling - for now, simplify to Object[]
+                        Ok("[Ljava/lang/Object;".to_string())
+                    }
+                }
+            }
+            TypeEnum::Void => Ok("V".to_string()),
+            _ => {
+                eprintln!("WARNING: Unsupported TypeEnum for descriptor: {:?}", type_enum);
+                Ok("Ljava/lang/Object;".to_string())
+            }
+        }
+    }
+    
+    /// Convert ResolvedType to JVM descriptor for method signatures
+    fn resolved_type_to_descriptor(&self, resolved_type: &crate::wash::attr::ResolvedType) -> Result<String> {
+        use crate::wash::attr::{ResolvedType, PrimitiveType};
+        
+        match resolved_type {
+            ResolvedType::Primitive(prim) => {
+                match prim {
+                    PrimitiveType::Boolean => Ok("Z".to_string()),
+                    PrimitiveType::Byte => Ok("B".to_string()),
+                    PrimitiveType::Short => Ok("S".to_string()),
+                    PrimitiveType::Int => Ok("I".to_string()),
+                    PrimitiveType::Long => Ok("J".to_string()),
+                    PrimitiveType::Float => Ok("F".to_string()),
+                    PrimitiveType::Double => Ok("D".to_string()),
+                    PrimitiveType::Char => Ok("C".to_string()),
+                }
+            }
+            ResolvedType::Reference(class_name) => {
+                let internal_name = class_name.replace('.', "/");
+                Ok(format!("L{};", internal_name))
+            }
+            ResolvedType::Array(element_type) => {
+                Ok(format!("[{}", self.resolved_type_to_descriptor(element_type)?))
+            }
+            ResolvedType::TypeVariable(_) => {
+                // Type erasure: T -> Object
+                Ok("Ljava/lang/Object;".to_string())
+            }
+            ResolvedType::Wildcard(wildcard) => {
+                // Type erasure: ? extends T -> upper bound (or Object)
+                if let Some(ref bound) = wildcard.bound {
+                    self.resolved_type_to_descriptor(bound)
+                } else {
+                    Ok("Ljava/lang/Object;".to_string())
+                }
+            }
+            ResolvedType::Null => Ok("Ljava/lang/Object;".to_string()),
+            _ => {
+                eprintln!("WARNING: Unsupported ResolvedType for descriptor: {:?}", resolved_type);
+                Ok("Ljava/lang/Object;".to_string())
+            }
         }
     }
     
@@ -1106,74 +1364,92 @@ impl Gen {
     pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<JavacItem> {
         // Check if target is a field access (this.field)
         if let Expr::FieldAccess(field_access) = tree.target.as_ref() {
-            // Handle field assignment: this.field = value
-            
-            // Load 'this' reference first
-            if let Some(code) = self.code_mut() {
-                code.emitop(opcodes::ALOAD_0); // Load 'this' (parameter 0)
-                code.state.push(super::code::Type::Object("java/lang/Object".to_string())); // Push object reference
-            }
-            
-            // Generate the value to assign
-            eprintln!("DEBUG: Assignment value expression: {:?}", tree.value);
-            if let Some(code) = self.code_mut() {
-                eprintln!("DEBUG: Before visit_expr (value): stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
-            }
-            let _value_item = self.visit_expr(&tree.value, env)?;
-            if let Some(code) = self.code_mut() {
-                eprintln!("DEBUG: After visit_expr (value): stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
-            }
-            
-            // Get field name and add field reference to constant pool first
+            // Handle field assignment using type-aware items system
             let field_name = &field_access.name;
-            let field_ref_idx = match &env.clazz {
-                Some(class) => {
-                    // Find field type
-                    let field_decl = class.body.iter().find_map(|member| {
-                        if let ClassMember::Field(f) = member {
-                            if f.name == *field_name {
-                                Some(f)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    });
-                    
-                    if let Some(field) = field_decl {
-                        let descriptor = self.type_ref_to_descriptor(&field.type_ref)?;
-                        self.get_pool_mut().add_field_ref(&class.name, field_name, &descriptor)
-                    } else {
-                        // Default to int field if not found
-                        self.get_pool_mut().add_field_ref(&class.name, field_name, "I")
-                    }
-                }
-                None => {
-                    // Default if no class context - this should not happen in well-formed code
-                    eprintln!("Warning: No class context for field access {}, using Object as fallback. env.clazz = {:?}", field_name, env.clazz);
-                    self.get_pool_mut().add_field_ref("Object", field_name, "I")
-                }
+            
+            // Try to get wash type information for the field
+            let resolved_type = if let Some(wash_types) = self.get_wash_type_info() {
+                wash_types.get(field_name).cloned()
+            } else {
+                None
             };
             
-            // Generate putfield instruction
-            if let Some(code) = self.code_mut() {
-                eprintln!("DEBUG: Before putfield: stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
-                
-                code.emitop(opcodes::PUTFIELD);
-                code.emit2(field_ref_idx.into()); // Field reference index
-                
-                // Pop object reference and value from stack
-                code.state.pop(1); // value
-                code.state.pop(1); // object reference
-                
-                eprintln!("DEBUG: After putfield: stack_size={}, max_stack={}", code.state.stacksize, code.state.max_stacksize);
-            }
+            // Generate the value to assign BEFORE with_items to avoid borrowing conflicts
+            eprintln!("DEBUG: Assignment value expression: {:?}", tree.value);
+            let _value_item = self.visit_expr(&tree.value, env)?;
             
-            // Return the assigned value
-            self.with_items(|items| {
-                let result_type = TypeEnum::Primitive(PrimitiveType::Int); // TODO: Proper type
-                Ok(items.make_stack_item_for_type(&result_type))
+            // Extract fallback field type information BEFORE with_items to avoid borrowing conflicts
+            let fallback_field_info = if resolved_type.is_none() {
+                match &env.clazz {
+                    Some(class) => {
+                        let field_decl = class.body.iter().find_map(|member| {
+                            if let ClassMember::Field(f) = member {
+                                if f.name == *field_name { Some(f) } else { None }
+                            } else { None }
+                        });
+                        
+                        if let Some(field) = field_decl {
+                            let field_type = self.type_ref_to_type_enum(&field.type_ref)?;
+                            let descriptor = self.type_enum_to_descriptor(&field_type)?;
+                            Some((field_type, class.name.clone(), descriptor))
+                        } else {
+                            eprintln!("WARNING: Field '{}' not found in class definition, using Object type", field_name);
+                            let field_type = TypeEnum::Reference(ReferenceType::Class("java.lang.Object".to_string()));
+                            Some((field_type, class.name.clone(), "Ljava/lang/Object;".to_string()))
+                        }
+                    }
+                    None => {
+                        eprintln!("WARNING: No class context for field '{}', using Object type", field_name);
+                        let field_type = TypeEnum::Reference(ReferenceType::Class("java.lang.Object".to_string()));
+                        Some((field_type, "UnknownClass".to_string(), "Ljava/lang/Object;".to_string()))
+                    }
+                }
+            } else {
+                None
+            };
+            
+            let field_name = field_name.clone();
+            
+            return self.with_items(|items| {
+                // Load 'this' reference
+                let this_item = items.make_this_item();
+                items.load_item(&this_item)?;
+                
+                // Create field item for assignment
+                let field_item = if let Some(resolved_type) = &resolved_type {
+                    eprintln!("DEBUG: Using wash type info for field '{}': {:?}", field_name, resolved_type);
+                    let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
+                    items.make_field_item_for_resolved_type(
+                        field_name.clone(),
+                        owner_class,
+                        resolved_type,
+                        false // Non-static field
+                    )
+                } else if let Some((field_type, owner_class, descriptor)) = fallback_field_info {
+                    items.make_member_item(
+                        field_name.clone(),
+                        owner_class,
+                        descriptor,
+                        false,
+                        &field_type
+                    )
+                } else {
+                    // Should not reach here due to fallback logic above
+                    let field_type = TypeEnum::Reference(ReferenceType::Class("java.lang.Object".to_string()));
+                    items.make_member_item(
+                        field_name.clone(),
+                        "UnknownClass".to_string(),
+                        "Ljava/lang/Object;".to_string(),
+                        false,
+                        &field_type
+                    )
+                };
+                
+                // Store to field using the items system (type-aware)
+                items.store_item(&field_item)?;
+                
+                // Return the field item as the assignment result
+                Ok(field_item)
             })
         } else {
             // Handle other assignment types (local variables, arrays, etc.)

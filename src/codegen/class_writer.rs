@@ -71,6 +71,15 @@ impl ClassWriter {
         self.generic_signatures = Some(signatures.clone());
     }
     
+    /// Set wash phase results for type-aware code generation
+    pub fn set_wash_results(
+        &mut self, 
+        type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType>,
+        symbol_env: crate::wash::enter::SymbolEnvironment
+    ) {
+        self.gen.set_wash_results(type_info, symbol_env);
+    }
+    
     /// Set inner class relationships for InnerClasses attribute generation
     pub fn set_inner_class_relationships(&mut self, relationships: &[crate::codegen::InnerClassInfo]) {
         self.gen.set_inner_class_relationships(relationships);

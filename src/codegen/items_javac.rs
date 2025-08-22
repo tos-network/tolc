@@ -5,6 +5,7 @@
 
 use crate::ast::{Literal, TypeEnum};
 use crate::common::error::Result;
+use crate::wash::attr::{ResolvedType, PrimitiveType};
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
@@ -36,6 +37,9 @@ pub struct Items<'a> {
     /// Integrated optimization manager
     optimizer: OptimizationManager,
     
+    /// Type information from wash/attr phase for type-aware code generation
+    wash_type_info: Option<&'a std::collections::HashMap<String, ResolvedType>>,
+    
     // TODO: Add syms and types when available
     // syms: &'a Symtab,
     // types: &'a Types,
@@ -48,6 +52,21 @@ impl<'a> Items<'a> {
             pool,
             code,
             optimizer: OptimizationManager::new(),
+            wash_type_info: None,
+        }
+    }
+    
+    /// Create new Items manager with wash type information
+    pub fn new_with_wash_types(
+        pool: &'a mut ConstantPool, 
+        code: &'a mut Code,
+        wash_type_info: &'a std::collections::HashMap<String, ResolvedType>
+    ) -> Self {
+        Self {
+            pool,
+            code,
+            optimizer: OptimizationManager::new(),
+            wash_type_info: Some(wash_type_info),
         }
     }
     
@@ -61,6 +80,7 @@ impl<'a> Items<'a> {
             pool,
             code,
             optimizer: OptimizationManager::new(),
+            wash_type_info: None,
         }
     }
     
@@ -90,9 +110,21 @@ impl<'a> Items<'a> {
         Item::Stack { typecode }
     }
     
+    /// Make stack item for ResolvedType from wash phase
+    pub fn make_stack_item_for_resolved_type(&self, resolved_type: &ResolvedType) -> Item {
+        let typecode = self.resolved_type_to_typecode(resolved_type);
+        Item::Stack { typecode }
+    }
+    
     /// Make local variable item (JavaC makeLocalItem)
     pub fn make_local_item(&self, typ: &TypeEnum, reg: u16) -> Item {
         let typecode = self.type_to_typecode(typ);
+        Item::Local { typecode, reg }
+    }
+    
+    /// Make local variable item for ResolvedType from wash phase
+    pub fn make_local_item_for_resolved_type(&self, resolved_type: &ResolvedType, reg: u16) -> Item {
+        let typecode = self.resolved_type_to_typecode(resolved_type);
         Item::Local { typecode, reg }
     }
     
@@ -149,6 +181,92 @@ impl<'a> Items<'a> {
         typecodes::INT
     }
     
+    /// Convert ResolvedType from wash phase to JVM typecode
+    fn resolved_type_to_typecode(&self, resolved_type: &ResolvedType) -> u8 {
+        match resolved_type {
+            ResolvedType::Primitive(prim_type) => {
+                match prim_type {
+                    PrimitiveType::Boolean => typecodes::BYTE, // boolean stored as byte in JVM
+                    PrimitiveType::Byte => typecodes::BYTE,
+                    PrimitiveType::Short => typecodes::SHORT,
+                    PrimitiveType::Int => typecodes::INT,
+                    PrimitiveType::Long => typecodes::LONG,
+                    PrimitiveType::Float => typecodes::FLOAT,
+                    PrimitiveType::Double => typecodes::DOUBLE,
+                    PrimitiveType::Char => typecodes::CHAR,
+                }
+            }
+            ResolvedType::Reference(_) | 
+            ResolvedType::Class(_) |
+            ResolvedType::TypeVariable(_) |
+            ResolvedType::Wildcard(_) => typecodes::OBJECT,
+            ResolvedType::Array(_) => typecodes::ARRAY,
+            ResolvedType::Method(_, _) => typecodes::OBJECT, // Method references as objects
+            ResolvedType::NoType => typecodes::VOID,
+            ResolvedType::Error => typecodes::OBJECT, // Error types default to object
+            _ => typecodes::OBJECT, // Default for other types
+        }
+    }
+    
+    /// Make field access item with ResolvedType support
+    pub fn make_field_item_for_resolved_type(
+        &self, 
+        field_name: String, 
+        owner_class: String, 
+        resolved_type: &ResolvedType,
+        is_static: bool
+    ) -> Item {
+        let typecode = self.resolved_type_to_typecode(resolved_type);
+        let descriptor = self.resolved_type_to_descriptor(resolved_type);
+        
+        Item::Member { 
+            typecode, 
+            member_name: field_name, 
+            class_name: owner_class,
+            descriptor,
+            is_static,
+            nonvirtual: false, // Fields are not virtual
+        }
+    }
+    
+    /// Convert ResolvedType to JVM field descriptor
+    fn resolved_type_to_descriptor(&self, resolved_type: &ResolvedType) -> String {
+        match resolved_type {
+            ResolvedType::Primitive(prim_type) => {
+                match prim_type {
+                    PrimitiveType::Boolean => "Z".to_string(),
+                    PrimitiveType::Byte => "B".to_string(),
+                    PrimitiveType::Short => "S".to_string(),
+                    PrimitiveType::Int => "I".to_string(),
+                    PrimitiveType::Long => "J".to_string(),
+                    PrimitiveType::Float => "F".to_string(),
+                    PrimitiveType::Double => "D".to_string(),
+                    PrimitiveType::Char => "C".to_string(),
+                }
+            }
+            ResolvedType::Reference(class_name) => {
+                format!("L{};", class_name.replace('.', "/"))
+            }
+            ResolvedType::Class(class_type) => {
+                // For generic classes, use erasure (raw type)
+                format!("L{};", class_type.name.replace('.', "/"))
+            }
+            ResolvedType::TypeVariable(_) => {
+                // Type variables are erased to Object
+                "Ljava/lang/Object;".to_string()
+            }
+            ResolvedType::Wildcard(_) => {
+                // Wildcards are erased to their upper bound, default to Object
+                "Ljava/lang/Object;".to_string()
+            }
+            ResolvedType::Array(elem_type) => {
+                format!("[{}", self.resolved_type_to_descriptor(elem_type))
+            }
+            ResolvedType::NoType => "V".to_string(),
+            _ => "Ljava/lang/Object;".to_string(), // Default for other types
+        }
+    }
+
     /// Generate optimized load instruction and return stack item
     pub fn load_item(&mut self, item: &Item) -> Result<Item> {
         match item {
