@@ -95,7 +95,18 @@ impl Flow {
     /// Process AST through Flow phase - dataflow analysis
     /// Corresponds to JavaC's Flow.analyzeTree() method
     pub fn process(&mut self, ast: Ast) -> Result<Ast> {
+        self.process_with_symbols(ast, None)
+    }
+    
+    /// Process AST with symbol environment from Enter phase
+    pub fn process_with_symbols(&mut self, ast: Ast, symbol_env: Option<&crate::wash::enter::SymbolEnvironment>) -> Result<Ast> {
         eprintln!("🔍 FLOW: Starting dataflow analysis");
+        
+        // Store symbol environment for generic type handling
+        if let Some(sym_env) = symbol_env {
+            eprintln!("📚 FLOW: Using symbol environment with {} classes", sym_env.classes.len());
+            // TODO: Store symbol env for generic variable analysis
+        }
         
         // Run multiple analyzers as in javac
         self.run_alive_analyzer(&ast)?;

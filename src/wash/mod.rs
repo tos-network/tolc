@@ -46,18 +46,19 @@ impl SemanticAnalyzer {
         
         // Phase 1: Enter - Build symbol tables
         ast = self.enter.process(ast)?;
+        let symbol_env = self.enter.get_symbol_environment();
         
-        // Phase 2: Attr - Type checking and resolution
-        ast = self.attr.process(ast)?;
+        // Phase 2: Attr - Type checking and resolution (with symbols)
+        ast = self.attr.process_with_symbols(ast, Some(symbol_env))?;
         
-        // Phase 3: Flow - Definite assignment analysis
-        ast = self.flow.process(ast)?;
+        // Phase 3: Flow - Definite assignment analysis (with symbols)
+        ast = self.flow.process_with_symbols(ast, Some(symbol_env))?;
         
-        // Phase 4: TransTypes - Generic type erasure
-        ast = self.trans_types.process(ast)?;
+        // Phase 4: TransTypes - Generic type erasure (with type info)
+        ast = self.trans_types.process_with_types(ast, &self.attr.get_type_information())?;
         
-        // Phase 5: Lower - Desugar syntax
-        ast = self.lower.process(ast)?;
+        // Phase 5: Lower - Desugar syntax (with type info)
+        ast = self.lower.process_with_types(ast, &self.trans_types.get_erased_types())?;
         
         eprintln!("✅ WASH: Semantic analysis pipeline complete");
         Ok(ast)

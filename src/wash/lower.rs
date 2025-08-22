@@ -68,7 +68,16 @@ impl Lower {
     /// Process AST through Lower phase - desugar syntax
     /// Corresponds to JavaC's Lower.translateTopLevelClass() method
     pub fn process(&mut self, mut ast: Ast) -> Result<Ast> {
+        self.process_with_types(ast, &std::collections::HashMap::new())
+    }
+    
+    /// Process AST with erased type information from TransTypes phase
+    pub fn process_with_types(&mut self, mut ast: Ast, erased_types: &std::collections::HashMap<String, String>) -> Result<Ast> {
         eprintln!("🔍 LOWER: Starting syntax desugaring");
+        eprintln!("📊 LOWER: Using {} erased type mappings", erased_types.len());
+        
+        // Store erased types for use in lowering decisions
+        // (In a full implementation, this would inform casting and bridge method decisions)
         
         // Process all type declarations
         for type_decl in &mut ast.type_decls {

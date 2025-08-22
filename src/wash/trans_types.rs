@@ -16,6 +16,8 @@ pub struct TransTypes {
     pub bridge_methods: HashMap<String, Vec<BridgeMethod>>,
     /// Map from erased method signatures to original overridden methods
     pub overridden_methods: HashMap<String, String>,
+    /// Map from generic types to their erased forms
+    pub erased_types: HashMap<String, String>,
 }
 
 /// Bridge method information - corresponds to JavaC's bridge method generation
@@ -34,15 +36,28 @@ impl TransTypes {
             generic_signatures: HashMap::new(),
             bridge_methods: HashMap::new(),
             overridden_methods: HashMap::new(),
+            erased_types: HashMap::new(),
         }
     }
     
     /// Process AST through TransTypes phase - type erasure
     /// Corresponds to JavaC's TransTypes.translateTopLevelClass() method
     pub fn process(&mut self, mut ast: Ast) -> Result<Ast> {
+        self.process_with_types(ast, &std::collections::HashMap::new())
+    }
+    
+    /// Process AST with type information from Attr phase
+    pub fn process_with_types(&mut self, mut ast: Ast, type_info: &std::collections::HashMap<usize, crate::wash::attr::ResolvedType>) -> Result<Ast> {
         eprintln!("🔍 TRANS_TYPES: Starting type erasure");
+        eprintln!("📊 TRANS_TYPES: Processing {} type expressions", type_info.len());
         
-        // First, store generic signature information for each type declaration before erasure
+        // First, perform type erasure on the ResolvedType information
+        for (expr_id, resolved_type) in type_info {
+            let erased_type = self.erase_type(resolved_type);
+            self.erased_types.insert(expr_id.to_string(), erased_type);
+        }
+        
+        // Store generic signature information for each type declaration before erasure
         // This information will be used later during bytecode generation
         for type_decl in &mut ast.type_decls {
             self.store_generic_signatures(type_decl)?;
@@ -567,6 +582,71 @@ impl TransTypes {
         matches!(name, "T" | "U" | "E" | "K" | "V" | "R" | "S" | "X" | "Y" | "Z") ||
         // Single uppercase letters (common pattern for type parameters)
         (name.len() == 1 && name.chars().next().unwrap().is_ascii_uppercase())
+    }
+    
+    /// Erase generic type to its raw form following Java type erasure rules
+    fn erase_type(&self, resolved_type: &crate::wash::attr::ResolvedType) -> String {
+        use crate::wash::attr::ResolvedType;
+        
+        match resolved_type {
+            ResolvedType::Primitive(prim) => format!("{:?}", prim).to_lowercase(),
+            ResolvedType::Reference(name) => name.clone(),
+            ResolvedType::Array(element_type) => {
+                format!("[{}", self.erase_type(element_type))
+            }
+            ResolvedType::Generic(name, _) => {
+                // Erase to raw type
+                name.clone()
+            }
+            ResolvedType::Class(class_type) => {
+                // Erase to raw class name
+                class_type.name.clone()
+            }
+            ResolvedType::TypeVariable(type_var) => {
+                // Erase to first upper bound or Object
+                if let Some(first_bound) = type_var.upper_bounds.first() {
+                    self.erase_type(first_bound)
+                } else {
+                    "java.lang.Object".to_string()
+                }
+            }
+            ResolvedType::Wildcard(wildcard) => {
+                // Erase wildcard to its bound or Object
+                if let Some(bound) = &wildcard.bound {
+                    self.erase_type(bound)
+                } else {
+                    "java.lang.Object".to_string()
+                }
+            }
+            ResolvedType::Captured(captured) => {
+                // Erase captured type to its wildcard bound
+                self.erase_type(&ResolvedType::Wildcard(captured.wildcard_bound.clone()))
+            }
+            ResolvedType::Intersection(types) => {
+                // Erase to first type in intersection
+                if let Some(first_type) = types.first() {
+                    self.erase_type(first_type)
+                } else {
+                    "java.lang.Object".to_string()
+                }
+            }
+            ResolvedType::Union(types) => {
+                // Erase to common supertype (simplified to Object)
+                "java.lang.Object".to_string()
+            }
+            ResolvedType::Method(params, return_type) => {
+                // Erase to functional interface (simplified)
+                "java.util.function.Function".to_string()
+            }
+            ResolvedType::Null => "java.lang.Object".to_string(),
+            ResolvedType::Error => "java.lang.Object".to_string(),
+            ResolvedType::NoType => "void".to_string(),
+        }
+    }
+    
+    /// Get erased types for use by subsequent phases
+    pub fn get_erased_types(&self) -> &HashMap<String, String> {
+        &self.erased_types
     }
 }
 

@@ -24,15 +24,68 @@ pub enum ResolvedType {
     /// Generic types with type parameters
     Generic(String, Vec<ResolvedType>),
     /// Wildcard types (? extends T, ? super T)
-    Wildcard(Option<Box<ResolvedType>>, WildcardBound),
+    Wildcard(WildcardType),
     /// Type variables (T, E, etc.)
-    TypeVariable(String),
+    TypeVariable(TypeVariable),
+    /// Class types with type parameters (List<String>)
+    Class(ClassType),
+    /// Captured wildcards from capture conversion
+    Captured(CapturedType),
+    /// Intersection types (T & Serializable)
+    Intersection(Vec<ResolvedType>),
+    /// Union types (for error recovery)
+    Union(Vec<ResolvedType>),
     /// Method types for functional interfaces
     Method(Vec<ResolvedType>, Box<ResolvedType>),
+    /// Null type
+    Null,
     /// Error type for failed resolution
     Error,
     /// No type (void)
     NoType,
+}
+
+/// Wildcard type structure following JavaC's WildcardType
+#[derive(Debug, Clone, PartialEq)]
+pub struct WildcardType {
+    pub kind: WildcardBound,
+    pub bound: Option<Box<ResolvedType>>,
+    pub capture_id: Option<usize>,
+}
+
+/// Type variable structure following JavaC's TypeVar
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeVariable {
+    pub name: String,
+    pub upper_bounds: Vec<ResolvedType>,
+    pub lower_bound: Option<Box<ResolvedType>>,
+    pub owner: String,
+    pub id: usize,
+}
+
+/// Class type structure following JavaC's ClassType
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassType {
+    pub name: String,
+    pub type_params: Vec<ResolvedType>,
+    pub outer_type: Option<Box<ResolvedType>>,
+    pub is_raw: bool,
+}
+
+/// Captured type from wildcard capture conversion
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedType {
+    pub wildcard_bound: WildcardType,
+    pub capture_id: usize,
+}
+
+/// Method signature for type inference
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodSignature {
+    pub name: String,
+    pub parameter_types: Vec<ResolvedType>,
+    pub return_type: ResolvedType,
+    pub type_parameters: Vec<TypeVariable>,
 }
 
 /// Primitive type enumeration - JavaC TypeTag equivalent
@@ -53,7 +106,7 @@ pub enum PrimitiveType {
 pub enum WildcardBound {
     Extends,
     Super,
-    Unbound,
+    Unbounded,
 }
 
 /// Type attribution context - corresponds to JavaC's AttrContext
@@ -79,6 +132,8 @@ pub struct AttrContext {
     pub lambda_level: usize,
     /// Type parameters in scope
     pub type_params: HashMap<String, ResolvedType>,
+    /// Type variables in scope
+    pub type_variables: HashMap<String, TypeVariable>,
 }
 
 /// Type attribution environment - corresponds to JavaC's Env<AttrContext>
@@ -166,10 +221,48 @@ impl Attr {
         }
     }
     
+    /// Create type variable with unique ID
+    fn create_type_variable(&self, name: String, owner: String) -> ResolvedType {
+        static mut TYPE_VAR_COUNTER: usize = 0;
+        unsafe {
+            TYPE_VAR_COUNTER += 1;
+            ResolvedType::TypeVariable(TypeVariable {
+                name,
+                upper_bounds: vec![ResolvedType::Reference("java.lang.Object".to_string())],
+                lower_bound: None,
+                owner,
+                id: TYPE_VAR_COUNTER,
+            })
+        }
+    }
+    
+    /// Create captured type with unique ID
+    fn create_captured_type(&self, wildcard: &WildcardType) -> ResolvedType {
+        static mut CAPTURED_TYPE_COUNTER: usize = 0;
+        unsafe {
+            CAPTURED_TYPE_COUNTER += 1;
+            ResolvedType::Captured(CapturedType {
+                wildcard_bound: wildcard.clone(),
+                capture_id: CAPTURED_TYPE_COUNTER,
+            })
+        }
+    }
+    
     /// Process AST through Attr phase - type checking and resolution
     /// Corresponds to JavaC's Attr.attrib() method
     pub fn process(&mut self, ast: Ast) -> Result<Ast> {
+        self.process_with_symbols(ast, None)
+    }
+    
+    /// Process AST with symbol environment from Enter phase
+    pub fn process_with_symbols(&mut self, ast: Ast, symbol_env: Option<&crate::wash::enter::SymbolEnvironment>) -> Result<Ast> {
         eprintln!("🔍 ATTR: Starting type attribution");
+        
+        // Store symbol environment for use in type resolution
+        if let Some(sym_env) = symbol_env {
+            self.attr_env.symbol_env = Some(sym_env.clone());
+            eprintln!("📚 ATTR: Using symbol environment with {} classes", sym_env.classes.len());
+        }
         
         // Initialize base context
         self.push_context(AttrContext {
@@ -183,6 +276,7 @@ impl Attr {
             scope_depth: 0,
             lambda_level: 0,
             type_params: HashMap::new(),
+            type_variables: HashMap::new(),
         });
         
         // Process type declarations
@@ -236,6 +330,7 @@ impl Attr {
             scope_depth: 0,
             lambda_level: 0,
             type_params: HashMap::new(),
+            type_variables: HashMap::new(),
         });
         
         // Process class members
@@ -299,6 +394,7 @@ impl Attr {
             scope_depth: 1,
             lambda_level: 0,
             type_params: HashMap::new(),
+            type_variables: HashMap::new(),
         });
         
         // Add parameters to local scope
@@ -473,7 +569,7 @@ impl Attr {
         }
     }
     
-    /// Resolve a type reference to a ResolvedType
+    /// Resolve a type reference to a ResolvedType with full generic support
     fn resolve_type_ref(&self, type_ref: &crate::ast::TypeRef) -> ResolvedType {
         match type_ref.name.as_str() {
             "void" => ResolvedType::NoType,
@@ -485,7 +581,130 @@ impl Attr {
             "float" => ResolvedType::Primitive(PrimitiveType::Float),
             "double" => ResolvedType::Primitive(PrimitiveType::Double),
             "char" => ResolvedType::Primitive(PrimitiveType::Char),
-            _ => ResolvedType::Reference(type_ref.name.clone()),
+            _ => {
+                // Check if it's a type variable first
+                if let Some(tv) = self.lookup_type_variable(&type_ref.name) {
+                    return ResolvedType::TypeVariable(tv);
+                }
+                
+                // Handle generic class types
+                if !type_ref.type_args.is_empty() {
+                    let type_args: Vec<ResolvedType> = type_ref.type_args
+                        .iter()
+                        .map(|arg| self.resolve_type_argument(arg))
+                        .collect();
+                    
+                    ResolvedType::Class(ClassType {
+                        name: type_ref.name.clone(),
+                        type_params: type_args,
+                        outer_type: None,
+                        is_raw: false,
+                    })
+                } else {
+                    // Check if this is a known generic class without type arguments (raw type)
+                    if self.is_generic_class(&type_ref.name) {
+                        ResolvedType::Class(ClassType {
+                            name: type_ref.name.clone(),
+                            type_params: Vec::new(),
+                            outer_type: None,
+                            is_raw: true,
+                        })
+                    } else {
+                        ResolvedType::Reference(type_ref.name.clone())
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Resolve a type argument (could be a concrete type or wildcard)
+    fn resolve_type_argument(&self, type_arg: &crate::ast::TypeArg) -> ResolvedType {
+        match type_arg {
+            crate::ast::TypeArg::Type(type_ref) => self.resolve_type_ref(type_ref),
+            crate::ast::TypeArg::Wildcard(wildcard) => {
+                let bound = wildcard.bound.as_ref().map(|(_, type_ref)| Box::new(self.resolve_type_ref(type_ref)));
+                
+                ResolvedType::Wildcard(WildcardType {
+                    kind: match &wildcard.bound {
+                        Some((crate::ast::BoundKind::Extends, _)) => WildcardBound::Extends,
+                        Some((crate::ast::BoundKind::Super, _)) => WildcardBound::Super,
+                        None => WildcardBound::Unbounded,
+                    },
+                    bound,
+                    capture_id: None,
+                })
+            }
+        }
+    }
+    
+    /// Check if a class name represents a generic class
+    fn is_generic_class(&self, name: &str) -> bool {
+        // For now, hardcode some common generic classes
+        matches!(name, "List" | "ArrayList" | "Map" | "HashMap" | "Set" | "HashSet" | "Optional")
+    }
+    
+    /// Look up a type variable by name in current scope
+    fn lookup_type_variable(&self, name: &str) -> Option<TypeVariable> {
+        for context in self.attr_env.contexts.iter().rev() {
+            if let Some(tv) = context.type_variables.get(name) {
+                return Some(tv.clone());
+            }
+        }
+        None
+    }
+    
+    /// Perform type substitution - replace type variables with concrete types
+    fn substitute_type(&self, original: &ResolvedType, substitutions: &std::collections::HashMap<String, ResolvedType>) -> ResolvedType {
+        match original {
+            ResolvedType::TypeVariable(tv) => {
+                if let Some(substitution) = substitutions.get(&tv.name) {
+                    substitution.clone()
+                } else {
+                    original.clone()
+                }
+            }
+            ResolvedType::Class(class_type) => {
+                let substituted_params: Vec<ResolvedType> = class_type.type_params
+                    .iter()
+                    .map(|param| self.substitute_type(param, substitutions))
+                    .collect();
+                
+                ResolvedType::Class(ClassType {
+                    name: class_type.name.clone(),
+                    type_params: substituted_params,
+                    outer_type: class_type.outer_type.as_ref().map(|outer| 
+                        Box::new(self.substitute_type(outer, substitutions))
+                    ),
+                    is_raw: class_type.is_raw,
+                })
+            }
+            ResolvedType::Wildcard(wildcard) => {
+                ResolvedType::Wildcard(WildcardType {
+                    kind: wildcard.kind.clone(),
+                    bound: wildcard.bound.as_ref().map(|b| 
+                        Box::new(self.substitute_type(b, substitutions))
+                    ),
+                    capture_id: wildcard.capture_id,
+                })
+            }
+            ResolvedType::Array(element_type) => {
+                ResolvedType::Array(Box::new(self.substitute_type(element_type, substitutions)))
+            }
+            ResolvedType::Intersection(types) => {
+                let substituted_types: Vec<ResolvedType> = types
+                    .iter()
+                    .map(|t| self.substitute_type(t, substitutions))
+                    .collect();
+                ResolvedType::Intersection(substituted_types)
+            }
+            ResolvedType::Union(types) => {
+                let substituted_types: Vec<ResolvedType> = types
+                    .iter()
+                    .map(|t| self.substitute_type(t, substitutions))
+                    .collect();
+                ResolvedType::Union(substituted_types)
+            }
+            _ => original.clone(),
         }
     }
     
@@ -517,6 +736,232 @@ impl Attr {
     /// Add a local variable to the current context
     fn add_local_variable(&mut self, name: String, var_type: ResolvedType) {
         self.current_context_mut().locals.insert(name, var_type);
+    }
+    
+    /// Get type information for use by subsequent phases
+    pub fn get_type_information(&self) -> &HashMap<usize, ResolvedType> {
+        &self.attr_env.expression_types
+    }
+    
+    /// Perform wildcard capture conversion following JLS §5.1.10
+    fn capture_conversion(&mut self, original: &ResolvedType) -> ResolvedType {
+        match original {
+            ResolvedType::Class(class_type) => {
+                let mut captured_params = Vec::new();
+                let mut has_wildcards = false;
+                
+                for param in &class_type.type_params {
+                    match param {
+                        ResolvedType::Wildcard(wildcard) => {
+                            has_wildcards = true;
+                            let captured = self.create_captured_type(wildcard);
+                            captured_params.push(captured);
+                        }
+                        _ => captured_params.push(param.clone()),
+                    }
+                }
+                
+                if has_wildcards {
+                    ResolvedType::Class(ClassType {
+                        name: class_type.name.clone(),
+                        type_params: captured_params,
+                        outer_type: class_type.outer_type.clone(),
+                        is_raw: class_type.is_raw,
+                    })
+                } else {
+                    original.clone()
+                }
+            }
+            _ => original.clone(),
+        }
+    }
+    
+    /// Check if type1 is assignable to type2 (following Java's assignability rules)
+    fn is_assignable(&self, from: &ResolvedType, to: &ResolvedType) -> bool {
+        match (from, to) {
+            // Identity conversion
+            (a, b) if a == b => true,
+            
+            // Primitive conversions
+            (ResolvedType::Primitive(from_prim), ResolvedType::Primitive(to_prim)) => {
+                self.is_primitive_assignable(from_prim, to_prim)
+            }
+            
+            // Reference type assignability
+            (ResolvedType::Reference(from_name), ResolvedType::Reference(to_name)) => {
+                // Simplified - should check inheritance hierarchy
+                from_name == to_name
+            }
+            
+            // Generic class assignability
+            (ResolvedType::Class(from_class), ResolvedType::Class(to_class)) => {
+                self.is_generic_assignable(from_class, to_class)
+            }
+            
+            // Wildcard assignability
+            (from_type, ResolvedType::Wildcard(wildcard)) => {
+                self.is_assignable_to_wildcard(from_type, wildcard)
+            }
+            
+            // Type variable assignability
+            (ResolvedType::TypeVariable(tv), to_type) => {
+                // Check if any upper bound is assignable to target
+                tv.upper_bounds.iter().any(|bound| self.is_assignable(bound, to_type))
+            }
+            
+            // Array assignability
+            (ResolvedType::Array(from_elem), ResolvedType::Array(to_elem)) => {
+                self.is_assignable(from_elem, to_elem)
+            }
+            
+            // Null assignability (null can be assigned to any reference type)
+            (ResolvedType::Null, ResolvedType::Reference(_)) |
+            (ResolvedType::Null, ResolvedType::Class(_)) |
+            (ResolvedType::Null, ResolvedType::Array(_)) => true,
+            
+            _ => false,
+        }
+    }
+    
+    /// Check primitive type assignability with widening conversions
+    fn is_primitive_assignable(&self, from: &PrimitiveType, to: &PrimitiveType) -> bool {
+        use PrimitiveType::*;
+        match (from, to) {
+            // Identity
+            (a, b) if a == b => true,
+            
+            // Widening primitive conversions (JLS §5.1.2)
+            (Byte, Short) | (Byte, Int) | (Byte, Long) | (Byte, Float) | (Byte, Double) => true,
+            (Short, Int) | (Short, Long) | (Short, Float) | (Short, Double) => true,
+            (Char, Int) | (Char, Long) | (Char, Float) | (Char, Double) => true,
+            (Int, Long) | (Int, Float) | (Int, Double) => true,
+            (Long, Float) | (Long, Double) => true,
+            (Float, Double) => true,
+            
+            _ => false,
+        }
+    }
+    
+    /// Check generic class assignability with covariance/contravariance rules
+    fn is_generic_assignable(&self, from: &ClassType, to: &ClassType) -> bool {
+        // Same class name is required
+        if from.name != to.name {
+            return false;
+        }
+        
+        // Raw type handling
+        if to.is_raw {
+            return true; // Can assign any parameterized type to raw type
+        }
+        if from.is_raw && !to.is_raw {
+            return false; // Cannot assign raw type to parameterized type
+        }
+        
+        // Check type parameter compatibility
+        if from.type_params.len() != to.type_params.len() {
+            return false;
+        }
+        
+        for (from_param, to_param) in from.type_params.iter().zip(to.type_params.iter()) {
+            if !self.is_type_argument_compatible(from_param, to_param) {
+                return false;
+            }
+        }
+        
+        true
+    }
+    
+    /// Check if a type argument is compatible (handles wildcards)
+    fn is_type_argument_compatible(&self, from: &ResolvedType, to: &ResolvedType) -> bool {
+        match (from, to) {
+            // Exact match
+            (a, b) if a == b => true,
+            
+            // Wildcard compatibility
+            (from_type, ResolvedType::Wildcard(to_wildcard)) => {
+                self.is_assignable_to_wildcard(from_type, to_wildcard)
+            }
+            
+            (ResolvedType::Wildcard(from_wildcard), to_type) => {
+                self.is_wildcard_assignable_to(from_wildcard, to_type)
+            }
+            
+            _ => false,
+        }
+    }
+    
+    /// Check if a type is assignable to a wildcard
+    fn is_assignable_to_wildcard(&self, from: &ResolvedType, wildcard: &WildcardType) -> bool {
+        match wildcard.kind {
+            WildcardBound::Unbounded => true,
+            WildcardBound::Extends => {
+                if let Some(bound) = &wildcard.bound {
+                    self.is_assignable(from, bound)
+                } else {
+                    true // ? extends Object
+                }
+            }
+            WildcardBound::Super => {
+                if let Some(bound) = &wildcard.bound {
+                    self.is_assignable(bound, from)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    
+    /// Check if a wildcard is assignable to a type
+    fn is_wildcard_assignable_to(&self, wildcard: &WildcardType, to: &ResolvedType) -> bool {
+        match wildcard.kind {
+            WildcardBound::Unbounded => false, // ? is not assignable to concrete types
+            WildcardBound::Extends => {
+                if let Some(bound) = &wildcard.bound {
+                    self.is_assignable(bound, to)
+                } else {
+                    // ? extends Object
+                    matches!(to, ResolvedType::Reference(name) if name == "Object")
+                }
+            }
+            WildcardBound::Super => false, // ? super T is not assignable to concrete types
+        }
+    }
+    
+    /// Infer type arguments for a generic method call
+    fn infer_method_type_arguments(&self, method_sig: &MethodSignature, actual_args: &[ResolvedType]) -> std::collections::HashMap<String, ResolvedType> {
+        let mut substitutions = std::collections::HashMap::new();
+        
+        // Simple type inference - match formal parameter types with actual argument types
+        for (formal, actual) in method_sig.parameter_types.iter().zip(actual_args.iter()) {
+            self.collect_type_constraints(formal, actual, &mut substitutions);
+        }
+        
+        substitutions
+    }
+    
+    /// Collect type constraints for type inference
+    fn collect_type_constraints(&self, formal: &ResolvedType, actual: &ResolvedType, substitutions: &mut std::collections::HashMap<String, ResolvedType>) {
+        match (formal, actual) {
+            (ResolvedType::TypeVariable(tv), actual_type) => {
+                // Direct constraint: T = actual_type
+                substitutions.insert(tv.name.clone(), actual_type.clone());
+            }
+            
+            (ResolvedType::Class(formal_class), ResolvedType::Class(actual_class)) if formal_class.name == actual_class.name => {
+                // Recursive constraint collection for type parameters
+                for (formal_param, actual_param) in formal_class.type_params.iter().zip(actual_class.type_params.iter()) {
+                    self.collect_type_constraints(formal_param, actual_param, substitutions);
+                }
+            }
+            
+            (ResolvedType::Array(formal_elem), ResolvedType::Array(actual_elem)) => {
+                self.collect_type_constraints(formal_elem, actual_elem, substitutions);
+            }
+            
+            _ => {
+                // No constraints can be collected
+            }
+        }
     }
 }
 
