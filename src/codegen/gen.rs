@@ -1310,14 +1310,17 @@ impl Gen {
         let this_class_idx = self.pool.add_class(&class_name);
         self.class_file.this_class = this_class_idx;
         
-        // 2. Set super class (default to Object if not specified)
-        let super_class_name = if let Some(ref _extends) = class.extends {
-            // TODO: Convert TypeRef to string properly
-            "java/lang/Object"
+        // 2. Set super class (default to Object if not specified) - using symbol resolution
+        let super_class_internal_name = if let Some(ref extends_ref) = class.extends {
+            // Resolve the inherited class name
+            let resolved_name = self.resolve_to_internal_name(&extends_ref.name);
+            eprintln!("🔧 GEN: Class {} extends {} resolved to {}", class.name, extends_ref.name, resolved_name);
+            resolved_name
         } else {
-            "java/lang/Object"
+            // Default inheritance from Object
+            "java/lang/Object".to_string()
         };
-        let super_class_idx = self.pool.add_class(super_class_name);
+        let super_class_idx = self.pool.add_class(&super_class_internal_name);
         self.class_file.super_class = super_class_idx;
         
         // 3. Set access flags (convert modifiers to bytecode flags)
@@ -1326,37 +1329,13 @@ impl Gen {
         access_flags |= access_flags::ACC_SUPER;
         self.class_file.access_flags = access_flags;
         
-        // 4. Process interfaces
+        // 4. Process interfaces - using symbol resolution instead of hardcoded names
         for interface_ref in &class.implements {
-            // Convert TypeRef to proper interface class name
-            let interface_name = match interface_ref.name.as_str() {
-                "Comparator" => {
-                    // Resolve Comparator based on package context
-                    if let Some(ref package) = self.package_context {
-                        if package == "java.util" {
-                            "java/util/Comparator"
-                        } else {
-                            "java/util/Comparator" // Default to java.util for Comparator
-                        }
-                    } else {
-                        "java/util/Comparator" // Default to java.util for Comparator
-                    }
-                },
-                "Comparable" => "java/lang/Comparable",
-                "List" => "java/util/List",
-                "Map" => "java/util/Map",
-                "Set" => "java/util/Set",
-                "Collection" => "java/util/Collection",
-                _ => {
-                    // For unknown interfaces, try to construct full path
-                    if let Some(ref package) = self.package_context {
-                        &format!("{}/{}", package.replace(".", "/"), interface_ref.name)
-                    } else {
-                        &format!("java/lang/{}", interface_ref.name) // Default to java.lang
-                    }
-                }
-            };
-            let interface_idx = self.pool.add_class(interface_name);
+            // Using the new symbol resolution method
+            let interface_internal_name = self.resolve_to_internal_name(&interface_ref.name);
+            eprintln!("🔧 GEN: Interface {} resolved to {}", interface_ref.name, interface_internal_name);
+            
+            let interface_idx = self.pool.add_class(&interface_internal_name);
             self.class_file.interfaces.push(interface_idx);
         }
         
@@ -1457,24 +1436,11 @@ impl Gen {
         
         // 4. Process extended interfaces (interfaces can extend multiple interfaces)
         for extends_ref in &interface.extends {
-            // Convert TypeRef to proper interface class name
-            let extended_interface_name = match extends_ref.name.as_str() {
-                "Comparator" => "java/util/Comparator",
-                "Comparable" => "java/lang/Comparable",
-                "List" => "java/util/List",
-                "Map" => "java/util/Map",
-                "Set" => "java/util/Set",
-                "Collection" => "java/util/Collection",
-                _ => {
-                    // For unknown interfaces, try to construct full path
-                    if let Some(ref package) = self.package_context {
-                        &format!("{}/{}", package.replace(".", "/"), extends_ref.name)
-                    } else {
-                        &format!("java/util/{}", extends_ref.name) // Default to java.util for interfaces
-                    }
-                }
-            };
-            let interface_idx = self.pool.add_class(extended_interface_name);
+            // Use symbol resolution system to resolve extended interface names
+            let extended_interface_internal_name = self.resolve_to_internal_name(&extends_ref.name);
+            eprintln!("🔧 GEN: Interface {} extends {} resolved to {}", interface.name, extends_ref.name, extended_interface_internal_name);
+            
+            let interface_idx = self.pool.add_class(&extended_interface_internal_name);
             self.class_file.interfaces.push(interface_idx);
         }
         
@@ -1637,37 +1603,24 @@ impl Gen {
     
     /// Simple type to descriptor conversion for interfaces
     fn simple_type_to_descriptor(&self, type_ref: &TypeRef) -> String {
-        // Get base type descriptor
-        let base_descriptor = match type_ref.name.as_str() {
-            "boolean" => "Z".to_string(),
-            "byte" => "B".to_string(),  
-            "char" => "C".to_string(),
-            "short" => "S".to_string(),
-            "int" => "I".to_string(),
-            "long" => "J".to_string(),
-            "float" => "F".to_string(),
-            "double" => "D".to_string(),
-            "void" => "V".to_string(),
-            "Object" => "Ljava/lang/Object;".to_string(),
-            "String" => "Ljava/lang/String;".to_string(),
-            "Map" => "Ljava/util/Map;".to_string(),
-            "Set" => "Ljava/util/Set;".to_string(),
-            "Collection" => "Ljava/util/Collection;".to_string(),
-            "List" => "Ljava/util/List;".to_string(),
-            "Iterator" => "Ljava/util/Iterator;".to_string(),
-            "ListIterator" => "Ljava/util/ListIterator;".to_string(),
-            "Entry" => "Ljava/util/Map$Entry;".to_string(),
-            _ => {
-                // For generic types like K, V, or unknown types, use Object
+        // Use the new symbol resolution system to generate descriptors
+        let base_descriptor = match self.resolve_to_descriptor(&type_ref.name) {
+            Ok(descriptor) => descriptor,
+            Err(_) => {
+                // Handle generic type parameters and special cases
                 if type_ref.name.len() == 1 && type_ref.name.chars().all(|c| c.is_uppercase()) {
-                    "Ljava/lang/Object;".to_string() // Generic type parameter
+                    // Generic type parameters (K, V, T etc) are erased to Object
+                    "Ljava/lang/Object;".to_string()
                 } else {
-                    format!("Ljava/lang/{};", type_ref.name)
+                    // Unknown type, use symbol resolution or default handling
+                    eprintln!("⚠️ GEN: Unknown type '{}' in simple_type_to_descriptor, using symbol resolution", type_ref.name);
+                    let internal_name = self.resolve_to_internal_name(&type_ref.name);
+                    format!("L{};", internal_name)
                 }
             }
         };
         
-        // Add array dimensions prefix if needed
+        // Add array dimension prefix
         if type_ref.array_dims > 0 {
             let mut array_prefix = "[".repeat(type_ref.array_dims);
             array_prefix.push_str(&base_descriptor);
@@ -2610,34 +2563,73 @@ impl Gen {
     }
     
     /// Convert base type name to JVM descriptor string  
+    /// Now uses the new symbol resolution system
     pub fn type_ref_to_base_descriptor(&self, name: &str) -> Result<String> {
-        match name {
-            // Primitive types
-            "boolean" => Ok("Z".to_string()),
-            "byte" => Ok("B".to_string()),
-            "short" => Ok("S".to_string()),
-            "int" => Ok("I".to_string()),
-            "long" => Ok("J".to_string()),
-            "float" => Ok("F".to_string()),
-            "double" => Ok("D".to_string()),
-            "char" => Ok("C".to_string()),
-            "void" => Ok("V".to_string()),
-            // Reference types
-            "String" => Ok("Ljava/lang/String;".to_string()),
-            "Object" => Ok("Ljava/lang/Object;".to_string()),
-            // Other class types
+        // Use the new symbol resolution method that handles wash/SymbolEnvironment resolution
+        self.resolve_to_descriptor(name)
+    }
+    
+    /// Use wash/SymbolEnvironment to resolve type names (new method)
+    /// Prioritize wash phase symbol resolution, fallback to builtin types
+    pub fn resolve_type_name(&self, simple_name: &str) -> String {
+        // 1. First try to use wash/SymbolEnvironment resolution
+        if let Some(ref symbol_env) = self.wash_symbol_env {
+            if let Some(qualified_name) = symbol_env.resolve_type(simple_name) {
+                eprintln!("🔧 GEN: Resolved {} -> {} (via wash/SymbolEnvironment)", simple_name, qualified_name);
+                return qualified_name;
+            }
+        }
+        
+        // 2. Fallback to original hardcoded mappings (gradually being replaced)
+        match simple_name {
+            // Basic type mappings
+            "String" => "java.lang.String".to_string(),
+            "Object" => "java.lang.Object".to_string(),
+            "Comparable" => "java.lang.Comparable".to_string(),
+            "Comparator" => "java.util.Comparator".to_string(),
+            "List" => "java.util.List".to_string(),
+            "Map" => "java.util.Map".to_string(),
+            "Set" => "java.util.Set".to_string(),
+            "Collection" => "java.util.Collection".to_string(),
             _ => {
-                // Use classpath resolution to find the fully qualified name
-                if let Some(internal_name) = crate::common::classpath::resolve_class_name(name) {
-                    Ok(format!("L{};", internal_name))
-                } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&name) {
-                    Ok(format!("Ljava/lang/{};", name))
+                // Try to resolve through classpath
+                if let Some(internal_name) = crate::common::classpath::resolve_class_name(simple_name) {
+                    internal_name.replace('/', ".")
+                } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&simple_name) {
+                    format!("java.lang.{}", simple_name)
                 } else {
-                    // Fallback: assume it's already fully qualified or in the default package
-                    Ok(format!("L{};", name.replace(".", "/")))
+                    // Final fallback: assume it's already a fully qualified name or in default package
+                    eprintln!("⚠️ GEN: Could not resolve type '{}', using as-is", simple_name);
+                    simple_name.to_string()
                 }
             }
         }
+    }
+    
+    /// Resolve type name to internal format (java.lang.String -> java/lang/String)
+    pub fn resolve_to_internal_name(&self, simple_name: &str) -> String {
+        self.resolve_type_name(simple_name).replace('.', "/")
+    }
+    
+    /// Resolve type name to descriptor format (java.lang.String -> Ljava/lang/String;)
+    pub fn resolve_to_descriptor(&self, simple_name: &str) -> Result<String> {
+        // Handle primitive types
+        match simple_name {
+            "boolean" => return Ok("Z".to_string()),
+            "byte" => return Ok("B".to_string()),
+            "short" => return Ok("S".to_string()),
+            "int" => return Ok("I".to_string()),
+            "long" => return Ok("J".to_string()),
+            "float" => return Ok("F".to_string()),
+            "double" => return Ok("D".to_string()),
+            "char" => return Ok("C".to_string()),
+            "void" => return Ok("V".to_string()),
+            _ => {}
+        }
+        
+        // Reference types
+        let internal_name = self.resolve_to_internal_name(simple_name);
+        Ok(format!("L{};", internal_name))
     }
     
     /// Get the generated class file

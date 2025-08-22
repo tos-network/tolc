@@ -8,6 +8,7 @@ release/
 **/release/
 **/*.rs.bk
 tests/com/
+tests/*.class
 *.log
 *.bak
 Todos.md

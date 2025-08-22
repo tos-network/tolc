@@ -214,8 +214,16 @@ This includes:
 - **Maintainability**: Ensures consistent documentation across the codebase
 - **JavaC alignment**: Matches the documentation style of reference implementation
 
+### Comment Writing Rules
+**MANDATORY**: When writing any comments in code:
+1. **Use English exclusively** - No Chinese, Japanese, or other non-English languages
+2. **Be descriptive and clear** - Comments should help international developers understand the code
+3. **Follow consistent style** - Use proper grammar and punctuation
+4. **Technical terminology** - Use standard English technical terms that align with JavaC documentation
+
 ### Enforcement
 - All new code must include English-only comments
 - All documentation updates must be in English
 - Code reviews should verify English-only compliance
 - Translation of existing Chinese content to English is required when updating files
+- **Zero tolerance policy**: Any non-English comments must be converted to English before merging

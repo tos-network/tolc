@@ -75,6 +75,64 @@ pub struct SymbolEnvironment {
     pub instantiation_cache: HashMap<String, Vec<String>>,
 }
 
+impl SymbolEnvironment {
+    /// Resolve simple type name to fully qualified name
+    /// Follows Java name resolution rules: single import -> current package -> wildcard import -> java.lang
+    pub fn resolve_type(&self, simple_name: &str) -> Option<String> {
+        // 1. Single-type import
+        if let Some(qualified) = self.imports.get(simple_name) {
+            eprintln!("🔍 RESOLVE: {} -> {} (single import)", simple_name, qualified);
+            return Some(qualified.clone());
+        }
+        
+        // 2. Current package classes
+        if let Some(ref pkg) = self.current_package {
+            let qualified = format!("{}.{}", pkg, simple_name);
+            if self.classes.contains_key(&qualified) {
+                eprintln!("🔍 RESOLVE: {} -> {} (current package)", simple_name, qualified);
+                return Some(qualified);
+            }
+        }
+        
+        // 3. Type-import-on-demand (wildcard imports)
+        for package in &self.wildcard_imports {
+            let candidate = format!("{}.{}", package, simple_name);
+            // Check if it's a known type or can be resolved through classpath
+            if self.classes.contains_key(&candidate) || classpath::class_exists(&candidate) {
+                eprintln!("🔍 RESOLVE: {} -> {} (wildcard import)", simple_name, candidate);
+                return Some(candidate);
+            }
+        }
+        
+        // 4. java.lang package (implicit import)
+        let java_lang_candidate = format!("java.lang.{}", simple_name);
+        if classpath::class_exists(&java_lang_candidate) {
+            eprintln!("🔍 RESOLVE: {} -> {} (java.lang)", simple_name, java_lang_candidate);
+            return Some(java_lang_candidate);
+        }
+        
+        eprintln!("⚠️ RESOLVE: Cannot resolve type: {}", simple_name);
+        None
+    }
+    
+    /// Check if a type is known (exists in symbol table)
+    pub fn is_known_type(&self, fully_qualified_name: &str) -> bool {
+        self.classes.contains_key(fully_qualified_name)
+    }
+    
+    /// Get class symbol by fully qualified name
+    pub fn get_class_symbol(&self, fully_qualified_name: &str) -> Option<&ClassSymbol> {
+        self.classes.get(fully_qualified_name)
+    }
+    
+    /// Resolve type to internal name format (java.lang.String -> java/lang/String)
+    pub fn resolve_to_internal_name(&self, simple_name: &str) -> String {
+        self.resolve_type(simple_name)
+            .unwrap_or_else(|| simple_name.to_string())
+            .replace('.', "/")
+    }
+}
+
 /// Enter phase processor - corresponds to JavaC's Enter class
 pub struct Enter {
     pub symbol_env: SymbolEnvironment,

@@ -61,6 +61,19 @@ pub fn resolve_class_name(simple_name: &str) -> Option<&'static str> {
     get_classpath_map().get(simple_name).map(|s| s.as_str())
 }
 
+/// Check if a class exists in the classpath
+/// Accepts both simple names ("String") and qualified names ("java.lang.String")
+pub fn class_exists(class_name: &str) -> bool {
+    // Handle qualified names by converting dots to slashes and checking rt.rs
+    if class_name.contains('.') {
+        let internal_name = class_name.replace('.', "/");
+        rt::CLASSES.iter().any(|class| class.internal == internal_name)
+    } else {
+        // Handle simple names
+        resolve_class_name(class_name).is_some()
+    }
+}
+
 /// Resolve a simple class name to its full internal name, with fallback logic
 pub fn resolve_class_name_with_fallback(simple_name: &str, current_package: Option<&str>) -> String {
     // First try the classpath mapping
