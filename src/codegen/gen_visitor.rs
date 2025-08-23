@@ -11,7 +11,7 @@
 //! **Proper JavaC Architecture**:
 //! ```
 //! Parser → Enter → Attr → Flow → TransTypes → Lower → CodeGen
-//!          符号表   类型推断  流分析   泛型擦除    脱糖    字节码生成
+//!        symbols  type-inf  flow-ana  generic-era  desugar  bytecode-gen
 //! ```
 //!
 //! **Functions that should be migrated**:
