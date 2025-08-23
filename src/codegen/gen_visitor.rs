@@ -4,13 +4,352 @@
 //! to resolve borrowing issues. Full implementations will be added later.
 
 use crate::ast::*;
-use crate::common::error::Result;
+use crate::common::error::{Result, Error};
 use super::gen::{Gen, GenContext};
 use super::items::{Item as BytecodeItem, CondItem, Items, typecodes};
 use super::opcodes;
 use crate::wash::attr::ResolvedType;
 
 impl Gen {
+    // ========== TYPE CHECKING INFRASTRUCTURE - JavaC Attr.java patterns ==========
+    
+    /// Check type compatibility - JavaC types.isAssignable equivalent
+    /// Validates that 'from_type' can be assigned to 'to_type'
+    fn check_assignable(&mut self, from_type: &TypeEnum, to_type: &TypeEnum, context: &str) -> Result<()> {
+        // Use the Types system for proper type checking
+        let is_assignable = self.type_inference.types_mut().is_assignable(from_type, to_type);
+        
+        if is_assignable {
+            eprintln!("✅ TYPE CHECK: {} assignable to {} in {}", 
+                self.type_to_string(from_type), self.type_to_string(to_type), context);
+            Ok(())
+        } else {
+            eprintln!("❌ TYPE ERROR: {} not assignable to {} in {}", 
+                self.type_to_string(from_type), self.type_to_string(to_type), context);
+            Err(Error::CodeGen {
+                message: format!("Type mismatch in {}: cannot assign {} to {}", 
+                    context, self.type_to_string(from_type), self.type_to_string(to_type))
+            })
+        }
+    }
+    
+    /// Check if type is numeric - JavaC types.isNumeric equivalent
+    fn is_numeric_type(&self, typ: &TypeEnum) -> bool {
+        self.type_inference.types().symtab().is_numeric(typ)
+    }
+    
+    /// Check if type is integral - JavaC types.isIntegral equivalent
+    fn is_integral_type(&self, typ: &TypeEnum) -> bool {
+        self.type_inference.types().symtab().is_integral(typ)
+    }
+    
+    /// Check if type is floating point - JavaC types.isFloating equivalent
+    fn is_floating_type(&self, typ: &TypeEnum) -> bool {
+        self.type_inference.types().symtab().is_floating(typ)
+    }
+    
+    /// Check if type is reference - JavaC types.isReference equivalent
+    fn is_reference_type(&self, typ: &TypeEnum) -> bool {
+        self.type_inference.types().symtab().is_reference(typ)
+    }
+    
+    /// Check binary operation type compatibility - JavaC Attr.visitBinary equivalent
+    fn check_binary_op_types(&mut self, op: &BinaryOp, left_type: &TypeEnum, right_type: &TypeEnum) -> Result<TypeEnum> {
+        match op {
+            // Arithmetic operators - require numeric types
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                if !self.is_numeric_type(left_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Arithmetic operator {:?} requires numeric left operand, got {}", 
+                            op, self.type_to_string(left_type))
+                    });
+                }
+                if !self.is_numeric_type(right_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Arithmetic operator {:?} requires numeric right operand, got {}", 
+                            op, self.type_to_string(right_type))
+                    });
+                }
+                
+                // Determine result type using JavaC's numeric promotion rules
+                self.get_binary_numeric_result_type(left_type, right_type)
+            }
+            
+            // Bitwise operators - require integral types
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor |
+            BinaryOp::LShift | BinaryOp::RShift | BinaryOp::URShift => {
+                if !self.is_integral_type(left_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Bitwise operator {:?} requires integral left operand, got {}", 
+                            op, self.type_to_string(left_type))
+                    });
+                }
+                if !self.is_integral_type(right_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Bitwise operator {:?} requires integral right operand, got {}", 
+                            op, self.type_to_string(right_type))
+                    });
+                }
+                
+                self.get_binary_integral_result_type(left_type, right_type)
+            }
+            
+            // Comparison operators - return boolean
+            BinaryOp::Eq | BinaryOp::Ne => {
+                // Can compare any types for equality
+                Ok(self.type_inference.types().symtab().boolean_type.clone())
+            }
+            
+            BinaryOp::Lt | BinaryOp::Le | 
+            BinaryOp::Gt | BinaryOp::Ge => {
+                if !self.is_numeric_type(left_type) || !self.is_numeric_type(right_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Relational operator {:?} requires numeric operands, got {} and {}", 
+                            op, self.type_to_string(left_type), self.type_to_string(right_type))
+                    });
+                }
+                Ok(self.type_inference.types().symtab().boolean_type.clone())
+            }
+            
+            // Logical operators - require boolean types
+            BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
+                self.check_boolean_type(left_type, "logical operator left operand")?;
+                self.check_boolean_type(right_type, "logical operator right operand")?;
+                Ok(self.type_inference.types().symtab().boolean_type.clone())
+            }
+        }
+    }
+    
+    /// Check if type is boolean - JavaC equivalent
+    fn check_boolean_type(&self, typ: &TypeEnum, context: &str) -> Result<()> {
+        match typ {
+            TypeEnum::Primitive(PrimitiveType::Boolean) => Ok(()),
+            _ => Err(Error::CodeGen {
+                message: format!("{} requires boolean type, got {}", context, self.type_to_string(typ))
+            })
+        }
+    }
+    
+    /// Get binary numeric result type - JavaC numeric promotion rules
+    fn get_binary_numeric_result_type(&self, left: &TypeEnum, right: &TypeEnum) -> Result<TypeEnum> {
+        match (left, right) {
+            // Double promotion
+            (TypeEnum::Primitive(PrimitiveType::Double), _) | (_, TypeEnum::Primitive(PrimitiveType::Double)) => {
+                Ok(self.type_inference.types().symtab().double_type.clone())
+            }
+            // Float promotion
+            (TypeEnum::Primitive(PrimitiveType::Float), _) | (_, TypeEnum::Primitive(PrimitiveType::Float)) => {
+                Ok(self.type_inference.types().symtab().float_type.clone())
+            }
+            // Long promotion
+            (TypeEnum::Primitive(PrimitiveType::Long), _) | (_, TypeEnum::Primitive(PrimitiveType::Long)) => {
+                Ok(self.type_inference.types().symtab().long_type.clone())
+            }
+            // Default to int for other integral types
+            _ => Ok(self.type_inference.types().symtab().int_type.clone())
+        }
+    }
+    
+    /// Get binary integral result type - for bitwise operations
+    fn get_binary_integral_result_type(&self, left: &TypeEnum, right: &TypeEnum) -> Result<TypeEnum> {
+        match (left, right) {
+            // Long promotion for integral operations
+            (TypeEnum::Primitive(PrimitiveType::Long), _) | (_, TypeEnum::Primitive(PrimitiveType::Long)) => {
+                Ok(self.type_inference.types().symtab().long_type.clone())
+            }
+            // Default to int
+            _ => Ok(self.type_inference.types().symtab().int_type.clone())
+        }
+    }
+    
+    /// Check unary operation type compatibility - JavaC Attr.visitUnary equivalent
+    fn check_unary_op_type(&mut self, op: &UnaryOp, operand_type: &TypeEnum) -> Result<TypeEnum> {
+        match op {
+            UnaryOp::Plus | UnaryOp::Minus => {
+                if !self.is_numeric_type(operand_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Unary arithmetic operator {:?} requires numeric operand, got {}", 
+                            op, self.type_to_string(operand_type))
+                    });
+                }
+                Ok(operand_type.clone())
+            }
+            
+            UnaryOp::BitNot => {
+                if !self.is_integral_type(operand_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Bitwise NOT requires integral operand, got {}", 
+                            self.type_to_string(operand_type))
+                    });
+                }
+                Ok(operand_type.clone())
+            }
+            
+            UnaryOp::Not => {
+                self.check_boolean_type(operand_type, "logical NOT operand")?;
+                Ok(self.type_inference.types().symtab().boolean_type.clone())
+            }
+            
+            UnaryOp::PreInc | UnaryOp::PostInc | 
+            UnaryOp::PreDec | UnaryOp::PostDec => {
+                if !self.is_numeric_type(operand_type) {
+                    return Err(Error::CodeGen {
+                        message: format!("Increment/decrement requires numeric operand, got {}", 
+                            self.type_to_string(operand_type))
+                    });
+                }
+                Ok(operand_type.clone())
+            }
+        }
+    }
+    
+    /// Check cast compatibility - JavaC types.isCastable equivalent
+    fn check_cast_compatibility(&mut self, from_type: &TypeEnum, to_type: &TypeEnum) -> Result<()> {
+        // Simplified cast checking - full implementation would use Types system
+        match (from_type, to_type) {
+            // Same types are always castable
+            _ if from_type == to_type => Ok(()),
+            
+            // Primitive casts
+            (TypeEnum::Primitive(_), TypeEnum::Primitive(_)) => Ok(()),
+            
+            // Reference type casts - simplified
+            (TypeEnum::Reference(_), TypeEnum::Reference(_)) => Ok(()),
+            
+            // Primitive to reference boxing
+            (TypeEnum::Primitive(_), TypeEnum::Reference(_)) => Ok(()),
+            
+            // Reference to primitive unboxing
+            (TypeEnum::Reference(_), TypeEnum::Primitive(_)) => Ok(()),
+            
+            _ => Err(Error::CodeGen {
+                message: format!("Cannot cast {} to {}", 
+                    self.type_to_string(from_type), self.type_to_string(to_type))
+            })
+        }
+    }
+    
+    /// Convert TypeEnum to string for error messages - utility method
+    fn type_to_string(&self, typ: &TypeEnum) -> String {
+        match typ {
+            TypeEnum::Primitive(prim) => format!("{:?}", prim),
+            TypeEnum::Reference(ref_type) => {
+                match ref_type {
+                    ReferenceType::Class(name) => name.clone(),
+                    ReferenceType::Interface(name) => format!("interface {}", name),
+                    ReferenceType::Array(element_type) => format!("{}[]", element_type.name),
+                }
+            }
+            TypeEnum::Void => "void".to_string(),
+        }
+    }
+    
+    /// Infer expression type - JavaC Attr.attribExpr equivalent
+    /// This is a key method that determines the type of any expression
+    fn infer_expression_type(&mut self, expr: &Expr) -> Result<TypeEnum> {
+        match expr {
+            Expr::Literal(lit) => Ok(self.get_literal_type(lit)),
+            
+            Expr::Identifier(ident) => {
+                // Look up in symbol table
+                if let Some(symbol) = self.type_inference.types().symtab().lookup_symbol(&ident.name) {
+                    Ok(symbol.typ.clone())
+                } else {
+                    // Fallback to Object type
+                    eprintln!("⚠️ TYPE INFERENCE: Unknown identifier '{}', defaulting to Object", ident.name);
+                    Ok(self.type_inference.types().symtab().object_type.clone())
+                }
+            }
+            
+            Expr::Binary(binary) => {
+                let left_type = self.infer_expression_type(&binary.left)?;
+                let right_type = self.infer_expression_type(&binary.right)?;
+                self.check_binary_op_types(&binary.operator, &left_type, &right_type)
+            }
+            
+            Expr::Unary(unary) => {
+                let operand_type = self.infer_expression_type(&unary.operand)?;
+                self.check_unary_op_type(&unary.operator, &operand_type)
+            }
+            
+            Expr::Cast(cast) => {
+                let source_type = self.infer_expression_type(&cast.expr)?;
+                let target_type = TypeEnum::from(cast.target_type.clone());
+                self.check_cast_compatibility(&source_type, &target_type)?;
+                Ok(target_type)
+            }
+            
+            Expr::Assignment(assign) => {
+                let target_type = self.infer_expression_type(&assign.target)?;
+                let value_type = self.infer_expression_type(&assign.value)?;
+                self.check_assignable(&value_type, &target_type, "assignment")?;
+                Ok(target_type)
+            }
+            
+            _ => {
+                // For other expression types, use wash type info or default to Object
+                eprintln!("⚠️ TYPE INFERENCE: Unsupported expression type, defaulting to Object");
+                Ok(self.type_inference.types().symtab().object_type.clone())
+            }
+        }
+    }
+    
+    /// Get literal type - JavaC equivalent
+    fn get_literal_type(&self, lit: &LiteralExpr) -> TypeEnum {
+        match &lit.value {
+            Literal::Integer(_) => self.type_inference.types().symtab().int_type.clone(),
+            Literal::Long(_) => self.type_inference.types().symtab().long_type.clone(),
+            Literal::Float(_) => self.type_inference.types().symtab().float_type.clone(),
+            Literal::Double(_) => self.type_inference.types().symtab().double_type.clone(),
+            Literal::Boolean(_) => self.type_inference.types().symtab().boolean_type.clone(),
+            Literal::Char(_) => self.type_inference.types().symtab().char_type.clone(),
+            Literal::String(_) => self.type_inference.types().symtab().string_type.clone(),
+            Literal::Null => self.type_inference.types().symtab().object_type.clone(),
+        }
+    }
+    
+    /// Convert binary operator to string for debugging
+    fn binary_op_to_string(&self, op: &BinaryOp) -> &'static str {
+        match op {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+            BinaryOp::Eq => "==",
+            BinaryOp::Ne => "!=",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::LogicalAnd => "&&",
+            BinaryOp::LogicalOr => "||",
+            BinaryOp::And => "&",
+            BinaryOp::Or => "|",
+            BinaryOp::Xor => "^",
+            BinaryOp::LShift => "<<",
+            BinaryOp::RShift => ">>",
+            BinaryOp::URShift => ">>>",
+            _ => "?", // Default for unknown operators
+        }
+    }
+    
+    /// Convert unary operator to string for debugging
+    fn unary_op_to_string(&self, op: &crate::ast::UnaryOp) -> &'static str {
+        match op {
+            crate::ast::UnaryOp::Plus => "+",
+            crate::ast::UnaryOp::Minus => "-",
+            crate::ast::UnaryOp::BitNot => "~",
+            crate::ast::UnaryOp::Not => "!",
+            crate::ast::UnaryOp::PreInc => "++",
+            crate::ast::UnaryOp::PostInc => "++",
+            crate::ast::UnaryOp::PreDec => "--",
+            crate::ast::UnaryOp::PostDec => "--",
+        }
+    }
+    
+    // ========== END TYPE CHECKING INFRASTRUCTURE ==========
+    
     /// Visit literal expression
     pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<BytecodeItem> {
         // Handle constants that need constant pool first (to avoid borrowing conflicts)
@@ -1134,6 +1473,21 @@ impl Gen {
             _ => {} // Continue with normal binary operations
         }
         
+        // Type check binary operation using new infrastructure
+        // First, infer operand types
+        let left_type = self.infer_expression_type(&tree.left)?;
+        let right_type = self.infer_expression_type(&tree.right)?;
+        
+        // Apply type checking for the specific operator
+        let result_type = self.check_binary_op_types(&tree.operator, &left_type, &right_type)?;
+        
+        eprintln!("🔍 TYPE CHECK: Binary {} {} {} = {}", 
+            self.type_to_string(&left_type), 
+            self.binary_op_to_string(&tree.operator),
+            self.type_to_string(&right_type),
+            self.type_to_string(&result_type)
+        );
+        
         // Special handling for null comparisons (before evaluating operands)
         if matches!(tree.operator, BinaryOp::Eq | BinaryOp::Ne) {
             let is_null_comparison = matches!(tree.left.as_ref(), Expr::Literal(lit) if matches!(lit.value, Literal::Null)) ||
@@ -1508,11 +1862,18 @@ impl Gen {
     pub fn visit_unary(&mut self, tree: &UnaryExpr, env: &GenContext) -> Result<BytecodeItem> {
         use crate::ast::UnaryOp;
         
+        // Type check unary operation using new infrastructure
+        let operand_type = self.infer_expression_type(&tree.operand)?;
+        let result_type = self.check_unary_op_type(&tree.operator, &operand_type)?;
+        
+        eprintln!("🔍 TYPE CHECK: Unary {} {} = {}", 
+            self.unary_op_to_string(&tree.operator),
+            self.type_to_string(&operand_type),
+            self.type_to_string(&result_type)
+        );
+        
         // Generate operand
         let operand_item = self.visit_expr(&tree.operand, env)?;
-        
-        // Determine result type based on operand and operator
-        let result_type = self.infer_unary_result_type(&operand_item, &tree.operator);
         
         // Generate operation
         self.with_items(|items| {
@@ -1864,6 +2225,16 @@ impl Gen {
     
     /// Visit assignment expression - simplified version (original)
     pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
+        // Type check assignment using new infrastructure
+        let target_type = self.infer_expression_type(&tree.target)?;
+        let value_type = self.infer_expression_type(&tree.value)?;
+        self.check_assignable(&value_type, &target_type, "assignment")?;
+        
+        eprintln!("🔍 TYPE CHECK: Assignment {} = {} (assignable)", 
+            self.type_to_string(&target_type),
+            self.type_to_string(&value_type)
+        );
+        
         // For critical assignments involving interface method calls, use JavaC-aligned approach
         if self.should_use_javac_assignment(tree) {
             eprintln!("🚀 DEBUG: Using JavaC-style assignment for complex expression");
@@ -4247,6 +4618,115 @@ impl Gen {
                 "Ljava/lang/Object;".to_string()
             },
         }
+    }
+    
+    /// Visit switch statement - JavaC visitSwitch equivalent
+    pub fn visit_switch(&mut self, tree: &crate::ast::SwitchStmt, env: &GenContext) -> Result<()> {
+        eprintln!("🔄 DEBUG: Switch statement generation - creating switch environment");
+        
+        // Create switch-specific environment
+        let switch_env = GenContext {
+            method: env.method.clone(),
+            clazz: env.clazz.clone(),
+            fatcode: env.fatcode,
+            debug_code: env.debug_code,
+            exit: env.exit.clone(),
+            cont: env.cont.clone(),
+            is_switch: true,
+        };
+        
+        // Generate selector expression
+        let _selector_item = self.visit_expr(&tree.expression, &switch_env)?;
+        
+        // For now, implement a simple if-else chain for switch cases
+        // Full switch table optimization would come later
+        eprintln!("⚠️  TODO: Complete switch table generation with case handling");
+        
+        // Generate case statements as if-else chain for now
+        for case in &tree.cases {
+            if case.labels.is_empty() {
+                // Default case
+                for stmt in &case.statements {
+                    self.visit_stmt(stmt, &switch_env)?;
+                }
+            } else {
+                // Regular case
+                for stmt in &case.statements {
+                    self.visit_stmt(stmt, &switch_env)?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Visit assert statement - JavaC visitAssert equivalent
+    pub fn visit_assert(&mut self, tree: &crate::ast::AssertStmt, env: &GenContext) -> Result<()> {
+        eprintln!("🔄 DEBUG: Assert statement generation");
+        
+        // JavaC pattern: if assertions are enabled, generate assertion code
+        // For now, just evaluate the condition and message expressions
+        let _condition_item = self.visit_expr(&tree.condition, env)?;
+        
+        if let Some(ref message) = tree.message {
+            let _message_item = self.visit_expr(message, env)?;
+        }
+        
+        eprintln!("⚠️  TODO: Complete assert bytecode with -ea flag handling");
+        Ok(())
+    }
+    
+    /// Visit synchronized statement - JavaC visitSynchronized equivalent  
+    pub fn visit_synchronized(&mut self, tree: &crate::ast::SynchronizedStmt, env: &GenContext) -> Result<()> {
+        eprintln!("🔄 DEBUG: Synchronized block generation");
+        
+        // Generate expression for monitor object
+        let _monitor_item = self.visit_expr(&tree.lock, env)?;
+        
+        // Generate monitorenter instruction
+        self.with_items(|items| {
+            items.code.emitop(super::opcodes::MONITORENTER);
+            Ok(())
+        })?;
+        
+        // Generate synchronized block body
+        self.visit_block(&tree.body, env)?;
+        
+        // Generate monitorexit instruction (normally in finally block)
+        self.with_items(|items| {
+            items.code.emitop(super::opcodes::MONITOREXIT);
+            Ok(())
+        })?;
+        
+        eprintln!("⚠️  TODO: Add proper try-finally for monitorexit exception handling");
+        Ok(())
+    }
+    
+    /// Visit type declaration statement - JavaC visitTypeDecl equivalent
+    pub fn visit_type_decl(&mut self, type_decl: &crate::ast::TypeDecl, env: &GenContext) -> Result<()> {
+        eprintln!("🔄 DEBUG: Type declaration in statement context");
+        
+        // Type declarations in statement context are typically inner classes
+        match type_decl {
+            crate::ast::TypeDecl::Class(_class_decl) => {
+                eprintln!("⚠️  TODO: Generate inner class in statement context");
+                // Inner class generation would be handled here
+            }
+            crate::ast::TypeDecl::Interface(_interface_decl) => {
+                eprintln!("⚠️  TODO: Generate inner interface in statement context");
+                // Inner interface generation would be handled here
+            }
+            crate::ast::TypeDecl::Enum(_enum_decl) => {
+                eprintln!("⚠️  TODO: Generate inner enum in statement context");
+                // Inner enum generation would be handled here  
+            }
+            crate::ast::TypeDecl::Annotation(_annotation_decl) => {
+                eprintln!("⚠️  TODO: Generate inner annotation in statement context");
+                // Inner annotation generation would be handled here
+            }
+        }
+        
+        Ok(())
     }
 }
 

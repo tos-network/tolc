@@ -277,6 +277,58 @@ impl Symtab {
         self.local_var_symbols.clear();
     }
     
+    /// Get class internal name - JavaC equivalent
+    /// Returns the internal JVM name for a class (e.g., "java/lang/String")
+    pub fn get_class_internal_name(&self, class_type: &TypeEnum) -> String {
+        match class_type {
+            TypeEnum::Reference(ReferenceType::Class(name)) => name.clone(),
+            TypeEnum::Reference(ReferenceType::Interface(name)) => name.clone(),
+            TypeEnum::Reference(ReferenceType::Array(element_type)) => {
+                // For arrays, we need the array descriptor (e.g., "[Ljava/lang/String;" for String[])
+                // For now, simplified handling - would need proper type resolution
+                format!("[L{};", element_type.name)
+            }
+            TypeEnum::Primitive(prim) => {
+                match prim {
+                    PrimitiveType::Byte => "byte".to_string(),
+                    PrimitiveType::Short => "short".to_string(),
+                    PrimitiveType::Int => "int".to_string(),
+                    PrimitiveType::Long => "long".to_string(),
+                    PrimitiveType::Float => "float".to_string(),
+                    PrimitiveType::Double => "double".to_string(),
+                    PrimitiveType::Boolean => "boolean".to_string(),
+                    PrimitiveType::Char => "char".to_string(),
+                }
+            }
+            TypeEnum::Void => "void".to_string(),
+        }
+    }
+    
+    /// Get well-known class internal names - JavaC symbolic constants
+    pub fn stringbuilder_internal_name(&self) -> &str {
+        "java/lang/StringBuilder"
+    }
+    
+    pub fn string_internal_name(&self) -> &str {
+        "java/lang/String"
+    }
+    
+    pub fn object_internal_name(&self) -> &str {
+        "java/lang/Object"
+    }
+    
+    pub fn system_internal_name(&self) -> &str {
+        "java/lang/System"
+    }
+    
+    pub fn printstream_internal_name(&self) -> &str {
+        "java/io/PrintStream"
+    }
+    
+    pub fn exception_internal_name(&self) -> &str {
+        "java/lang/Exception"
+    }
+    
     /// Helper: Convert TypeEnum to TypeRef (for compatibility)
     fn type_enum_to_type_ref(&self, typ: &TypeEnum) -> crate::ast::TypeRef {
         match typ {
