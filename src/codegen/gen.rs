@@ -334,6 +334,71 @@ impl Gen {
         self.wash_symbol_env.as_ref()
     }
     
+    /// ========== WASH INTEGRATION INTERFACE - JavaC-aligned architecture ==========
+    /// 
+    /// This interface allows codegen to consume pre-computed results from wash phases
+    /// instead of re-performing semantic analysis during bytecode generation.
+    /// 
+    /// JavaC Architecture Alignment:
+    /// - Parse → Enter → Attr → Flow → TransTypes → Lower → Gen  
+    /// - wash/enter.rs  ≡ com.sun.tools.javac.comp.Enter
+    /// - wash/attr.rs   ≡ com.sun.tools.javac.comp.Attr  
+    /// - wash/flow.rs   ≡ com.sun.tools.javac.comp.Flow
+    /// - wash/lower.rs  ≡ com.sun.tools.javac.comp.Lower
+    /// - codegen/gen.rs ≡ com.sun.tools.javac.jvm.Gen
+    /// 
+    /// This interface enables the proper separation of concerns between semantic
+    /// analysis (wash phases) and bytecode generation (codegen).
+    
+    /// Lookup expression type from wash/attr phase results
+    /// Reference: com.sun.tools.javac.comp.Attr.attribExpr()
+    pub fn lookup_expression_type(&self, expr_id: &str) -> Option<&crate::wash::attr::ResolvedType> {
+        self.wash_type_info.as_ref().and_then(|types| types.get(expr_id))
+    }
+    
+    /// Lookup method resolution from wash/attr phase results  
+    /// Reference: com.sun.tools.javac.comp.Resolve.findMethod()
+    pub fn lookup_method_resolution(&self, method_call_id: &str) -> Option<crate::wash::attr::MethodResolution> {
+        if let Some(type_info) = &self.wash_type_info {
+            if let Some(resolved_type) = type_info.get(method_call_id) {
+                match resolved_type {
+                    crate::wash::attr::ResolvedType::Method(params, return_type) => {
+                        Some(crate::wash::attr::MethodResolution {
+                            method_name: method_call_id.to_string(),
+                            declaring_class: "java.lang.Object".to_string(), // Default
+                            parameter_types: params.clone(),
+                            return_type: return_type.as_ref().clone(),
+                            is_static: false,
+                            is_interface: false,
+                        })
+                    },
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Lookup symbol from wash/enter phase results
+    /// Reference: com.sun.tools.javac.comp.Enter.complete()
+    pub fn lookup_symbol(&self, symbol_name: &str) -> Option<String> {
+        // Simplified symbol lookup - returns class name for now
+        // Full Symbol integration pending
+        if let Some(symbol_env) = &self.wash_symbol_env {
+            symbol_env.resolve_type(symbol_name)
+        } else {
+            None
+        }
+    }
+    
+    /// Check if wash phases have completed successfully
+    pub fn has_wash_results(&self) -> bool {
+        self.wash_type_info.is_some() && self.wash_symbol_env.is_some()
+    }
+    
     /// Set inner class relationships for InnerClasses attribute generation
     pub fn set_inner_class_relationships(&mut self, relationships: &[crate::codegen::InnerClassInfo]) {
         self.inner_class_relationships = relationships.to_vec();
