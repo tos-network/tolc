@@ -1,9 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use tolc::parser::parse_and_verify;
 use std::env;
-use tolc::codegen::{ClassWriter, class_file_to_bytes};
-use tolc::ast::TypeDecl;
+use tolc::{Config, compile_file};
 
 fn java_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("java")
@@ -426,66 +424,28 @@ fn parse_java_files_in_order() {
 
         let file_name = path.file_stem().unwrap().to_string_lossy().to_string();
         
-        // Read source
-        let source = match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => { 
-                let error_msg = format!("IO error reading source: {}", e);
-                eprintln!("[ERROR] {}: {}", file_path, error_msg);
-                failures.push((file_path.to_string(), error_msg)); 
-                break; // Stop on first error
-            }
-        };
-
-        // Parse + review
-        let ast = match parse_and_verify(&source) {
-            Ok(a) => a,
-            Err(e) => {
-                let error_msg = format!("parse error: {}", e);
-                eprintln!("[ERROR] {}: {}", file_path, error_msg);
-                failures.push((file_path.to_string(), error_msg));
-                break; // Stop on first error
-            }
-        };
-
-        // Find matching top-level type by file name
-        let type_decl_opt = ast.type_decls.iter().find(|td| match td { 
-            TypeDecl::Class(c) => c.name == file_name, 
-            TypeDecl::Interface(i) => i.name == file_name, 
-            TypeDecl::Enum(e) => e.name == file_name, 
-            TypeDecl::Annotation(a) => a.name == file_name 
-        });
-        let type_decl = match type_decl_opt { 
-            Some(t) => t, 
-            None => { 
-                let error_msg = "no matching top-level type for file name".to_string();
-                eprintln!("[ERROR] {}: {}", file_path, error_msg);
-                failures.push((file_path.to_string(), error_msg)); 
-                break; // Stop on first error
-            } 
-        };
-
-        // Generate class with TOLC
-        let package_name_opt = ast.package_decl.as_ref().map(|p| p.name.clone());
-        let mut cw = ClassWriter::new();
-        cw.set_package_name(package_name_opt.as_deref());
-        cw.set_all_types(ast.type_decls.clone());
-        cw.set_debug(true);
-        let gen_res = match type_decl {
-            TypeDecl::Class(c) => cw.generate_class(c),
-            TypeDecl::Interface(i) => cw.generate_interface(i),
-            TypeDecl::Enum(e) => cw.generate_enum(e),
-            TypeDecl::Annotation(a) => cw.generate_annotation(a),
-        };
-        if let Err(e) = gen_res { 
-            let error_msg = format!("codegen error: {}", e);
+        // Use complete 7-phase compilation pipeline via compile_file()
+        let config = Config::default()
+            .with_debug(true)
+            .with_emit_frames(true)
+            .with_verbose(false);
+        
+        // Compile using the complete 7-phase pipeline to temp directory
+        if let Err(e) = compile_file(&file_path, &out_dir.to_string_lossy(), &config) {
+            let error_msg = format!("compilation error: {}", e);
             eprintln!("[ERROR] {}: {}", file_path, error_msg);
             failures.push((file_path.to_string(), error_msg)); 
             break; // Stop on first error
         }
         
-        let class_file = cw.get_class_file();
-        let _class_bytes = class_file_to_bytes(&class_file);
+        // Verify the compiled class file was created
+        let class_path = out_dir.join(format!("{}.class", file_name));
+        if !class_path.exists() {
+            let error_msg = "compiled class file not found".to_string();
+            eprintln!("[ERROR] {}: {}", file_path, error_msg);
+            failures.push((file_path.to_string(), error_msg)); 
+            break; // Stop on first error
+        }
         
         eprintln!("[SUCCESS] {}", file_path);
         processed += 1;

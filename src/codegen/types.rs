@@ -169,13 +169,23 @@ impl Types {
             (TypeEnum::Reference(r1), TypeEnum::Reference(r2)) => {
                 // Simplified reference type equality
                 match (r1, r2) {
-                    (ReferenceType::Class(c1), ReferenceType::Class(c2)) => c1 == c2,
+                    (ReferenceType::Class(c1), ReferenceType::Class(c2)) => {
+                        // Normalize both class names to handle java.lang.String vs java/lang/String
+                        Self::normalize_class_name(c1) == Self::normalize_class_name(c2)
+                    },
                     _ => false, // TODO: Handle arrays and other reference types
                 }
             }
             (TypeEnum::Void, TypeEnum::Void) => true,
             _ => false,
         }
+    }
+    
+    /// Normalize class name to consistent format (slash notation)
+    /// Handles both java.lang.String and java/lang/String
+    fn normalize_class_name(name: &str) -> String {
+        // Convert dot notation to slash notation for consistent comparison
+        name.replace('.', "/")
     }
     
     /// Check subtyping relationship - JavaC isSubtype equivalent

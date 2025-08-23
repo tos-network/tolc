@@ -1,5 +1,5 @@
 use tolc::parser::parse_and_verify;
-use tolc::codegen::{ClassWriter, class_file_to_bytes};
+use tolc::codegen::{ClassWriter, class_file_to_bytes, SemanticAnalyzer};
 use tolc::ast::TypeDecl;
 use tolc::Config;
 use std::process::Command;
@@ -145,7 +145,15 @@ public class StackMapLoop {
 }
 "#;
     
-    let ast = parse_and_verify(source).expect("Failed to parse");
+    // Parse and run complete semantic analysis pipeline
+    let mut ast = parse_and_verify(source).expect("Failed to parse");
+    let mut semantic_analyzer = SemanticAnalyzer::new();
+    ast = semantic_analyzer.analyze(ast).expect("Failed to run semantic analysis");
+    
+    // Get semantic analysis results
+    let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
+    let type_info = semantic_analyzer.attr.get_semantic_types().clone();
+    
     let type_decl = ast.type_decls.iter().find(|td| matches!(td, TypeDecl::Class(c) if c.name == "StackMapLoop")).expect("No StackMapLoop class found");
     
     // Create config with StackMapTable enabled
@@ -155,6 +163,9 @@ public class StackMapLoop {
         
     let mut cw = ClassWriter::new_with_config(config);
     cw.set_package_name(Some("test"));
+    
+    // Set semantic analysis results
+    cw.set_wash_results(type_info, symbol_env);
     
     match type_decl {
         TypeDecl::Class(c) => {
@@ -376,27 +387,32 @@ public class StackMapExpressions {
 }
 "#;
     
-    let ast = parse_and_verify(source).expect("Failed to parse");
-    let type_decl = ast.type_decls.iter().find(|td| matches!(td, TypeDecl::Class(c) if c.name == "StackMapExpressions")).expect("No StackMapExpressions class found");
-    
-    // Create config with StackMapTable enabled
+    // Use complete compilation pipeline
     let config = Config::default()
         .with_debug(true)
         .with_emit_frames(true);
-        
-    let mut cw = ClassWriter::new_with_config(config);
-    cw.set_package_name(Some("test"));
     
-    match type_decl {
-        TypeDecl::Class(c) => {
-            cw.generate_class(c).expect("Failed to generate class");
-        }
-        _ => panic!("Expected class"),
-    }
+    let output_dir = "/tmp/stackmap_complex_test";
+    std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
     
-    // Get the class file and convert to bytes
-    let class_file = cw.get_class_file();
-    let bytes = class_file_to_bytes(&class_file);
+    let result = tolc::compile2file(source, output_dir, &config);
+    assert!(result.is_ok(), "Compilation should succeed with complete pipeline");
+    
+    // Find the generated class file
+    let class_file_path_with_package = std::path::Path::new(output_dir).join("test").join("StackMapExpressions.class");
+    let class_file_path_direct = std::path::Path::new(output_dir).join("StackMapExpressions.class");
+    
+    let class_file_path = if class_file_path_with_package.exists() {
+        class_file_path_with_package
+    } else if class_file_path_direct.exists() {
+        class_file_path_direct
+    } else {
+        panic!("StackMapExpressions.class should be generated in {} or {}", 
+               class_file_path_with_package.display(), class_file_path_direct.display());
+    };
+    
+    // Read the generated class file
+    let bytes = std::fs::read(&class_file_path).expect("Failed to read generated class file");
     
     // Write to file for inspection in /tmp/ directory
     let class_file_path = "/tmp/StackMapExpressions.class";

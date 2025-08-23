@@ -413,14 +413,42 @@ impl Enter {
             .map(|iface| self.resolve_type_name(iface))
             .collect();
         
-        // Process methods to collect generic method information
+        // Process class members to collect method and field information
         let mut methods = HashMap::new();
         for member in &class_decl.body {
-            if let crate::ast::ClassMember::Method(method_decl) = member {
-                let method_symbol = self.process_method_decl(method_decl, &class_decl.name)?;
-                let method_signature = format!("{}:{}", class_decl.name, method_decl.name);
-                methods.insert(method_signature.clone(), method_symbol.clone());
-                self.symbol_env.methods.insert(method_signature, method_symbol);
+            match member {
+                crate::ast::ClassMember::Method(method_decl) => {
+                    let method_symbol = self.process_method_decl(method_decl, &class_decl.name)?;
+                    let method_signature = format!("{}:{}", class_decl.name, method_decl.name);
+                    methods.insert(method_signature.clone(), method_symbol.clone());
+                    self.symbol_env.methods.insert(method_signature, method_symbol);
+                }
+                crate::ast::ClassMember::Field(field_decl) => {
+                    // Process field declaration and add to symbol table
+                    let is_static = field_decl.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Static));
+                    let field_modifiers: Vec<String> = field_decl.modifiers.iter()
+                        .map(|m| format!("{:?}", m))
+                        .collect();
+                    
+                    // Add field to symbol environment
+                    self.symbol_env.add_field(
+                        &field_decl.name,
+                        &class_decl.name,
+                        &self.resolve_type_name(&field_decl.type_ref),
+                        is_static,
+                        field_modifiers
+                    );
+                }
+                crate::ast::ClassMember::Constructor(constructor_decl) => {
+                    // Process constructor as a special method with name "<init>"
+                    let method_symbol = self.process_constructor_decl(constructor_decl, &class_decl.name)?;
+                    let method_signature = format!("{}:<init>", class_decl.name);
+                    methods.insert(method_signature.clone(), method_symbol.clone());
+                    self.symbol_env.methods.insert(method_signature, method_symbol);
+                }
+                _ => {
+                    // Handle other member types (nested types, etc.) if needed
+                }
             }
         }
         
@@ -551,9 +579,79 @@ impl Enter {
             is_generic,
         };
         
+        // Add method parameters to symbol table
+        let method_owner = format!("{}#{}", owner_class, method_decl.name);
+        let mut local_slot = if is_static { 0 } else { 1 }; // Static methods start at 0, instance methods at 1 (for 'this')
+        
+        for param in &method_decl.parameters {
+            let param_type = self.resolve_type_name(&param.type_ref);
+            self.symbol_env.add_variable(&param.name, &method_owner, &param_type, true, Some(local_slot));
+            
+            // JVM local variable slot computation (double/long take 2 slots)
+            local_slot += match param_type.as_str() {
+                "long" | "double" => 2,
+                _ => 1,
+            };
+            
+            eprintln!("📝 ENTER: Added parameter '{}' type '{}' to method '{}' at slot {}", 
+                     param.name, param_type, method_owner, local_slot - 1);
+        }
+        
         if is_generic {
             eprintln!("🧬 ENTER: Generic method {} with {} type parameters", 
                      method_decl.name, method_symbol.type_parameters.len());
+        }
+        
+        Ok(method_symbol)
+    }
+    
+    /// Process constructor declaration and create method symbol (JavaC aligned)
+    fn process_constructor_decl(&mut self, constructor_decl: &crate::ast::ConstructorDecl, owner_class: &str) -> Result<MethodSymbol> {
+        // Constructors don't have their own type parameters in Java
+        // They inherit type parameters from their declaring class
+        let type_parameters = Vec::new();
+        let is_generic = false;
+        let is_static = false; // Constructors are never static
+        
+        // Process parameter types
+        let parameter_types: Vec<String> = constructor_decl.parameters.iter()
+            .map(|param| self.resolve_type_name(&param.type_ref))
+            .collect();
+        
+        // Constructor return type is void
+        let return_type = "void".to_string();
+        
+        let method_symbol = MethodSymbol {
+            name: "<init>".to_string(), // JVM constructor name
+            owner_class: owner_class.to_string(),
+            type_parameters,
+            parameter_types,
+            return_type,
+            is_static,
+            is_generic,
+        };
+        
+        // Add constructor parameters to symbol table
+        let method_owner = format!("{}#<init>", owner_class);
+        let mut local_slot = 1; // Constructors always start at slot 1 (for 'this')
+        
+        for param in &constructor_decl.parameters {
+            let param_type = self.resolve_type_name(&param.type_ref);
+            self.symbol_env.add_variable(&param.name, &method_owner, &param_type, true, Some(local_slot));
+            
+            // JVM local variable slot computation (double/long take 2 slots)
+            local_slot += match param_type.as_str() {
+                "long" | "double" => 2,
+                _ => 1,
+            };
+            
+            eprintln!("📝 ENTER: Added constructor parameter '{}' type '{}' to '{}' at slot {}", 
+                     param.name, param_type, method_owner, local_slot - 1);
+        }
+        
+        if is_generic {
+            eprintln!("🧬 ENTER: Generic constructor <init> with {} type parameters", 
+                     method_symbol.type_parameters.len());
         }
         
         Ok(method_symbol)
@@ -573,8 +671,36 @@ impl Enter {
             format!("{}<{}>", resolved_base, args.join(", "))
         };
         
-        eprintln!("🔍 ENTER: Resolved type '{}' -> '{}'", type_ref.name, base_name);
-        base_name
+        // Handle array dimensions (e.g., int[] -> [I, String[][] -> [[Ljava/lang/String;)
+        let final_type = if type_ref.array_dims > 0 {
+            let array_prefix = "[".repeat(type_ref.array_dims);
+            let descriptor = self.type_name_to_descriptor(&base_name);
+            format!("{}{}", array_prefix, descriptor)
+        } else {
+            base_name
+        };
+        
+        eprintln!("🔍 ENTER: Resolved type '{}' (array_dims={}) -> '{}'", type_ref.name, type_ref.array_dims, final_type);
+        final_type
+    }
+    
+    /// Convert a type name to JVM descriptor format
+    fn type_name_to_descriptor(&self, type_name: &str) -> String {
+        match type_name {
+            "test/int" | "int" => "I".to_string(),
+            "test/long" | "long" => "J".to_string(),
+            "test/float" | "float" => "F".to_string(),
+            "test/double" | "double" => "D".to_string(),
+            "test/boolean" | "boolean" => "Z".to_string(),
+            "test/byte" | "byte" => "B".to_string(),
+            "test/char" | "char" => "C".to_string(),
+            "test/short" | "short" => "S".to_string(),
+            _ => {
+                // Reference types: convert to L<classname>;
+                let class_name = type_name.replace('.', "/");
+                format!("L{};", class_name)
+            }
+        }
     }
     
     /// Resolve a simple type name through the import resolution hierarchy

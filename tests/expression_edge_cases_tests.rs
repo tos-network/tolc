@@ -1,6 +1,4 @@
-use tolc::ast::*;
-use tolc::codegen::*;
-use tolc::parser::Parser;
+use tolc::{Config, compile};
 use tolc::common::error::Result;
 
 #[test]
@@ -34,18 +32,13 @@ fn test_operator_precedence_complex() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Complex precedence should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Complex precedence should compile: {:?}", result);
     
     Ok(())
 }
@@ -88,18 +81,13 @@ fn test_numeric_literals_edge_cases() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Numeric literals edge cases should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Numeric literals edge cases should compile: {:?}", result);
     
     Ok(())
 }
@@ -140,18 +128,13 @@ fn test_string_and_char_edge_cases() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "String and char edge cases should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "String and char edge cases should compile: {:?}", result);
     
     Ok(())
 }
@@ -199,18 +182,13 @@ fn test_array_edge_cases() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Array edge cases should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Array edge cases should compile: {:?}", result);
     
     Ok(())
 }
@@ -261,18 +239,13 @@ fn test_short_circuit_evaluation_complex() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Short-circuit evaluation should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Short-circuit evaluation should compile: {:?}", result);
     
     Ok(())
 }
@@ -326,18 +299,13 @@ fn test_type_conversion_edge_cases() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Type conversion edge cases should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Type conversion edge cases should compile: {:?}", result);
     
     Ok(())
 }
@@ -395,18 +363,13 @@ fn test_nested_expressions_deep() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Deeply nested expressions should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Deeply nested expressions should compile: {:?}", result);
     
     Ok(())
 }
@@ -459,18 +422,13 @@ fn test_null_and_reference_edge_cases() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Null and reference edge cases should compile: {:?}", result);
-    } else {
-        panic!("Expected a class declaration");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Null and reference edge cases should compile: {:?}", result);
     
     Ok(())
 }

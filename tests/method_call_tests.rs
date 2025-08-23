@@ -1,6 +1,4 @@
-use tolc::ast::*;
-use tolc::codegen::*;
-use tolc::parser::Parser;
+use tolc::{Config, compile};
 use tolc::common::error::Result;
 
 #[test]
@@ -18,22 +16,13 @@ fn test_method_call_with_current_class() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    // Verify that the AST was parsed correctly
-    assert!(!ast.type_decls.is_empty());
-    
-    // Try to generate bytecode for the class
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        
-        // The generation should succeed now that we have proper method resolution
-        assert!(result.is_ok(), "Class generation should succeed: {:?}", result);
-    } else {
-        panic!("Expected a class declaration in the AST");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Method call compilation should succeed: {:?}", result);
     
     Ok(())
 }
@@ -49,22 +38,13 @@ fn test_system_out_println() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    // Verify that the AST was parsed correctly
-    assert!(!ast.type_decls.is_empty());
-    
-    // Try to generate bytecode for the class
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        
-        // The generation should succeed
-        assert!(result.is_ok(), "Class generation should succeed: {:?}", result);
-    } else {
-        panic!("Expected a class declaration in the AST");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Method call compilation should succeed: {:?}", result);
     
     Ok(())
 }
@@ -83,18 +63,13 @@ fn test_static_method_call() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Static method call generation should succeed: {:?}", result);
-    } else {
-        panic!("Expected a class declaration in the AST");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Static method call generation should succeed: {:?}", result);
     
     Ok(())
 }
@@ -120,18 +95,13 @@ fn test_instance_method_call() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Instance method call generation should succeed: {:?}", result);
-    } else {
-        panic!("Expected a class declaration in the AST");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Instance method call generation should succeed: {:?}", result);
     
     Ok(())
 }
@@ -152,18 +122,13 @@ fn test_constructor_call() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Constructor call generation should succeed: {:?}", result);
-    } else {
-        panic!("Expected a class declaration in the AST");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Constructor call generation should succeed: {:?}", result);
     
     Ok(())
 }
@@ -190,18 +155,13 @@ fn test_chained_method_calls() -> Result<()> {
         }
     "#;
     
-    let parser = Parser::new(source)?;
-    let ast = parser.parse()?;
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    assert!(!ast.type_decls.is_empty());
-    
-    if let Some(TypeDecl::Class(class)) = ast.type_decls.first() {
-        let mut class_writer = ClassWriter::new();
-        let result = class_writer.generate_class(class);
-        assert!(result.is_ok(), "Chained method call generation should succeed: {:?}", result);
-    } else {
-        panic!("Expected a class declaration in the AST");
-    }
+    let result = compile(source, &config);
+    assert!(result.is_ok(), "Chained method call generation should succeed: {:?}", result);
     
     Ok(())
 }

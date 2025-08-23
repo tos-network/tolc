@@ -7,7 +7,7 @@
 //! JavaC alignment: This module implements the same visitor pattern and
 //! attribution logic as JavaC's Attr.java.
 
-use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, FieldDecl, Expr, Stmt, BinaryOp, TypeEnum, ReferenceType, UnaryOp, TypeRef};
+use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, FieldDecl, Expr, Stmt, BinaryOp, TypeEnum, ReferenceType, UnaryOp, TypeRef, TypeExt};
 use crate::ast::PrimitiveType as AstPrimitiveType;
 use crate::common::error::{Result, Error};
 use crate::codegen::enter::SymbolEnvironment;
@@ -1292,7 +1292,16 @@ impl Attr {
             }
             
             Expr::New(new_expr) => {
-                Ok(self.convert_type_enum_to_resolved(&TypeEnum::from(new_expr.target_type.clone())))
+                // JavaC-aligned array type processing
+                // For arrays: start with element type, then iteratively wrap with ArrayType
+                if new_expr.target_type.array_dims > 0 {
+                    // Use dedicated array type construction following JavaC Attr.visitNewArray pattern
+                    let array_type = new_expr.target_type.as_array_type_enum();
+                    Ok(self.convert_type_enum_to_resolved(&array_type))
+                } else {
+                    // Regular object creation
+                    Ok(self.convert_type_enum_to_resolved(&TypeEnum::from(new_expr.target_type.clone())))
+                }
             }
             
             Expr::Parenthesized(expr) => {

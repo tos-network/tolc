@@ -792,15 +792,17 @@ pub enum ReferenceType {
 // Extension trait to convert TypeRef to Type enum
 pub trait TypeExt {
     fn as_type_enum(&self) -> TypeEnum;
+    fn as_array_type_enum(&self) -> TypeEnum;
+    fn type_enum_to_string(type_enum: &TypeEnum) -> String;
 }
 
 impl TypeExt for TypeRef {
     fn as_type_enum(&self) -> TypeEnum {
-        if self.array_dims > 0 {
-            TypeEnum::Reference(ReferenceType::Array(Box::new(self.clone())))
-        } else if self.name == "boolean" || self.name == "char" || self.name == "byte" || 
-                  self.name == "short" || self.name == "int" || self.name == "long" || 
-                  self.name == "float" || self.name == "double" {
+        // For regular type processing, ignore array_dims here
+        // Array type construction should be handled in Attr phase following JavaC pattern
+        if self.name == "boolean" || self.name == "char" || self.name == "byte" || 
+           self.name == "short" || self.name == "int" || self.name == "long" || 
+           self.name == "float" || self.name == "double" {
             let prim_type = match self.name.as_str() {
                 "boolean" => PrimitiveType::Boolean,
                 "char" => PrimitiveType::Char,
@@ -815,6 +817,53 @@ impl TypeExt for TypeRef {
             TypeEnum::Primitive(prim_type)
         } else {
             TypeEnum::Reference(ReferenceType::Class(self.name.clone()))
+        }
+    }
+    
+    /// JavaC-aligned array type construction - matches Attr.visitNewArray
+    /// This should be called from Attr phase for proper array type inference  
+    fn as_array_type_enum(&self) -> TypeEnum {
+        // Start with the element type (base type without array dimensions)
+        let mut element_type = self.as_type_enum();
+        
+        // JavaC pattern: Iteratively wrap in ArrayType for each dimension
+        // This matches JavaC's Attr.java lines 2261-2265:
+        // owntype = elemtype;
+        // for (List<JCExpression> l = tree.dims; l.nonEmpty(); l = l.tail) {
+        //     owntype = new ArrayType(owntype, syms.arrayClass);
+        // }
+        for _ in 0..self.array_dims {
+            element_type = TypeEnum::Reference(ReferenceType::Array(Box::new(TypeRef {
+                name: Self::type_enum_to_string(&element_type),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0, // Always 0 for intermediate types
+                span: self.span,
+            })));
+        }
+        
+        element_type
+    }
+    
+    /// Helper to convert TypeEnum to string for nested construction
+    fn type_enum_to_string(type_enum: &TypeEnum) -> String {
+        match type_enum {
+            TypeEnum::Primitive(prim) => match prim {
+                PrimitiveType::Boolean => "boolean".to_string(),
+                PrimitiveType::Byte => "byte".to_string(), 
+                PrimitiveType::Char => "char".to_string(),
+                PrimitiveType::Short => "short".to_string(),
+                PrimitiveType::Int => "int".to_string(),
+                PrimitiveType::Long => "long".to_string(),
+                PrimitiveType::Float => "float".to_string(),
+                PrimitiveType::Double => "double".to_string(),
+            },
+            TypeEnum::Reference(ref_type) => match ref_type {
+                ReferenceType::Class(name) => name.clone(),
+                ReferenceType::Interface(name) => name.clone(),
+                ReferenceType::Array(element) => format!("[{}", element.name), // Array descriptor format
+            },
+            TypeEnum::Void => "void".to_string(),
         }
     }
 }

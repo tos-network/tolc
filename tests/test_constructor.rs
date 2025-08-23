@@ -1,6 +1,6 @@
-use tolc::parser::parse_and_verify;
-use tolc::codegen::{ClassWriter, class_file_to_bytes};
-use tolc::ast::TypeDecl;
+use tolc::parser::parse_java;
+use tolc::codegen::SemanticAnalyzer;
+use tolc::{Config, compile2file};
 
 #[test]
 fn test_constructor_initialization() {
@@ -26,26 +26,38 @@ public class ConstructorTest {
 }
 "#;
     
-    let ast = parse_and_verify(source).expect("Failed to parse");
-    let type_decl = ast.type_decls.iter().find(|td| matches!(td, TypeDecl::Class(c) if c.name == "ConstructorTest")).expect("No ConstructorTest class found");
+    // Parse and run complete semantic analysis pipeline
+    let mut ast = parse_java(source).expect("Failed to parse Java source");
+    let mut semantic_analyzer = SemanticAnalyzer::new();
+    ast = semantic_analyzer.analyze(ast).expect("Failed to run semantic analysis");
     
-    let mut cw = ClassWriter::new();
-    cw.set_package_name(Some("test"));
-    cw.set_debug(true);
+    // Use complete compilation pipeline
+    let config = Config::default();
+    let output_dir = "/tmp/constructor_test";
+    std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
     
-    match type_decl {
-        TypeDecl::Class(c) => {
-            cw.generate_class(c).expect("Failed to generate class");
-        }
-        _ => panic!("Expected class"),
-    }
+    let result = compile2file(source, output_dir, &config);
+    assert!(result.is_ok(), "Compilation should succeed with complete pipeline");
     
-    // Get the class file and convert to bytes
-    let class_file = cw.get_class_file();
-    let bytes = class_file_to_bytes(&class_file);
+    // Verify class file was generated (check both possible locations)
+    let class_file_path_with_package = std::path::Path::new(output_dir).join("test").join("ConstructorTest.class");
+    let class_file_path_direct = std::path::Path::new(output_dir).join("ConstructorTest.class");
     
-    // Write to file for inspection
-    std::fs::write("ConstructorTest.class", &bytes).expect("Failed to write class file");
+    let class_file_path = if class_file_path_with_package.exists() {
+        class_file_path_with_package
+    } else if class_file_path_direct.exists() {
+        class_file_path_direct
+    } else {
+        panic!("ConstructorTest.class should be generated in {} or {}", 
+               class_file_path_with_package.display(), class_file_path_direct.display());
+    };
+    assert!(class_file_path.exists(), "ConstructorTest.class should be generated");
+    
+    // Read the generated class file for verification
+    let bytes = std::fs::read(&class_file_path).expect("Failed to read generated class file");
+    
+    // Copy to current directory for javap inspection
+    std::fs::copy(&class_file_path, "ConstructorTest.class").expect("Failed to copy class file");
     
     // Run javap to see the output
     let output = std::process::Command::new("javap")

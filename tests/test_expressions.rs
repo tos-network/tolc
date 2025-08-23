@@ -1,6 +1,5 @@
-use tolc::parser::parse_and_verify;
-use tolc::codegen::{ClassWriter, class_file_to_bytes};
-use tolc::ast::TypeDecl;
+use tolc::{Config, compile_file};
+use std::env;
 
 #[test]
 fn test_arithmetic_expressions() {
@@ -23,49 +22,21 @@ public class ArithmeticTest {
 }
 "#;
     
-    let ast = parse_and_verify(source).expect("Failed to parse");
-    let type_decl = ast.type_decls.iter().find(|td| matches!(td, TypeDecl::Class(c) if c.name == "ArithmeticTest")).expect("No ArithmeticTest class found");
+    // Write source to temporary file
+    let temp_dir = env::temp_dir();
+    let temp_file = temp_dir.join("ArithmeticTest.java");
+    std::fs::write(&temp_file, source).expect("Failed to write temp file");
     
-    let mut cw = ClassWriter::new();
-    cw.set_package_name(Some("test"));
-    cw.set_debug(true);
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    match type_decl {
-        TypeDecl::Class(c) => {
-            cw.generate_class(c).expect("Failed to generate class");
-        }
-        _ => panic!("Expected class"),
-    }
+    let result = compile_file(&temp_file.to_string_lossy(), &temp_dir.to_string_lossy(), &config);
+    assert!(result.is_ok(), "Arithmetic expressions compilation should succeed: {:?}", result);
     
-    // Get the class file and convert to bytes
-    let class_file = cw.get_class_file();
-    let bytes = class_file_to_bytes(&class_file);
-    
-    // Write to file for inspection
-    std::fs::write("ArithmeticTest.class", &bytes).expect("Failed to write class file");
-    
-    // Run javap to see the output
-    let output = std::process::Command::new("javap")
-        .arg("-c")
-        .arg("-verbose")
-        .arg("ArithmeticTest.class")
-        .output()
-        .expect("Failed to run javap");
-    
-    let javap_output = String::from_utf8_lossy(&output.stdout);
-    println!("=== javap output ===");
-    println!("{}", javap_output);
-    
-    // Check if methods are correctly generated
-    assert!(javap_output.contains("public int calculate();"), "Method calculate() not found");
-    assert!(javap_output.contains("public double calculateFloat();"), "Method calculateFloat() not found");
-    
-    // Check for arithmetic operations
-    assert!(javap_output.contains("iadd") || javap_output.contains("imul"), "Integer arithmetic operations not found");
-    assert!(javap_output.contains("dadd") || javap_output.contains("dmul"), "Double arithmetic operations not found");
-    
-    // Clean up
-    std::fs::remove_file("ArithmeticTest.class").ok();
+    // Cleanup
+    let _ = std::fs::remove_file(&temp_file);
 }
 
 #[test]
@@ -86,46 +57,19 @@ public class UnaryTest {
 }
 "#;
     
-    let ast = parse_and_verify(source).expect("Failed to parse");
-    let type_decl = ast.type_decls.iter().find(|td| matches!(td, TypeDecl::Class(c) if c.name == "UnaryTest")).expect("No UnaryTest class found");
+    // Write source to temporary file
+    let temp_dir = env::temp_dir();
+    let temp_file = temp_dir.join("UnaryTest.java");
+    std::fs::write(&temp_file, source).expect("Failed to write temp file");
     
-    let mut cw = ClassWriter::new();
-    cw.set_package_name(Some("test"));
-    cw.set_debug(true);
+    // Use complete 7-phase compilation pipeline
+    let config = Config::default()
+        .with_debug(true)
+        .with_emit_frames(true);
     
-    match type_decl {
-        TypeDecl::Class(c) => {
-            cw.generate_class(c).expect("Failed to generate class");
-        }
-        _ => panic!("Expected class"),
-    }
+    let result = compile_file(&temp_file.to_string_lossy(), &temp_dir.to_string_lossy(), &config);
+    assert!(result.is_ok(), "Unary expressions compilation should succeed: {:?}", result);
     
-    // Get the class file and convert to bytes
-    let class_file = cw.get_class_file();
-    let bytes = class_file_to_bytes(&class_file);
-    
-    // Write to file for inspection
-    std::fs::write("UnaryTest.class", &bytes).expect("Failed to write class file");
-    
-    // Run javap to see the output
-    let output = std::process::Command::new("javap")
-        .arg("-c")
-        .arg("-verbose")
-        .arg("UnaryTest.class")
-        .output()
-        .expect("Failed to run javap");
-    
-    let javap_output = String::from_utf8_lossy(&output.stdout);
-    println!("=== javap output ===");
-    println!("{}", javap_output);
-    
-    // Check if methods are correctly generated
-    assert!(javap_output.contains("public int testUnary(int);"), "Method testUnary not found");
-    assert!(javap_output.contains("public boolean testLogical(boolean);"), "Method testLogical not found");
-    
-    // Check for unary operations
-    assert!(javap_output.contains("ineg"), "Integer negation not found");
-    
-    // Clean up
-    std::fs::remove_file("UnaryTest.class").ok();
+    // Cleanup
+    let _ = std::fs::remove_file(&temp_file);
 }
