@@ -8,6 +8,24 @@
 //! - gen_expr.rs: Expression generation  
 //! - gen_stmt.rs: Statement generation
 //! - gen_cond.rs: Condition handling (unified)
+//!
+//! ## Semantic Analysis Pipeline
+//! 
+//! This module also implements the semantic analysis phases used between
+//! parsing and code generation. Each phase corresponds to a compilation stage:
+//! 
+//! - Enter: Symbol table construction and import resolution
+//! - Attr: Type checking and method resolution 
+//! - Flow: Definite assignment and reachability analysis
+//! - TransTypes: Generic type erasure and bridge method generation
+//! - Lower: Syntactic sugar desugaring (enhanced for loops, string concat, etc.)
+
+// Semantic analysis pipeline modules (migrated from wash)
+pub mod enter;       // Symbol table construction and import resolution
+pub mod attr;        // Type checking and method resolution
+pub mod flow;        // Definite assignment and reachability analysis
+pub mod trans_types; // Generic type erasure and bridge method generation
+pub mod lower;       // Syntactic sugar desugaring
 
 // New javac-aligned architecture
 pub mod gen;          // Main bytecode generator (corresponds to javac Gen.java)  
@@ -141,8 +159,8 @@ pub fn generate_bytecode_with_wash(
     output_dir: &str, 
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
-    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+    wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
 ) -> Result<()> {
     generate_bytecode_impl(ast, output_dir, config, signatures, wash_type_info, wash_symbol_env)
 }
@@ -158,8 +176,8 @@ fn generate_bytecode_impl(
     output_dir: &str, 
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
-    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+    wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
 ) -> Result<()> {
     let output_path = Path::new(output_dir);
     
@@ -422,8 +440,8 @@ pub fn generate_bytecode_inmemory_with_wash(
     ast: &Ast, 
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
-    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+    wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
 ) -> Result<Vec<u8>> {
     generate_bytecode_inmemory_impl(ast, config, signatures, wash_type_info, wash_symbol_env)
 }
@@ -438,8 +456,8 @@ fn generate_bytecode_inmemory_impl(
     ast: &Ast, 
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
-    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>
+    wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
+    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
 ) -> Result<Vec<u8>> {
     // Build compilation-unit level annotation retention index
     let cu_retention = build_annotation_retention_index_from_cu(ast);
@@ -683,4 +701,62 @@ fn modifiers_to_flags(modifiers: &[Modifier]) -> u16 {
     }
     
     flags
+}
+
+/// Main semantic analysis pipeline that orchestrates all phases
+/// Follows standard compilation flow: Enter → Attr → Flow → TransTypes → Lower
+pub struct SemanticAnalyzer {
+    pub enter: enter::Enter,
+    pub attr: attr::Attr,
+    pub flow: flow::Flow,
+    pub trans_types: trans_types::TransTypes,
+    pub lower: lower::Lower,
+}
+
+impl SemanticAnalyzer {
+    pub fn new() -> Self {
+        Self {
+            enter: enter::Enter::new(),
+            attr: attr::Attr::new(),
+            flow: flow::Flow::new(),
+            trans_types: trans_types::TransTypes::new(),
+            lower: lower::Lower::new(),
+        }
+    }
+    
+    /// Run complete semantic analysis pipeline on AST
+    /// Returns semantically analyzed and transformed AST ready for code generation
+    pub fn analyze(&mut self, mut ast: Ast) -> Result<Ast> {
+        eprintln!("🔍 SEMANTIC: Starting semantic analysis pipeline");
+        
+        // Phase 1: Enter - Build symbol tables
+        ast = self.enter.process(ast)?;
+        let symbol_env = self.enter.get_symbol_environment();
+        
+        // Phase 2: Attr - Type checking and resolution (with symbols)
+        ast = self.attr.process_with_symbols(ast, Some(symbol_env))?;
+        
+        // Phase 3: Flow - Definite assignment analysis (with symbols)
+        ast = self.flow.process_with_symbols(ast, Some(symbol_env))?;
+        
+        // Phase 4: TransTypes - Generic type erasure (with type info)
+        ast = self.trans_types.process_with_types(ast, &self.attr.get_type_information())?;
+        
+        // Phase 5: Lower - Desugar syntax (with type info)
+        ast = self.lower.process_with_types(ast, &self.trans_types.get_erased_types())?;
+        
+        eprintln!("✅ SEMANTIC: Semantic analysis pipeline complete");
+        Ok(ast)
+    }
+    
+    /// Get generic signatures stored during TransTypes phase
+    pub fn get_generic_signatures(&self) -> &std::collections::HashMap<String, String> {
+        &self.trans_types.generic_signatures
+    }
+}
+
+impl Default for SemanticAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -47,7 +47,7 @@ impl TransTypes {
     }
     
     /// Process AST with type information from Attr phase
-    pub fn process_with_types(&mut self, mut ast: Ast, type_info: &std::collections::HashMap<usize, crate::wash::attr::ResolvedType>) -> Result<Ast> {
+    pub fn process_with_types(&mut self, mut ast: Ast, type_info: &std::collections::HashMap<usize, crate::codegen::attr::ResolvedType>) -> Result<Ast> {
         eprintln!("🔍 TRANS_TYPES: Starting type erasure");
         eprintln!("📊 TRANS_TYPES: Processing {} type expressions", type_info.len());
         
@@ -585,8 +585,8 @@ impl TransTypes {
     }
     
     /// Erase generic type to its raw form following Java type erasure rules
-    fn erase_type(&self, resolved_type: &crate::wash::attr::ResolvedType) -> String {
-        use crate::wash::attr::ResolvedType;
+    fn erase_type(&self, resolved_type: &crate::codegen::attr::ResolvedType) -> String {
+        use crate::codegen::attr::ResolvedType;
         
         match resolved_type {
             ResolvedType::Primitive(prim) => format!("{:?}", prim).to_lowercase(),

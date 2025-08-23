@@ -73,10 +73,10 @@ pub struct Gen {
     generic_signatures: Option<std::collections::HashMap<String, String>>,
     
     /// Wash symbol environment for identifier resolution
-    pub wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>,
+    pub wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>,
     
     /// Type information from wash/attr phase for type-aware code generation
-    wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
+    wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
     
     
     /// Inner class relationships for InnerClasses attribute generation
@@ -317,20 +317,20 @@ impl Gen {
     /// Set wash phase results for type-aware code generation
     pub fn set_wash_results(
         &mut self, 
-        type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType>,
-        symbol_env: crate::wash::enter::SymbolEnvironment
+        type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType>,
+        symbol_env: crate::codegen::enter::SymbolEnvironment
     ) {
         self.wash_type_info = Some(type_info);
         self.wash_symbol_env = Some(symbol_env);
     }
     
     /// Get type information from wash/attr phase
-    pub fn get_wash_type_info(&self) -> Option<&std::collections::HashMap<String, crate::wash::attr::ResolvedType>> {
+    pub fn get_wash_type_info(&self) -> Option<&std::collections::HashMap<String, crate::codegen::attr::ResolvedType>> {
         self.wash_type_info.as_ref()
     }
     
     /// Get symbol environment from wash/enter phase  
-    pub fn get_wash_symbol_env(&self) -> Option<&crate::wash::enter::SymbolEnvironment> {
+    pub fn get_wash_symbol_env(&self) -> Option<&crate::codegen::enter::SymbolEnvironment> {
         self.wash_symbol_env.as_ref()
     }
     
@@ -352,18 +352,18 @@ impl Gen {
     
     /// Lookup expression type from wash/attr phase results
     /// Reference: com.sun.tools.javac.comp.Attr.attribExpr()
-    pub fn lookup_expression_type(&self, expr_id: &str) -> Option<&crate::wash::attr::ResolvedType> {
+    pub fn lookup_expression_type(&self, expr_id: &str) -> Option<&crate::codegen::attr::ResolvedType> {
         self.wash_type_info.as_ref().and_then(|types| types.get(expr_id))
     }
     
     /// Lookup method resolution from wash/attr phase results  
     /// Reference: com.sun.tools.javac.comp.Resolve.findMethod()
-    pub fn lookup_method_resolution(&self, method_call_id: &str) -> Option<crate::wash::attr::MethodResolution> {
+    pub fn lookup_method_resolution(&self, method_call_id: &str) -> Option<crate::codegen::attr::MethodResolution> {
         if let Some(type_info) = &self.wash_type_info {
             if let Some(resolved_type) = type_info.get(method_call_id) {
                 match resolved_type {
-                    crate::wash::attr::ResolvedType::Method(params, return_type) => {
-                        Some(crate::wash::attr::MethodResolution {
+                    crate::codegen::attr::ResolvedType::Method(params, return_type) => {
+                        Some(crate::codegen::attr::MethodResolution {
                             method_name: method_call_id.to_string(),
                             declaring_class: "java.lang.Object".to_string(), // Default
                             parameter_types: params.clone(),
@@ -497,6 +497,10 @@ impl Gen {
         // JavaC pattern: int startpcCrt = initCode(tree, env, fatcode)
         let _startpc = self.init_code(method, &env, false)?;
         
+        // Enter method scope for variable registration (missing step) 
+        let scope_id = self.scope_manager.push_scope(0, false, None, None, 0);
+        eprintln!("🔍 DEBUG: Pushed method scope with ID: {}", scope_id);
+        
         // JavaC pattern: try { genStat(tree.body, env); } catch (CodeSizeOverflow e) {...}
         let mut retry_with_fatcode = false;
         
@@ -555,6 +559,9 @@ impl Gen {
                 }
             }
         }
+        
+        // Exit method scope for cleanup
+        self.scope_manager.pop_scope(0);
         
         // Extract bytecode from Code buffer (JavaC equivalent)
         if let Some(ref code) = self.code {
@@ -3656,6 +3663,7 @@ impl LoopScopeManager {
     
     /// Add a local variable to the current scope
     pub fn add_local_var(&mut self, name: String, type_desc: String, slot: u16, start_pc: usize) -> std::result::Result<(), String> {
+        eprintln!("🔍 DEBUG: Trying to add variable '{}' to scope. Active scopes: {}", name, self.scope_stack.len());
         if let Some(current_scope) = self.scope_stack.last_mut() {
             let scoped_var = ScopedLocalVar {
                 name,

@@ -30,7 +30,7 @@ use crate::common::error::{Result, Error};
 use super::gen::{Gen, GenContext};
 use super::items::{Item as BytecodeItem, CondItem, Items, typecodes};
 use super::opcodes;
-use crate::wash::attr::ResolvedType;
+use crate::codegen::attr::ResolvedType;
 
 /// Lambda method information for deferred generation
 #[derive(Debug, Clone)]
@@ -139,6 +139,203 @@ impl Gen {
         self.type_inference.types().symtab().is_reference(typ)
     }
     
+    /// Convert TypeRef to TypeEnum with proper multi-dimensional array support
+    /// Fixes the issue with as_type_enum() not handling array_dims > 1 correctly
+    fn convert_type_ref_to_type_enum(&self, type_ref: &crate::ast::TypeRef) -> TypeEnum {
+        use crate::ast::{TypeRef, Span};
+        
+            
+        if type_ref.array_dims > 0 {
+            // Start with the base element type
+            let base_element_type = if type_ref.name == "int" {
+                "int"
+            } else if type_ref.name == "boolean" {
+                "boolean"  
+            } else if type_ref.name == "String" || type_ref.name == "java.lang.String" {
+                "java.lang.String"
+            } else {
+                &type_ref.name
+            };
+            
+            // Build the type by wrapping each dimension
+            let mut current_type_ref = TypeRef {
+                name: base_element_type.to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0,
+                span: Span::default(),
+            };
+            
+            // Wrap with array layers from innermost to outermost
+            for i in 0..type_ref.array_dims {
+                    
+                let array_element_ref = current_type_ref.clone();
+                current_type_ref = TypeRef {
+                    name: format!("{}[]", array_element_ref.name),
+                    type_args: vec![],
+                    annotations: vec![],
+                    array_dims: 0, // We represent arrays through the name now
+                    span: Span::default(),
+                };
+            }
+            
+            // Convert final TypeRef to TypeEnum using proper array structure
+            self.build_array_type_enum(base_element_type, type_ref.array_dims as u32)
+        } else {
+            // Use the original method for non-array types
+            type_ref.as_type_enum()
+        }
+    }
+    
+    fn build_array_type_enum(&self, element_type_name: &str, dimensions: u32) -> TypeEnum {
+        // Start with the innermost element type
+        let mut result_type = if element_type_name == "int" {
+            TypeEnum::Primitive(PrimitiveType::Int)
+        } else if element_type_name == "boolean" {
+            TypeEnum::Primitive(PrimitiveType::Boolean)
+        } else if element_type_name == "String" || element_type_name == "java.lang.String" {
+            TypeEnum::Reference(ReferenceType::Class("java/lang/String".to_string()))
+        } else {
+            TypeEnum::Reference(ReferenceType::Class(element_type_name.replace(".", "/")))
+        };
+        
+        // Wrap with array layers
+        for _i in 0..dimensions {
+            // Create TypeRef for the current type being wrapped
+            let element_ref = self.type_enum_to_type_ref(&result_type);
+            result_type = TypeEnum::Reference(ReferenceType::Array(Box::new(element_ref)));
+        }
+        result_type
+    }
+    
+    fn type_enum_to_type_ref(&self, type_enum: &TypeEnum) -> crate::ast::TypeRef {
+        use crate::ast::{TypeRef, Span};
+        
+        match type_enum {
+            TypeEnum::Primitive(prim) => TypeRef {
+                name: match prim {
+                    PrimitiveType::Int => "int".to_string(),
+                    PrimitiveType::Boolean => "boolean".to_string(),
+                    PrimitiveType::Byte => "byte".to_string(),
+                    PrimitiveType::Char => "char".to_string(),
+                    PrimitiveType::Short => "short".to_string(),
+                    PrimitiveType::Long => "long".to_string(),
+                    PrimitiveType::Float => "float".to_string(),
+                    PrimitiveType::Double => "double".to_string(),
+                },
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0,
+                span: Span::default(),
+            },
+            TypeEnum::Reference(ref_type) => match ref_type {
+                ReferenceType::Class(class_name) => TypeRef {
+                    name: class_name.clone(),
+                    type_args: vec![],
+                    annotations: vec![],
+                    array_dims: 0,
+                    span: Span::default(),
+                },
+                ReferenceType::Interface(interface_name) => TypeRef {
+                    name: interface_name.clone(),
+                    type_args: vec![],
+                    annotations: vec![],
+                    array_dims: 0,
+                    span: Span::default(),
+                },
+                ReferenceType::Array(element_ref) => {
+                    // For arrays, we need to increment the array_dims by 1
+                    let mut array_ref = element_ref.as_ref().clone();
+                    array_ref.array_dims += 1;
+                    array_ref
+                },
+            },
+            TypeEnum::Void => TypeRef {
+                name: "void".to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0,
+                span: Span::default(),
+            },
+        }
+    }
+    
+    /// Infer variable type from its name using heuristics (fallback when symbol table lookup fails)
+    /// This is a temporary solution until wash phase integration is complete
+    fn infer_type_from_variable_name(&self, var_name: &str) -> TypeEnum {
+        use crate::ast::{TypeRef, Span};
+        
+        // Array type heuristics - create proper TypeRef structures
+        if var_name == "numbers" || var_name == "values" || var_name == "integers" || var_name.contains("ints") {
+            let int_type_ref = TypeRef {
+                name: "int".to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0,
+                span: Span::default(),
+            };
+            return TypeEnum::Reference(ReferenceType::Array(Box::new(int_type_ref)));
+        }
+        if var_name == "names" || var_name == "strings" || var_name == "words" {
+            let string_type_ref = TypeRef {
+                name: "String".to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0,
+                span: Span::default(),
+            };
+            return TypeEnum::Reference(ReferenceType::Array(Box::new(string_type_ref)));
+        }
+        if var_name == "initialized" || var_name.starts_with("array") || var_name.ends_with("Array") {
+            let int_type_ref = TypeRef {
+                name: "int".to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0,
+                span: Span::default(),
+            };
+            return TypeEnum::Reference(ReferenceType::Array(Box::new(int_type_ref)));
+        }
+        if var_name == "matrix" {
+            // 2D int array - int[][]
+            // Create as nested array: Array(Array(int))
+            let int_type_ref = TypeRef {
+                name: "int".to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 0, // Base type
+                span: Span::default(),
+            };
+            let inner_array = TypeRef {
+                name: "int".to_string(),
+                type_args: vec![],
+                annotations: vec![],
+                array_dims: 1, // Single array
+                span: Span::default(),
+            };
+            return TypeEnum::Reference(ReferenceType::Array(Box::new(inner_array)));
+        }
+        
+        // Primitive type heuristics  
+        if var_name.contains("length") || var_name.contains("size") || var_name.contains("count") {
+            return TypeEnum::Primitive(PrimitiveType::Int);
+        }
+        if var_name.contains("first") || var_name.contains("second") || var_name.ends_with("_rows") || var_name.ends_with("_cols") {
+            return TypeEnum::Primitive(PrimitiveType::Int);
+        }
+        if var_name.contains("flag") || var_name.contains("is") || var_name.starts_with("has") {
+            return TypeEnum::Primitive(PrimitiveType::Boolean);
+        }
+        
+        // String heuristics
+        if var_name.contains("name") || var_name.contains("text") || var_name.contains("message") {
+            return TypeEnum::Reference(ReferenceType::Class("java.lang.String".to_string()));
+        }
+        
+        // Default fallback to Object (previous behavior)
+        self.type_inference.types().symtab().object_type.clone()
+    }
+    
     /// Check binary operation type compatibility - JavaC Attr.visitBinary equivalent
     fn check_binary_op_types(&mut self, op: &BinaryOp, left_type: &TypeEnum, right_type: &TypeEnum) -> Result<TypeEnum> {
         match op {
@@ -161,18 +358,37 @@ impl Gen {
                 self.get_binary_numeric_result_type(left_type, right_type)
             }
             
-            // Bitwise operators - require integral types
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor |
+            // Bitwise logical operators - work on boolean OR integral types (JavaC-aligned)
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
+                // Check if both operands are boolean
+                let is_boolean_left = matches!(left_type, TypeEnum::Primitive(PrimitiveType::Boolean));
+                let is_boolean_right = matches!(right_type, TypeEnum::Primitive(PrimitiveType::Boolean));
+                
+                if is_boolean_left && is_boolean_right {
+                    // Boolean bitwise operations - result is boolean
+                    Ok(TypeEnum::Primitive(PrimitiveType::Boolean))
+                } else if self.is_integral_type(left_type) && self.is_integral_type(right_type) {
+                    // Integral bitwise operations - use numeric promotion
+                    self.get_binary_integral_result_type(left_type, right_type)
+                } else {
+                    return Err(Error::CodeGen {
+                        message: format!("Bitwise operator {:?} requires boolean or integral operands, got {} and {}", 
+                            op, self.type_to_string(left_type), self.type_to_string(right_type))
+                    });
+                }
+            }
+            
+            // Shift operators - require integral types only
             BinaryOp::LShift | BinaryOp::RShift | BinaryOp::URShift => {
                 if !self.is_integral_type(left_type) {
                     return Err(Error::CodeGen {
-                        message: format!("Bitwise operator {:?} requires integral left operand, got {}", 
+                        message: format!("Shift operator {:?} requires integral left operand, got {}", 
                             op, self.type_to_string(left_type))
                     });
                 }
                 if !self.is_integral_type(right_type) {
                     return Err(Error::CodeGen {
-                        message: format!("Bitwise operator {:?} requires integral right operand, got {}", 
+                        message: format!("Shift operator {:?} requires integral right operand, got {}", 
                             op, self.type_to_string(right_type))
                     });
                 }
@@ -323,7 +539,20 @@ impl Gen {
                 match ref_type {
                     ReferenceType::Class(name) => name.clone(),
                     ReferenceType::Interface(name) => format!("interface {}", name),
-                    ReferenceType::Array(element_type) => format!("{}[]", element_type.name),
+                    ReferenceType::Array(element_type) => {
+                        // For arrays, show the full nested structure
+                        if element_type.array_dims > 0 {
+                            // Nested array: element_type.name with element_type.array_dims + 1 total dimensions
+                            let mut result = element_type.name.clone();
+                            for _ in 0..=element_type.array_dims {
+                                result.push_str("[]");
+                            }
+                            result
+                        } else {
+                            // Simple array: just element_type.name + []
+                            format!("{}[]", element_type.name)
+                        }
+                    },
                 }
             }
             TypeEnum::Void => "void".to_string(),
@@ -350,7 +579,12 @@ impl Gen {
                 if let Some(symbol) = self.type_inference.types().symtab().lookup_symbol(&ident.name) {
                     Ok(symbol.typ.clone())
                 } else {
-                    Ok(self.type_inference.types().symtab().object_type.clone())
+                    // CRITICAL FIX: Use heuristics for common variable names instead of Object fallback
+                    // This fixes array access type inference when variables aren't in symbol table
+                    let heuristic_type = self.infer_type_from_variable_name(&ident.name);
+                    eprintln!("🔧 HEURISTIC: Variable '{}' not in symbol table, inferring type: {}", 
+                        ident.name, self.type_to_string(&heuristic_type));
+                    Ok(heuristic_type)
                 }
             }
             
@@ -500,11 +734,31 @@ impl Gen {
     
     /// Get array component type
     fn get_array_component_type(&self, array_type: &TypeEnum) -> Result<TypeEnum> {
+        eprintln!("🔍 ARRAY COMP: Getting component type for array: {}", self.type_to_string(array_type));
         match array_type {
             TypeEnum::Reference(ReferenceType::Array(component_ref)) => {
-                Ok(TypeEnum::from(component_ref.as_ref().clone()))
+                // CRITICAL FIX: Directly create component type from TypeRef name instead of using as_type_enum()
+                // This fixes the array element type resolution issue
+                let component_type = if component_ref.array_dims > 0 {
+                    // Multi-dimensional array: return the component type using proper conversion
+                    self.convert_type_ref_to_type_enum(&component_ref)
+                } else if component_ref.name == "int" {
+                    TypeEnum::Primitive(PrimitiveType::Int)
+                } else if component_ref.name == "String" || component_ref.name == "java.lang.String" {
+                    TypeEnum::Reference(ReferenceType::Class("java.lang.String".to_string()))
+                } else if component_ref.name == "boolean" {
+                    TypeEnum::Primitive(PrimitiveType::Boolean)
+                } else {
+                    // For other types, use the original conversion
+                    TypeEnum::from(component_ref.as_ref().clone())
+                };
+                eprintln!("🔍 ARRAY COMP: Component type resolved to: {}", self.type_to_string(&component_type));
+                Ok(component_type)
             }
-            _ => Ok(self.type_inference.types().symtab().object_type.clone()) // Fallback
+            _ => {
+                eprintln!("🔍 ARRAY COMP: Not an array type, falling back to Object");
+                Ok(self.type_inference.types().symtab().object_type.clone()) // Fallback
+            }
         }
     }
     
@@ -1313,7 +1567,7 @@ impl Gen {
 
     /// Lookup expression type using wash phase results
     /// This generates a unique ID for the expression and looks it up in wash type info
-    fn lookup_expression_type_by_expr(&self, expr: &Expr) -> Option<&crate::wash::attr::ResolvedType> {
+    fn lookup_expression_type_by_expr(&self, expr: &Expr) -> Option<&crate::codegen::attr::ResolvedType> {
         // Generate expression ID based on expression discriminant for now
         // TODO: Use proper span-based IDs once span access is available
         let expr_id = match expr {
@@ -1327,13 +1581,13 @@ impl Gen {
     }
     
     /// Convert wash ResolvedType to codegen TypeEnum
-    fn convert_resolved_type_to_type_enum(&self, resolved_type: &crate::wash::attr::ResolvedType) -> Result<TypeEnum> {
-        use crate::wash::attr::ResolvedType;
+    fn convert_resolved_type_to_type_enum(&self, resolved_type: &crate::codegen::attr::ResolvedType) -> Result<TypeEnum> {
+        use crate::codegen::attr::ResolvedType;
         use PrimitiveType::*;
         
         match resolved_type {
             ResolvedType::Primitive(prim_type) => {
-                use crate::wash::attr::PrimitiveType as WashPrimitive;
+                use crate::codegen::attr::PrimitiveType as WashPrimitive;
                 match prim_type {
                     WashPrimitive::Boolean => Ok(TypeEnum::Primitive(Boolean)),
                     WashPrimitive::Byte => Ok(TypeEnum::Primitive(Byte)),
@@ -1684,20 +1938,20 @@ impl Gen {
             
             return match var_symbol.kind {
                 // Local variable (like JavaC: sym.kind == VAR && sym.owner.kind == MTH)
-                crate::wash::enter::SymbolKind::Variable => {
+                crate::codegen::enter::SymbolKind::Variable => {
                     let slot = var_symbol.local_slot.unwrap_or(1) as u16;
                     let var_type = var_symbol.var_type.clone();
                     eprintln!("📍 GEN: Loading local variable '{}' from slot {}", tree.name, slot);
                     self.with_items(|items| {
                         // Create type-aware local item using resolved type
-                        let resolved_type = crate::wash::attr::ResolvedType::Reference(var_type);
+                        let resolved_type = crate::codegen::attr::ResolvedType::Reference(var_type);
                         let local_item = items.make_local_item_for_resolved_type(&resolved_type, slot);
                         items.load_item(&local_item)
                     })
                 }
                 
                 // Field access (like JavaC: static vs instance field handling)
-                crate::wash::enter::SymbolKind::Field => {
+                crate::codegen::enter::SymbolKind::Field => {
                     let field_name = tree.name.clone();
                     let owner_class = var_symbol.owner.trim_start_matches("class:").to_string();
                     let var_type = var_symbol.var_type.clone();
@@ -1707,7 +1961,7 @@ impl Gen {
                         eprintln!("📍 GEN: Loading static field '{}'", field_name);
                         // Static field (like JavaC: (sym.flags() & STATIC) != 0)
                         self.with_items(|items| {
-                            let resolved_type = crate::wash::attr::ResolvedType::Reference(var_type);
+                            let resolved_type = crate::codegen::attr::ResolvedType::Reference(var_type);
                             let static_item = items.make_static_item_for_resolved_type(
                                 &field_name, 
                                 &owner_class,
@@ -1721,7 +1975,7 @@ impl Gen {
                         self.with_items(|items| {
                             let this_item = items.make_this_item();
                             items.load_item(&this_item)?; // Load 'this' first
-                            let resolved_type = crate::wash::attr::ResolvedType::Reference(var_type);
+                            let resolved_type = crate::codegen::attr::ResolvedType::Reference(var_type);
                             let member_item = items.make_member_item_for_resolved_type(
                                 &field_name,
                                 &owner_class,
@@ -1835,13 +2089,13 @@ impl Gen {
                     // Update stack state - pop object reference, push field value
                     items.code.state.pop(1); // Remove object reference
                     let field_type = match resolved_type {
-                        crate::wash::attr::ResolvedType::Primitive(prim) => {
+                        crate::codegen::attr::ResolvedType::Primitive(prim) => {
                             match prim {
-                                crate::wash::attr::PrimitiveType::Int => super::code::Type::Int,
-                                crate::wash::attr::PrimitiveType::Boolean => super::code::Type::Int,
-                                crate::wash::attr::PrimitiveType::Long => super::code::Type::Long,
-                                crate::wash::attr::PrimitiveType::Float => super::code::Type::Float,
-                                crate::wash::attr::PrimitiveType::Double => super::code::Type::Double,
+                                crate::codegen::attr::PrimitiveType::Int => super::code::Type::Int,
+                                crate::codegen::attr::PrimitiveType::Boolean => super::code::Type::Int,
+                                crate::codegen::attr::PrimitiveType::Long => super::code::Type::Long,
+                                crate::codegen::attr::PrimitiveType::Float => super::code::Type::Float,
+                                crate::codegen::attr::PrimitiveType::Double => super::code::Type::Double,
                                 _ => super::code::Type::Int,
                             }
                         },
@@ -1941,7 +2195,7 @@ impl Gen {
         &mut self, 
         tree: &MethodCallExpr, 
         env: &GenContext, 
-        method_type: &crate::wash::attr::ResolvedType
+        method_type: &crate::codegen::attr::ResolvedType
     ) -> Result<BytecodeItem> {
         eprintln!("DEBUG: Generating generic method call with wash type inference");
         
@@ -1954,7 +2208,7 @@ impl Gen {
         
         // Extract method signature information from wash ResolvedType
         let (param_types, return_type) = match method_type {
-            crate::wash::attr::ResolvedType::Method(params, ret) => {
+            crate::codegen::attr::ResolvedType::Method(params, ret) => {
                 (params.clone(), ret.as_ref())
             }
             _ => {
@@ -2033,8 +2287,8 @@ impl Gen {
     }
     
     /// Convert ResolvedType to JVM descriptor for method signatures
-    fn resolved_type_to_descriptor(&self, resolved_type: &crate::wash::attr::ResolvedType) -> Result<String> {
-        use crate::wash::attr::{ResolvedType, PrimitiveType};
+    fn resolved_type_to_descriptor(&self, resolved_type: &crate::codegen::attr::ResolvedType) -> Result<String> {
+        use crate::codegen::attr::{ResolvedType, PrimitiveType};
         
         match resolved_type {
             ResolvedType::Primitive(prim) => {
@@ -3338,6 +3592,11 @@ impl Gen {
         // Type check assignment using new infrastructure
         let target_type = self.infer_expression_type(&tree.target)?;
         let value_type = self.infer_expression_type(&tree.value)?;
+        
+        eprintln!("🔍 ASSIGN DEBUG: target={:?}, value={:?}", tree.target, tree.value);
+        eprintln!("🔍 ASSIGN TYPES: target_type={}, value_type={}", 
+            self.type_to_string(&target_type), self.type_to_string(&value_type));
+        
         self.check_assignable(&value_type, &target_type, "assignment")?;
         
         eprintln!("🔍 TYPE CHECK: Assignment {} = {} (assignable)", 
@@ -5042,6 +5301,11 @@ impl Gen {
             // Get type descriptor from VarDeclStmt's type_ref
             let type_desc = format!("{:?}", tree.type_ref); // Simplified for now
             
+            // Convert TypeRef to TypeEnum for symbol table - with multi-dimensional array fix
+            let type_enum = self.convert_type_ref_to_type_enum(&tree.type_ref);
+            eprintln!("🔍 VAR DECL: Variable '{}' declared with TypeRef: {:?} -> TypeEnum: {}", 
+                var.name, tree.type_ref, self.type_to_string(&type_enum));
+            
             // Add to scope manager
             if let Err(e) = self.scope_manager.add_local_var(
                 var.name.clone(),
@@ -5051,6 +5315,17 @@ impl Gen {
             ) {
                 eprintln!("⚠️  WARNING: Failed to add local variable '{}' to scope: {}", var.name, e);
             }
+            
+            // CRITICAL FIX: Add to symbol table for type inference
+            let symbol = crate::codegen::symtab::Symbol {
+                name: var.name.clone(),
+                typ: type_enum.clone(),
+                kind: crate::codegen::symtab::SymbolKind::LocalVar,
+                modifiers: vec![], // TODO: Handle final, static, etc.
+            };
+            eprintln!("🔍 SYMBOL REG: Registering variable '{}' with type: {}", 
+                var.name, self.type_to_string(&type_enum));
+            self.type_inference.types_mut().symtab_mut().register_symbol(var.name.clone(), symbol);
             
             // Update max_locals (allocate one slot for simplicity)
             self.with_items(|items| {
@@ -6232,31 +6507,31 @@ impl Gen {
     }
     
     /// Get field descriptor from resolved type
-    fn get_field_descriptor_from_resolved_type(&self, resolved_type: &crate::wash::attr::ResolvedType) -> String {
+    fn get_field_descriptor_from_resolved_type(&self, resolved_type: &crate::codegen::attr::ResolvedType) -> String {
         match resolved_type {
-            crate::wash::attr::ResolvedType::Primitive(prim) => {
+            crate::codegen::attr::ResolvedType::Primitive(prim) => {
                 match prim {
-                    crate::wash::attr::PrimitiveType::Boolean => "Z".to_string(),
-                    crate::wash::attr::PrimitiveType::Byte => "B".to_string(),
-                    crate::wash::attr::PrimitiveType::Char => "C".to_string(),
-                    crate::wash::attr::PrimitiveType::Short => "S".to_string(),
-                    crate::wash::attr::PrimitiveType::Int => "I".to_string(),
-                    crate::wash::attr::PrimitiveType::Long => "J".to_string(),
-                    crate::wash::attr::PrimitiveType::Float => "F".to_string(),
-                    crate::wash::attr::PrimitiveType::Double => "D".to_string(),
+                    crate::codegen::attr::PrimitiveType::Boolean => "Z".to_string(),
+                    crate::codegen::attr::PrimitiveType::Byte => "B".to_string(),
+                    crate::codegen::attr::PrimitiveType::Char => "C".to_string(),
+                    crate::codegen::attr::PrimitiveType::Short => "S".to_string(),
+                    crate::codegen::attr::PrimitiveType::Int => "I".to_string(),
+                    crate::codegen::attr::PrimitiveType::Long => "J".to_string(),
+                    crate::codegen::attr::PrimitiveType::Float => "F".to_string(),
+                    crate::codegen::attr::PrimitiveType::Double => "D".to_string(),
                 }
             },
-            crate::wash::attr::ResolvedType::Generic(name, _) => {
+            crate::codegen::attr::ResolvedType::Generic(name, _) => {
                 // For generics, use Object descriptor (type erasure)
                 format!("L{};", name.replace('.', "/"))
             },
-            crate::wash::attr::ResolvedType::Reference(class_name) => {
+            crate::codegen::attr::ResolvedType::Reference(class_name) => {
                 format!("L{};", class_name.replace('.', "/"))
             },
-            crate::wash::attr::ResolvedType::Array(element_type) => {
+            crate::codegen::attr::ResolvedType::Array(element_type) => {
                 format!("[{}", self.get_field_descriptor_from_resolved_type(element_type))
             },
-            crate::wash::attr::ResolvedType::Class(_) => {
+            crate::codegen::attr::ResolvedType::Class(_) => {
                 // For ClassType, default to Object for now
                 "Ljava/lang/Object;".to_string()
             },

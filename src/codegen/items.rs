@@ -5,7 +5,7 @@
 
 use crate::ast::{Literal, TypeEnum, PrimitiveType};
 use crate::common::error::Result;
-use crate::wash::attr::{ResolvedType, PrimitiveType as WashPrimitiveType};
+use crate::codegen::attr::{ResolvedType, PrimitiveType as WashPrimitiveType};
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
@@ -41,10 +41,10 @@ pub struct Items<'a> {
     wash_type_info: Option<&'a std::collections::HashMap<String, ResolvedType>>,
     
     // Symbol table for method resolution (JavaC syms field)
-    symbol_table: Option<&'a std::collections::HashMap<String, crate::wash::attr::ResolvedSymbol>>,
+    symbol_table: Option<&'a std::collections::HashMap<String, crate::codegen::attr::ResolvedSymbol>>,
     
     // Type information for interface detection (JavaC types field)
-    type_table: Option<&'a std::collections::HashMap<String, crate::wash::attr::TypeInfo>>,
+    type_table: Option<&'a std::collections::HashMap<String, crate::codegen::attr::TypeInfo>>,
 }
 
 impl<'a> Items<'a> {
@@ -81,8 +81,8 @@ impl<'a> Items<'a> {
         pool: &'a mut ConstantPool, 
         code: &'a mut Code,
         wash_type_info: &'a std::collections::HashMap<String, ResolvedType>,
-        symbol_table: &'a std::collections::HashMap<String, crate::wash::attr::ResolvedSymbol>,
-        type_table: &'a std::collections::HashMap<String, crate::wash::attr::TypeInfo>
+        symbol_table: &'a std::collections::HashMap<String, crate::codegen::attr::ResolvedSymbol>,
+        type_table: &'a std::collections::HashMap<String, crate::codegen::attr::TypeInfo>
     ) -> Self {
         Self {
             pool,
@@ -905,17 +905,17 @@ impl<'a> Items<'a> {
     
     
     /// Make static field item using resolved type - JavaC makeStaticItem equivalent
-    pub fn make_static_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::wash::attr::ResolvedType) -> Item {
+    pub fn make_static_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::codegen::attr::ResolvedType) -> Item {
         let typecode = match resolved_type {
-            crate::wash::attr::ResolvedType::Primitive(prim) => match prim {
-                crate::wash::attr::PrimitiveType::Int | 
-                crate::wash::attr::PrimitiveType::Boolean | 
-                crate::wash::attr::PrimitiveType::Byte | 
-                crate::wash::attr::PrimitiveType::Short | 
-                crate::wash::attr::PrimitiveType::Char => typecodes::INT,
-                crate::wash::attr::PrimitiveType::Long => typecodes::LONG,
-                crate::wash::attr::PrimitiveType::Float => typecodes::FLOAT,
-                crate::wash::attr::PrimitiveType::Double => typecodes::DOUBLE,
+            crate::codegen::attr::ResolvedType::Primitive(prim) => match prim {
+                crate::codegen::attr::PrimitiveType::Int | 
+                crate::codegen::attr::PrimitiveType::Boolean | 
+                crate::codegen::attr::PrimitiveType::Byte | 
+                crate::codegen::attr::PrimitiveType::Short | 
+                crate::codegen::attr::PrimitiveType::Char => typecodes::INT,
+                crate::codegen::attr::PrimitiveType::Long => typecodes::LONG,
+                crate::codegen::attr::PrimitiveType::Float => typecodes::FLOAT,
+                crate::codegen::attr::PrimitiveType::Double => typecodes::DOUBLE,
             },
             _ => typecodes::OBJECT,
         };
@@ -932,17 +932,17 @@ impl<'a> Items<'a> {
     }
     
     /// Make instance member item using resolved type - JavaC makeMemberItem equivalent
-    pub fn make_member_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::wash::attr::ResolvedType, is_private: bool) -> Item {
+    pub fn make_member_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::codegen::attr::ResolvedType, is_private: bool) -> Item {
         let typecode = match resolved_type {
-            crate::wash::attr::ResolvedType::Primitive(prim) => match prim {
-                crate::wash::attr::PrimitiveType::Int | 
-                crate::wash::attr::PrimitiveType::Boolean | 
-                crate::wash::attr::PrimitiveType::Byte | 
-                crate::wash::attr::PrimitiveType::Short | 
-                crate::wash::attr::PrimitiveType::Char => typecodes::INT,
-                crate::wash::attr::PrimitiveType::Long => typecodes::LONG,
-                crate::wash::attr::PrimitiveType::Float => typecodes::FLOAT,
-                crate::wash::attr::PrimitiveType::Double => typecodes::DOUBLE,
+            crate::codegen::attr::ResolvedType::Primitive(prim) => match prim {
+                crate::codegen::attr::PrimitiveType::Int | 
+                crate::codegen::attr::PrimitiveType::Boolean | 
+                crate::codegen::attr::PrimitiveType::Byte | 
+                crate::codegen::attr::PrimitiveType::Short | 
+                crate::codegen::attr::PrimitiveType::Char => typecodes::INT,
+                crate::codegen::attr::PrimitiveType::Long => typecodes::LONG,
+                crate::codegen::attr::PrimitiveType::Float => typecodes::FLOAT,
+                crate::codegen::attr::PrimitiveType::Double => typecodes::DOUBLE,
             },
             _ => typecodes::OBJECT,
         };
@@ -960,28 +960,28 @@ impl<'a> Items<'a> {
 }
 
 /// Helper function to convert ResolvedType to JVM descriptor
-fn resolved_type_to_descriptor(resolved_type: &crate::wash::attr::ResolvedType) -> String {
+fn resolved_type_to_descriptor(resolved_type: &crate::codegen::attr::ResolvedType) -> String {
     match resolved_type {
-        crate::wash::attr::ResolvedType::Primitive(prim) => match prim {
-            crate::wash::attr::PrimitiveType::Boolean => "Z".to_string(),
-            crate::wash::attr::PrimitiveType::Byte => "B".to_string(),
-            crate::wash::attr::PrimitiveType::Char => "C".to_string(),
-            crate::wash::attr::PrimitiveType::Short => "S".to_string(),
-            crate::wash::attr::PrimitiveType::Int => "I".to_string(),
-            crate::wash::attr::PrimitiveType::Long => "J".to_string(),
-            crate::wash::attr::PrimitiveType::Float => "F".to_string(),
-            crate::wash::attr::PrimitiveType::Double => "D".to_string(),
+        crate::codegen::attr::ResolvedType::Primitive(prim) => match prim {
+            crate::codegen::attr::PrimitiveType::Boolean => "Z".to_string(),
+            crate::codegen::attr::PrimitiveType::Byte => "B".to_string(),
+            crate::codegen::attr::PrimitiveType::Char => "C".to_string(),
+            crate::codegen::attr::PrimitiveType::Short => "S".to_string(),
+            crate::codegen::attr::PrimitiveType::Int => "I".to_string(),
+            crate::codegen::attr::PrimitiveType::Long => "J".to_string(),
+            crate::codegen::attr::PrimitiveType::Float => "F".to_string(),
+            crate::codegen::attr::PrimitiveType::Double => "D".to_string(),
         },
-        crate::wash::attr::ResolvedType::Reference(class_name) => {
+        crate::codegen::attr::ResolvedType::Reference(class_name) => {
             let internal_name = class_name.replace('.', "/");
             format!("L{};", internal_name)
         },
-        crate::wash::attr::ResolvedType::Array(element_type) => {
+        crate::codegen::attr::ResolvedType::Array(element_type) => {
             let mut result = "[".to_string();
             result.push_str(&resolved_type_to_descriptor(element_type));
             result
         },
-        crate::wash::attr::ResolvedType::Generic(_, _) => {
+        crate::codegen::attr::ResolvedType::Generic(_, _) => {
             // Generic types erase to Object at runtime
             "Ljava/lang/Object;".to_string()
         },

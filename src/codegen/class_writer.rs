@@ -74,8 +74,8 @@ impl ClassWriter {
     /// Set wash phase results for type-aware code generation
     pub fn set_wash_results(
         &mut self, 
-        type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType>,
-        symbol_env: crate::wash::enter::SymbolEnvironment
+        type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType>,
+        symbol_env: crate::codegen::enter::SymbolEnvironment
     ) {
         self.gen.set_wash_results(type_info, symbol_env);
     }

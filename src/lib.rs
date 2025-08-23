@@ -7,8 +7,7 @@
 //! The compiler follows a standard compilation pipeline:
 //! 
 //! - **parser**: Lexical analysis and parsing of Java source into AST
-//! - **wash**: Semantic analysis pipeline (Enter → Attr → Flow → TransTypes → Lower)
-//! - **codegen**: Code generation from AST to Java bytecode (.class files)
+//! - **codegen**: Semantic analysis pipeline and code generation from AST to Java bytecode (.class files)
 //! - **ast**: Abstract Syntax Tree representation of parsed code
 //! - **bin**: Command-line interface (similar to javac)
 //! 
@@ -22,7 +21,6 @@
 
 pub mod ast;
 pub mod parser;
-pub mod wash;
 pub mod codegen;
 pub mod verify;
 pub mod review;
@@ -45,7 +43,7 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
     
     // Phase 2: Semantic Analysis Pipeline (Wash)
     eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
-    let mut semantic_analyzer = wash::SemanticAnalyzer::new();
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new();
     ast = semantic_analyzer.analyze(ast)?;
     eprintln!("✅ TOLC: Semantic analysis complete");
     
@@ -56,7 +54,7 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
     let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
     
     // Convert HashMap<usize, ResolvedType> to HashMap<String, ResolvedType> for codegen
-    let type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType> = type_info_raw
+    let type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType> = type_info_raw
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
@@ -82,7 +80,7 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
     
     // Phase 2: Semantic Analysis Pipeline (Wash)
     eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
-    let mut semantic_analyzer = wash::SemanticAnalyzer::new();
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new();
     ast = semantic_analyzer.analyze(ast)?;
     eprintln!("✅ TOLC: Semantic analysis complete");
     
@@ -94,7 +92,7 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
     
     // Get semantic type mapping (meaningful names) for codegen  
     let semantic_types = semantic_analyzer.attr.get_semantic_types();
-    let type_info: std::collections::HashMap<String, crate::wash::attr::ResolvedType> = semantic_types
+    let type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType> = semantic_types
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();

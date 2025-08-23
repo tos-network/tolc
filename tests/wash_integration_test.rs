@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use tolc::{Config, compile2file};
-use tolc::wash::SemanticAnalyzer;
+use tolc::codegen::SemanticAnalyzer;
 use tolc::parser::parse_java;
 
 #[test]

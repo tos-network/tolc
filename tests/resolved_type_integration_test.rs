@@ -5,12 +5,12 @@
 
 use std::collections::HashMap;
 use tolc::{Config, compile2file};
-use tolc::wash::SemanticAnalyzer;
+use tolc::codegen::SemanticAnalyzer;
 use tolc::parser::parse_java;
 use tolc::codegen::constpool::ConstantPool;
 use tolc::codegen::code::Code;
 use tolc::codegen::items::{Items, typecodes, Item};
-use tolc::wash::attr::{ResolvedType, PrimitiveType};
+use tolc::codegen::attr::{ResolvedType, PrimitiveType};
 
 #[test]
 fn test_resolved_type_to_typecode_conversion() {
