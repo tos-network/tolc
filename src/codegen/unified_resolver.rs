@@ -98,24 +98,25 @@ impl UnifiedResolver {
             });
         }
         
-        // This would normally check method parameters and local variables
-        // For now, we delegate to the symbol environment's method resolution
-        if let Some(method_info) = self.symbol_env.methods.get(method_key) {
-            // Check if identifier matches any parameter names (simplified)
-            // In a full implementation, this would parse the method signature and parameter names
-            // For now, we just check if there are parameters and provide a default type
-            if !method_info.parameter_types.is_empty() {
-                // TODO: Check actual parameter names when we have parameter symbol table
-                let resolved_type = "Ljava/lang/Object;".to_string(); // Default type
-                self.method_cache.insert(cache_key, resolved_type.clone());
-                
-                return Some(IdentifierResolution {
-                    identifier: identifier.to_string(),
-                    resolved_type,
-                    resolution_context: ResolutionContext::Parameter,
-                    scope_depth: 1,
-                });
-            }
+        // Look up the variable directly in the SymbolEnvironment's variables HashMap
+        // Use the same key format as Enter phase: "method:method_key::identifier"
+        let variable_key = format!("method:{}::{}", method_key, identifier);
+        if let Some(variable_symbol) = self.symbol_env.variables.get(&variable_key) {
+            // Cache the result for future lookups
+            self.method_cache.insert(cache_key, variable_symbol.var_type.clone());
+            
+            let resolution_context = if variable_symbol.is_parameter {
+                ResolutionContext::Parameter
+            } else {
+                ResolutionContext::LocalVariable
+            };
+            
+            return Some(IdentifierResolution {
+                identifier: identifier.to_string(),
+                resolved_type: variable_symbol.var_type.clone(),
+                resolution_context,
+                scope_depth: variable_symbol.local_slot.unwrap_or(1) as u16,
+            });
         }
         
         None
@@ -124,22 +125,17 @@ impl UnifiedResolver {
     /// Resolve class field identifiers
     /// JavaC equivalent: Resolve.findVar in class scope
     fn resolve_class_field(&mut self, identifier: &str, class_name: &str) -> Option<IdentifierResolution> {
-        // Check if the class exists and has this field
-        if let Some(_class_info) = self.symbol_env.classes.get(class_name) {
-            // This would normally check class fields
-            // For now, we provide a basic implementation
-            // In a full system, this would parse field declarations
-            
-            // Try to find field in symbol environment field mappings
-            let field_key = format!("{}.{}", class_name, identifier);
-            if let Some(field_type) = self.symbol_env.resolve_type(&field_key) {
-                return Some(IdentifierResolution {
-                    identifier: identifier.to_string(),
-                    resolved_type: field_type,
-                    resolution_context: ResolutionContext::SymbolEnvironment,
-                    scope_depth: 0,
-                });
-            }
+        // Use the same field key format as Enter phase: "class:{}::{}" 
+        let field_key = format!("class:{}::{}", class_name, identifier);
+        
+        // Look up field directly in the fields HashMap (not via resolve_type)
+        if let Some(field_symbol) = self.symbol_env.fields.get(&field_key) {
+            return Some(IdentifierResolution {
+                identifier: identifier.to_string(),
+                resolved_type: field_symbol.var_type.clone(),
+                resolution_context: ResolutionContext::SymbolEnvironment,
+                scope_depth: 0,
+            });
         }
         
         None

@@ -17,7 +17,7 @@ pub const JAVA_LANG_SIMPLE_TYPES: &[&str] = &[
     "String", "Object", "Throwable", "Cloneable", "Iterable",
     "Integer", "Long", "Float", "Double", "Boolean", "Character",
     "Short", "Byte", "Void", "Class", "RuntimeException", "Exception",
-    "Error", "AssertionError",
+    "Error", "AssertionError", "UnsupportedOperationException",
 ];
 
 // Centralized constants for review phase

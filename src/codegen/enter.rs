@@ -178,7 +178,7 @@ impl SymbolEnvironment {
             local_slot,
             modifiers: Vec::new(),
         };
-        self.variables.insert(key, symbol);
+        self.variables.insert(key.clone(), symbol);
         eprintln!("📝 ENTER: Added variable symbol '{}' in method '{}' (slot: {:?})", name, owner_method, local_slot);
     }
     
@@ -719,6 +719,15 @@ impl Enter {
     /// Resolve a simple type name through the import resolution hierarchy
     /// Following JavaC's symbol resolution order: single imports -> wildcard imports -> classpath
     fn resolve_simple_type_name(&self, simple_name: &str) -> String {
+        // 0. Check primitive types first (JavaC behavior - primitives are never qualified)
+        match simple_name {
+            "int" | "boolean" | "byte" | "char" | "short" | "long" | "float" | "double" | "void" => {
+                eprintln!("🎯 ENTER: Primitive type: {} -> {}", simple_name, simple_name);
+                return simple_name.to_string();
+            }
+            _ => {}
+        }
+        
         // 1. Check single-type imports (highest precedence)
         if let Some(qualified_name) = self.symbol_env.imports.get(simple_name) {
             eprintln!("🎯 ENTER: Found in single imports: {} -> {}", simple_name, qualified_name);

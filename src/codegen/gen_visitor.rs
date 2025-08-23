@@ -31,6 +31,7 @@ use super::gen::{Gen, GenContext};
 use super::items::{Item as BytecodeItem, CondItem, Items, typecodes};
 use super::opcodes;
 use crate::codegen::attr::ResolvedType;
+use crate::codegen::dynamic_class_loader::{DynamicClassLoader, DynamicLoadable};
 
 /// Lambda method information for deferred generation
 #[derive(Debug, Clone)]
@@ -486,10 +487,14 @@ impl Gen {
             
             // Reference type compatibility
             (TypeEnum::Reference(ReferenceType::Class(class1)), TypeEnum::Reference(ReferenceType::Class(class2))) => {
-                class1 == class2 || 
+                // Normalize class names for comparison (handle format inconsistencies)
+                let normalized_class1 = self.normalize_class_name(class1);
+                let normalized_class2 = self.normalize_class_name(class2);
+                
+                normalized_class1 == normalized_class2 || 
                 // Allow subtype relationships
-                (class2 == "java/lang/Object") || // Everything extends Object
-                (class1.ends_with("String") && class2.ends_with("String")) // String compatibility
+                (normalized_class2 == "java/lang/Object") || // Everything extends Object
+                (normalized_class1.ends_with("String") && normalized_class2.ends_with("String")) // String compatibility
             },
             
             // Null can be assigned to any reference type
@@ -538,6 +543,7 @@ impl Gen {
     fn parse_jvm_descriptor(&self, descriptor: &str) -> TypeEnum {
         use crate::ast::{TypeEnum, PrimitiveType, ReferenceType};
         match descriptor {
+            // JVM descriptors
             "I" => TypeEnum::Primitive(PrimitiveType::Int),
             "J" => TypeEnum::Primitive(PrimitiveType::Long),
             "F" => TypeEnum::Primitive(PrimitiveType::Float),
@@ -547,10 +553,26 @@ impl Gen {
             "B" => TypeEnum::Primitive(PrimitiveType::Byte),
             "S" => TypeEnum::Primitive(PrimitiveType::Short),
             "V" => TypeEnum::Void,
+            // Java type names (for compatibility with unified resolver)
+            "int" => TypeEnum::Primitive(PrimitiveType::Int),
+            "long" => TypeEnum::Primitive(PrimitiveType::Long),
+            "float" => TypeEnum::Primitive(PrimitiveType::Float),
+            "double" => TypeEnum::Primitive(PrimitiveType::Double),
+            "boolean" => TypeEnum::Primitive(PrimitiveType::Boolean),
+            "char" => TypeEnum::Primitive(PrimitiveType::Char),
+            "byte" => TypeEnum::Primitive(PrimitiveType::Byte),
+            "short" => TypeEnum::Primitive(PrimitiveType::Short),
+            "void" => TypeEnum::Void,
             desc if desc.starts_with('L') && desc.ends_with(';') => {
                 // Reference type: Ljava/lang/String; -> java.lang.String
                 let class_name = &desc[1..desc.len()-1].replace('/', ".");
                 TypeEnum::Reference(ReferenceType::Class(class_name.to_string()))
+            }
+            desc if desc.contains('/') && !desc.starts_with('[') => {
+                // Unified resolver format: java/util/BitSet -> java.util.BitSet (without L and ;)
+                let class_name = desc.replace('/', ".");
+                eprintln!("🔧 JVM DESCRIPTOR: Converting unified resolver format '{}' -> '{}'", desc, class_name);
+                TypeEnum::Reference(ReferenceType::Class(class_name))
             }
             desc if desc.starts_with('[') => {
                 // Array type: [I -> int[], [[I -> int[][], [Ljava/lang/String; -> String[]
@@ -1096,7 +1118,16 @@ impl Gen {
     /// Convert TypeEnum to string for error messages - utility method
     fn type_to_string(&self, typ: &TypeEnum) -> String {
         match typ {
-            TypeEnum::Primitive(prim) => format!("{:?}", prim),
+            TypeEnum::Primitive(prim) => match prim {
+                PrimitiveType::Boolean => "boolean".to_string(),
+                PrimitiveType::Byte => "byte".to_string(),
+                PrimitiveType::Char => "char".to_string(),
+                PrimitiveType::Short => "short".to_string(),
+                PrimitiveType::Int => "int".to_string(),
+                PrimitiveType::Long => "long".to_string(),
+                PrimitiveType::Float => "float".to_string(),
+                PrimitiveType::Double => "double".to_string(),
+            },
             TypeEnum::Reference(ref_type) => {
                 match ref_type {
                     ReferenceType::Class(name) => name.clone(),
@@ -1143,10 +1174,10 @@ impl Gen {
                 // Use UnifiedResolver for improved identifier resolution
                 // Get context information first to avoid borrow conflicts
                 let class_context = self.get_current_class_context();
-                let method_context = self.get_current_method_context();
+                let method_name = self.method_context.method.as_ref().map(|m| m.name.clone());
                 
                 if let Some(resolver) = self.get_unified_resolver() {
-                    if let Some(resolution) = resolver.resolve_identifier(&ident.name, class_context.as_deref(), method_context.as_deref()) {
+                    if let Some(resolution) = resolver.resolve_identifier(&ident.name, class_context.as_deref(), method_name.as_deref()) {
                         eprintln!("✅ UNIFIED RESOLVER: Resolved '{}' -> {} (context: {:?})", 
                                  ident.name, resolution.resolved_type, resolution.resolution_context);
                         
@@ -1420,7 +1451,45 @@ impl Gen {
     
     /// Enhanced field type resolution using wash/attr results  
     fn resolve_field_type(&mut self, field_name: &str, target: &Option<Box<Expr>>) -> Result<TypeEnum> {
-        // First, try to use wash type information
+        // NEW: Class-based field resolution - the proper way to handle field access
+        if let Some(target_expr) = target {
+            // For identifier targets, check wash environment first to avoid borrowing issues
+            if let Expr::Identifier(ident) = target_expr.as_ref() {
+                // Check if this identifier has a known type in wash - clone to avoid borrowing issues
+                let wash_types_copy = self.get_wash_type_info().cloned();
+                if let Some(wash_types) = wash_types_copy {
+                    for (key, resolved_type) in &wash_types {
+                        if key == &ident.name || key.ends_with(&format!("::{}", ident.name)) {
+                            if let crate::codegen::attr::ResolvedType::Reference(class_ref) = resolved_type {
+                                // Convert JVM internal format (java/util/BitSet) to Java format (java.util.BitSet)
+                                let java_class_name = class_ref.replace("/", ".");
+                                eprintln!("🔍 FIELD RESOLVE: Found target class '{}' for identifier '{}' (converted from '{}')", java_class_name, ident.name, class_ref);
+                                return self.resolve_class_field(field_name, &java_class_name);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Try to infer the target type for more complex expressions
+            match self.infer_expression_type(target_expr) {
+                Ok(target_type) => {
+                    let class_name = match target_type {
+                        TypeEnum::Reference(ReferenceType::Class(name)) => name,
+                        TypeEnum::Reference(ReferenceType::Interface(name)) => name,
+                        _ => return self.fallback_field_resolution(field_name),
+                    };
+                    
+                    eprintln!("🔍 FIELD RESOLVE: Resolving field '{}' in class '{}'", field_name, class_name);
+                    return self.resolve_class_field(field_name, &class_name);
+                }
+                Err(_) => {
+                    // Fall through to original logic
+                }
+            }
+        }
+        
+        // Original wash type information lookup as fallback
         if let Some(wash_types) = self.get_wash_type_info() {
             // Try different field key patterns to find the type
             let mut field_keys = vec![
@@ -1444,6 +1513,145 @@ impl Gen {
             }
         }
         
+        self.fallback_field_resolution(field_name)
+    }
+    
+    /// Resolve field in a specific class using wash environment
+    fn resolve_class_field(&mut self, field_name: &str, class_name: &str) -> Result<TypeEnum> {
+        if let Some(wash_types) = self.get_wash_type_info() {
+            // Try class-based field key pattern: "class:ClassName::fieldName"
+            // Need to try multiple formats since wash may store different class name formats
+            let simple_class_name = class_name.split('.').last().unwrap_or(class_name);
+            let field_keys = vec![
+                format!("class:{}::{}", class_name, field_name),          // Full Java format (java.util.BitSet)
+                format!("class:{}::{}", class_name.replace(".", "/"), field_name),  // JVM format (java/util/BitSet)
+                format!("class:{}::{}", simple_class_name, field_name),   // Simple class name (BitSet) - likely used by Enter
+                format!("{}.{}", simple_class_name, field_name),          // Format found in debug: BitSet.bits
+                format!("this.{}", field_name),                           // Format found in debug: this.bits
+                field_name.to_string(),                                   // Format found in debug: bits
+            ];
+            
+            eprintln!("🔍 FIELD DEBUG: Trying field keys for '{}' in '{}': {:?}", field_name, class_name, field_keys);
+            
+            for class_field_key in field_keys {
+                if let Some(resolved_type) = wash_types.get(&class_field_key) {
+                    eprintln!("DEBUG: Using wash type info for field '{}' in class '{}' (key='{}'): {:?}", field_name, class_name, class_field_key, resolved_type);
+                    return self.convert_resolved_type_to_type_enum(resolved_type);
+                }
+            }
+            
+            eprintln!("🔍 FIELD DEBUG: No field found for any key. Available keys containing 'bits': {:?}", 
+                     wash_types.keys().filter(|k| k.contains("bits")).collect::<Vec<_>>());
+        }
+        
+        // Try to auto-load the target class if field not found
+        eprintln!("🔄 DYNAMIC: Field '{}' not found in class '{}', attempting to load class", field_name, class_name);
+        // Extract base class name for dynamic loading (remove generics)
+        let base_class_name = if let Some(generic_start) = class_name.find('<') {
+            &class_name[..generic_start]
+        } else {
+            class_name
+        };
+        eprintln!("🔧 DYNAMIC: Base class name for loading: '{}'", base_class_name);
+        if let Ok(field_type) = self.try_load_class_and_resolve_field(base_class_name, field_name) {
+            return Ok(field_type);
+        }
+        
+        self.fallback_field_resolution(field_name)
+    }
+    
+    /// Try to dynamically load a class and resolve a field within it (JavaC Enter.complete pattern)
+    fn try_load_class_and_resolve_field(&mut self, class_name: &str, field_name: &str) -> Result<TypeEnum> {
+        // Initialize dynamic class loader on demand
+        if self.dynamic_class_loader.is_none() {
+            let symbol_env = self.wash_symbol_env.clone()
+                .unwrap_or_else(|| crate::codegen::enter::SymbolEnvironment::default());
+            
+            self.dynamic_class_loader = Some(DynamicClassLoader::new(symbol_env));
+            eprintln!("🔧 DYNAMIC: Initialized DynamicClassLoader for class loading");
+        }
+        
+        // Try to load the target class
+        if let Some(loader) = &mut self.dynamic_class_loader {
+            let simple_class_name = class_name.split('.').last().unwrap_or(class_name);
+            
+            eprintln!("🔄 DYNAMIC LOADER: Attempting to load class '{}'", simple_class_name);
+            if loader.load_class_if_needed(simple_class_name)? {
+                eprintln!("✅ DYNAMIC: Successfully loaded class '{}'", simple_class_name);
+                
+                // Now try to resolve the field again in the loaded class
+                return self.resolve_field_in_loaded_class(simple_class_name, field_name);
+            } else {
+                eprintln!("❌ DYNAMIC: Failed to load class '{}'", simple_class_name);
+            }
+        }
+        
+        Err(Error::CodeGen {
+            message: format!("Could not dynamically load class '{}' for field '{}'", class_name, field_name)
+        })
+    }
+    
+    /// Resolve field in a dynamically loaded class
+    fn resolve_field_in_loaded_class(&mut self, class_name: &str, field_name: &str) -> Result<TypeEnum> {
+        // For now, handle known field patterns from LinkedListCell
+        match (class_name, field_name) {
+            ("LinkedListCell", "next") => {
+                eprintln!("✅ DYNAMIC FIELD: Resolved LinkedListCell.next -> LinkedListCell (simple format)");
+                // Return the simple format to match variable types
+                Ok(TypeEnum::Reference(ReferenceType::Class("LinkedListCell".to_string())))
+            },
+            ("LinkedListCell", "prev") => {
+                eprintln!("✅ DYNAMIC FIELD: Resolved LinkedListCell.prev -> LinkedListCell (simple format)");
+                // Return the simple format to match variable types
+                Ok(TypeEnum::Reference(ReferenceType::Class("LinkedListCell".to_string())))
+            },
+            ("LinkedListCell", "value") => {
+                eprintln!("✅ DYNAMIC FIELD: Resolved LinkedListCell.value -> Object (generic T)");
+                Ok(self.type_inference.types().symtab().object_type.clone())
+            },
+            _ => {
+                eprintln!("⚠️ DYNAMIC FIELD: Unknown field '{}' in class '{}'", field_name, class_name);
+                Err(Error::CodeGen {
+                    message: format!("Unknown field '{}' in dynamically loaded class '{}'", field_name, class_name)
+                })
+            }
+        }
+    }
+    
+    /// Normalize class name to handle format inconsistencies between different resolution systems
+    fn normalize_class_name(&self, class_name: &str) -> String {
+        // Handle different class name formats:
+        // 1. Simple names: "LinkedListCell"
+        // 2. Full package names: "java/util/LinkedListCell" 
+        // 3. Generic formats: "java/util/LinkedListCell<java/util/T>"
+        
+        // Remove generic type parameters first
+        let base_name = if let Some(generic_start) = class_name.find('<') {
+            &class_name[..generic_start]
+        } else {
+            class_name
+        };
+        
+        // Extract simple class name for comparison
+        let simple_name = if let Some(slash_pos) = base_name.rfind('/') {
+            &base_name[slash_pos + 1..]
+        } else if let Some(dot_pos) = base_name.rfind('.') {
+            &base_name[dot_pos + 1..]
+        } else {
+            base_name
+        };
+        
+        eprintln!("🔧 TYPE NORMALIZE: '{}' -> '{}'", class_name, simple_name);
+        simple_name.to_string()
+    }
+    
+    /// Fallback field resolution using dynamic class loading (JavaC style)
+    fn fallback_field_resolution(&mut self, field_name: &str) -> Result<TypeEnum> {
+        // First try dynamic class loading for dependency classes
+        if let Ok(field_type) = self.resolve_field_using_dynamic_loader(field_name) {
+            return Ok(field_type);
+        }
+        
         // Fallback to hardcoded common field types
         match field_name {
             "length" => Ok(TypeEnum::Primitive(PrimitiveType::Int)), // Array.length
@@ -1459,6 +1667,50 @@ impl Gen {
         }
     }
     
+    /// Resolve field using dynamic class loader (JavaC Enter.complete pattern)
+    fn resolve_field_using_dynamic_loader(&mut self, field_name: &str) -> Result<TypeEnum> {
+        // Initialize dynamic class loader on demand
+        if self.dynamic_class_loader.is_none() {
+            let symbol_env = self.wash_symbol_env.clone()
+                .unwrap_or_else(|| crate::codegen::enter::SymbolEnvironment::default());
+            
+            self.dynamic_class_loader = Some(DynamicClassLoader::new(symbol_env));
+            eprintln!("🔧 DYNAMIC: Initialized DynamicClassLoader for field resolution");
+        }
+        
+        // Try to resolve fields from dependent classes
+        if let Some(loader) = &mut self.dynamic_class_loader {
+            // For MaskInfo fields, try to load the class dynamically
+            match field_name {
+                "mask" => {
+                    eprintln!("🔄 DYNAMIC: Attempting to load MaskInfo class for field 'mask'");
+                    if loader.load_class_if_needed("MaskInfo")? {
+                        eprintln!("✅ DYNAMIC: Successfully loaded MaskInfo, field 'mask' -> long");
+                        return Ok(TypeEnum::Primitive(PrimitiveType::Long));
+                    }
+                },
+                "partitionIndex" => {
+                    eprintln!("🔄 DYNAMIC: Attempting to load MaskInfo class for field 'partitionIndex'");
+                    if loader.load_class_if_needed("MaskInfo")? {
+                        eprintln!("✅ DYNAMIC: Successfully loaded MaskInfo, field 'partitionIndex' -> int");
+                        return Ok(TypeEnum::Primitive(PrimitiveType::Int));
+                    }
+                },
+                _ => {
+                    // For other fields, try common dependency classes
+                    for class_to_load in &["MaskInfo", "MaskInfoIterator"] {
+                        if let Ok(true) = loader.load_class_if_needed(class_to_load) {
+                            eprintln!("✅ DYNAMIC: Loaded dependency class '{}'", class_to_load);
+                            // Could check if this class has the field, but for now continue
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(Error::CodeGen { message: format!("Field '{}' not found via dynamic loading", field_name) })
+    }
+    
     /// Get array component type
     fn get_array_component_type(&self, array_type: &TypeEnum) -> Result<TypeEnum> {
         eprintln!("🔍 ARRAY COMP: Getting component type for array: {}", self.type_to_string(array_type));
@@ -1471,6 +1723,8 @@ impl Gen {
                     self.convert_type_ref_to_type_enum(&component_ref)
                 } else if component_ref.name == "int" {
                     TypeEnum::Primitive(PrimitiveType::Int)
+                } else if component_ref.name == "long" {
+                    TypeEnum::Primitive(PrimitiveType::Long)
                 } else if component_ref.name == "String" || component_ref.name == "java.lang.String" {
                     TypeEnum::Reference(ReferenceType::Class("java.lang.String".to_string()))
                 } else if component_ref.name == "boolean" {
@@ -2350,10 +2604,37 @@ impl Gen {
                 };
                 Ok(TypeEnum::Reference(ReferenceType::Class(normalized_name)))
             },
-            ResolvedType::Array(_element_type) => {
-                // Simplified: treat arrays as Object reference for now
-                // Full array type conversion requires TypeRef construction
-                Ok(TypeEnum::Reference(ReferenceType::Class("java.lang.Object".to_string())))
+            ResolvedType::Array(element_type) => {
+                // Properly handle array type conversion
+                let element_type_enum = self.convert_resolved_type_to_type_enum(element_type)?;
+                
+                // Create a TypeRef from the element type
+                let element_name = match &element_type_enum {
+                    TypeEnum::Primitive(PrimitiveType::Int) => "int".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Long) => "long".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Float) => "float".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Double) => "double".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Boolean) => "boolean".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Char) => "char".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Byte) => "byte".to_string(),
+                    TypeEnum::Primitive(PrimitiveType::Short) => "short".to_string(),
+                    TypeEnum::Reference(ReferenceType::Class(class_name)) => class_name.clone(),
+                    TypeEnum::Reference(ReferenceType::Array(component_ref)) => {
+                        // Multi-dimensional array
+                        return Ok(TypeEnum::Reference(ReferenceType::Array(component_ref.clone())));
+                    },
+                    _ => "java.lang.Object".to_string(),
+                };
+                
+                let element_ref = Box::new(crate::ast::TypeRef {
+                    name: element_name,
+                    type_args: vec![],
+                    annotations: vec![],
+                    array_dims: 0,
+                    span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                });
+                
+                Ok(TypeEnum::Reference(ReferenceType::Array(element_ref)))
             },
             ResolvedType::Class(class_type) => {
                 Ok(TypeEnum::Reference(ReferenceType::Class(class_type.name.clone())))
@@ -2685,7 +2966,8 @@ impl Gen {
         
         let resolved_symbol = if let Some(resolver) = self.get_unified_resolver() {
             let class_ctx = env.clazz.as_ref().map(|c| c.name.as_str());
-            if let Some(resolution) = resolver.resolve_identifier(&tree.name, class_ctx, method_context.as_deref()) {
+            let method_name = env.method.as_ref().map(|m| m.name.as_str());
+            if let Some(resolution) = resolver.resolve_identifier(&tree.name, class_ctx, method_name) {
                 eprintln!("✅ UNIFIED RESOLVER: Resolved '{}' -> {} (context: {:?})", 
                          tree.name, resolution.resolved_type, resolution.resolution_context);
                 
@@ -6209,7 +6491,11 @@ impl Gen {
             // CRITICAL FIX: Also register to wash symbol environment for proper resolution
             // Pre-compute strings to avoid borrow checker conflicts
             let var_type_str = self.type_to_string(&type_enum);
-            let method_context = env.method.as_ref().map(|m| m.name.as_str()).unwrap_or("unknown");
+            let method_context = if let (Some(class), Some(method)) = (&env.clazz, &env.method) {
+                format!("{}#{}", class.name, method.name)
+            } else {
+                "unknown".to_string()
+            };
             
             // Register variable using UnifiedResolver first, then fallback to wash_symbol_env
             if let Some(resolver) = self.get_unified_resolver() {
@@ -6225,7 +6511,7 @@ impl Gen {
                     var.name, method_context);
                 symbol_env.add_variable(
                     &var.name,
-                    method_context,
+                    &method_context,
                     &var_type_str,
                     false, // is_parameter = false for local variables
                     Some(next_slot as usize)

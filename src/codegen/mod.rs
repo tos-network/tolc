@@ -44,6 +44,7 @@ pub mod type_inference; // Type inference and checking
 pub mod unified_resolver; // Unified identifier resolution facade
 pub mod array_type_info; // Enhanced array type representation
 pub mod enhanced_type_resolution; // Enhanced type descriptor resolution with strong typing
+pub mod dynamic_class_loader; // JavaC-style dynamic dependency class loading
 
 // Optimizer architecture
 pub mod const_fold; // Constant folding operations
@@ -233,6 +234,9 @@ fn generate_bytecode_impl(
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
                 class_writer.set_all_types(ast.type_decls.clone());
+                if let Some(sigs) = signatures {
+                    class_writer.set_generic_signatures(sigs);
+                }
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));
@@ -263,6 +267,10 @@ fn generate_bytecode_impl(
             TypeDecl::Annotation(annotation) => {
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
+                // Set package name if present in AST
+                if let Some(ref package) = ast.package_decl {
+                    class_writer.set_package_name(Some(&package.name));
+                }
                 class_writer.generate_annotation(&annotation)?;
                 let class_file = class_writer.get_class_file();
                 crate::verify::verify(&class_file)
@@ -501,6 +509,9 @@ fn generate_bytecode_inmemory_impl(
                 let mut class_writer = ClassWriter::new_with_config(config.clone());
                 class_writer.set_annotation_retention_index(cu_retention.clone());
                 class_writer.set_all_types(ast.type_decls.clone());
+                if let Some(sigs) = signatures {
+                    class_writer.set_generic_signatures(sigs);
+                }
                 // Set package name if present in AST
                 if let Some(ref package) = ast.package_decl {
                     class_writer.set_package_name(Some(&package.name));

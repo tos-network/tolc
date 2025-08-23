@@ -256,6 +256,16 @@ impl EnhancedTypeResolver {
             return TypeResolution::Void;
         }
         
+        // JavaC alignment: Handle generic type parameters (single uppercase letters)
+        // Generic type variables like T, K, V should be erased to their bounds (Object if unbounded)
+        if type_name.len() == 1 && type_name.chars().next().unwrap().is_ascii_uppercase() {
+            return TypeResolution::Reference {
+                class_name: "java.lang.Object".to_string(),
+                jvm_descriptor: "Ljava/lang/Object;".to_string(),
+                is_interface: false,
+            };
+        }
+        
         // Resolve reference type
         self.resolve_reference_type(type_name)
     }

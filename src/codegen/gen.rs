@@ -54,6 +54,9 @@ pub struct Gen {
     /// Optimization manager - coordinates all optimization passes
     optimizer: OptimizationManager,
     
+    /// Dynamic class loader for dependency resolution (JavaC Enter.complete pattern)
+    pub dynamic_class_loader: Option<crate::codegen::dynamic_class_loader::DynamicClassLoader>,
+    
     /// Current break chain for loop break statements (Phase 2.3)
     pub current_break_chain: Option<Box<crate::codegen::chain::Chain>>,
     
@@ -530,6 +533,7 @@ impl Gen {
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
             optimizer: OptimizationManager::new(),   // Optimization coordinator
+            dynamic_class_loader: None,              // Dynamic class loader (initialized on demand)
             current_break_chain: None,               // Phase 2.3: break statement chain
             current_continue_chain: None,            // Phase 2.3: continue statement chain
             label_env_map: std::collections::HashMap::new(), // Label to environment mapping
@@ -841,10 +845,16 @@ impl Gen {
                         }
                     }
                     Some(_) => {
-                        // Non-void method should have explicit return
-                        return Err(Error::CodeGen { 
-                            message: "Missing return statement".to_string() 
-                        });
+                        // Non-void method without explicit return - generate small loop (JavaC pattern)
+                        // Reference: javac Gen.java:1051-1056
+                        // "sometime dead code seems alive (4415991); generate a small loop instead"
+                        if let Some(ref mut code) = self.code {
+                            let startpc = code.entry_point();
+                            let goto_chain = code.branch(opcodes::GOTO);
+                            if let Some(chain) = goto_chain {
+                                code.resolve_chain(chain, startpc);
+                            }
+                        }
                     }
                 }
             }
@@ -2442,16 +2452,33 @@ impl Gen {
         // 5. Generate abstract methods for interface
         for member in &interface.body {
             if let InterfaceMember::Method(method) = member {
-                self.generate_abstract_method(method)?;
+                self.generate_abstract_method(method, &interface.name)?;
             }
         }
         
-        // 6. Add Signature attribute if interface has type parameters (generic interface)
-        if !interface.type_params.is_empty() {
+        // 6. Add Signature attribute if stored during TransTypes phase or if interface has type parameters
+        if let Some(ref signatures) = self.generic_signatures {
+            let signature_key = format!("interface:{}", interface.name);
+            if let Some(signature) = signatures.get(&signature_key) {
+                let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+                    &mut self.pool, 
+                    signature.clone()
+                ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create interface signature attribute: {}", e)))?;
+                
+                self.class_file.attributes.push(signature_attr);
+                eprintln!("🔧 GEN: Added interface signature attribute for '{}'", interface.name);
+            }
+        } else if !interface.type_params.is_empty() {
+            // Fallback: generate signature if not stored during TransTypes
             self.add_signature_attribute_for_interface(interface)?;
         }
         
-        // 7. Add SourceFile attribute - all javac-generated interfaces have this
+        // 7. Process annotations and generate RuntimeVisibleAnnotations attribute
+        if !interface.annotations.is_empty() {
+            self.add_runtime_visible_annotations_attribute(&interface.annotations)?;
+        }
+        
+        // 8. Add SourceFile attribute - all javac-generated interfaces have this
         self.add_source_file_attribute_for_interface(interface)?;
         
         Ok(())
@@ -2501,8 +2528,64 @@ impl Gen {
         Ok(())
     }
     
+    /// Add RuntimeVisibleAnnotations attribute for interface with annotations
+    fn add_runtime_visible_annotations_attribute(&mut self, annotations: &[Annotation]) -> Result<()> {
+        use crate::codegen::typed_index::ConstPoolIndex;
+        use crate::codegen::attribute::ConstUtf8Info;
+        
+        if annotations.is_empty() {
+            return Ok(());
+        }
+        
+        // Filter annotations that should be visible at runtime
+        let runtime_annotations: Vec<&Annotation> = annotations.iter()
+            .filter(|ann| self.is_runtime_visible_annotation(ann))
+            .collect();
+        
+        if runtime_annotations.is_empty() {
+            return Ok(());
+        }
+        
+        // Convert AST annotations to AnnotationEntry
+        let mut annotation_entries = Vec::new();
+        for annotation in runtime_annotations {
+            let type_name_idx = self.pool.add_utf8(&format!("Ljava/lang/annotation/{};", annotation.name));
+            
+            let annotation_entry = super::attribute::AnnotationEntry {
+                type_name: ConstPoolIndex::<ConstUtf8Info>::from(type_name_idx),
+                retention: Some(super::attribute::RetentionPolicy::Runtime),
+                targets: vec![super::attribute::AnnotationTarget::Type],
+            };
+            annotation_entries.push(annotation_entry);
+        }
+        
+        // Create RuntimeVisibleAnnotations attribute
+        let runtime_visible_attr = super::attribute::RuntimeVisibleAnnotationsAttribute {
+            annotations: annotation_entries,
+        };
+        
+        // Create the named attribute using the factory method
+        let runtime_annotations_attr = super::attribute::NamedAttribute::new(
+            ConstPoolIndex::<ConstUtf8Info>::from(self.pool.add_utf8("RuntimeVisibleAnnotations")),
+            super::attribute::AttributeInfo::RuntimeVisibleAnnotations(runtime_visible_attr)
+        );
+        
+        self.class_file.attributes.push(runtime_annotations_attr);
+        Ok(())
+    }
+    
+    /// Check if annotation should be visible at runtime
+    fn is_runtime_visible_annotation(&self, annotation: &Annotation) -> bool {
+        // For now, assume all annotations with @Retention(RetentionPolicy.RUNTIME) are runtime visible
+        // In a complete implementation, we would check the actual @Retention annotation
+        match annotation.name.as_str() {
+            "Retention" | "Target" => true,
+            _ => false,
+        }
+    }
+    
     /// Generate abstract method for interface
-    fn generate_abstract_method(&mut self, method: &MethodDecl) -> Result<()> {
+    fn generate_abstract_method(&mut self, method: &MethodDecl, interface_name: &str) -> Result<()> {
         // Generate method descriptor with simple type mapping
         let param_types = method.parameters.iter()
             .map(|p| self.simple_type_to_descriptor(&p.type_ref))
@@ -2531,10 +2614,23 @@ impl Gen {
             attributes: Vec::new(), // Abstract methods have no Code attribute
         };
         
-        // Add Signature attribute if method has generic parameters or uses generic types
-        if self.method_needs_signature_attribute(method) {
+        // Add Signature attribute from TransTypes if stored, or generate if needed
+        if let Some(ref signatures) = self.generic_signatures {
+            let signature_key = format!("method:{}:{}", interface_name, method.name);
+            if let Some(signature) = signatures.get(&signature_key) {
+                let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+                    &mut self.pool, 
+                    signature.clone()
+                ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create method signature attribute: {}", e)))?;
+                
+                method_info.attributes.push(signature_attr);
+                eprintln!("🔧 GEN: Added interface method signature attribute for '{}.{}'", interface_name, method.name);
+            }
+        } else if self.method_needs_signature_attribute(method) {
+            // Fallback: generate signature if not stored during TransTypes
             let signature_attr = self.create_method_signature_attribute(method)?;
             method_info.attributes.push(signature_attr);
+            eprintln!("🔧 GEN: Generated fallback method signature for '{}.{}'", interface_name, method.name);
         }
         
         self.class_file.methods.push(method_info);
@@ -3567,6 +3663,7 @@ impl Gen {
     /// Use wash/SymbolEnvironment to resolve type names (new method)
     /// Prioritize wash phase symbol resolution, fallback to builtin types
     pub fn resolve_type_name(&self, simple_name: &str) -> String {
+        eprintln!("🔍 GEN: resolve_type_name called with '{}'", simple_name);
         // 1. First try to use wash/SymbolEnvironment resolution
         if let Some(ref symbol_env) = self.wash_symbol_env {
             if let Some(qualified_name) = symbol_env.resolve_type(simple_name) {
@@ -3586,11 +3683,14 @@ impl Gen {
             "Map" => "java.util.Map".to_string(),
             "Set" => "java.util.Set".to_string(),
             "Collection" => "java.util.Collection".to_string(),
+            "UnsupportedOperationException" => "java.lang.UnsupportedOperationException".to_string(),
+            "NoSuchElementException" => "java.util.NoSuchElementException".to_string(),
             _ => {
                 // Try to resolve through classpath
                 if let Some(internal_name) = crate::common::classpath::resolve_class_name(simple_name) {
                     internal_name.replace('/', ".")
                 } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&simple_name) {
+                    eprintln!("🔧 GEN: Resolving {} via JAVA_LANG_SIMPLE_TYPES", simple_name);
                     format!("java.lang.{}", simple_name)
                 } else {
                     // Final fallback: assume it's already a fully qualified name or in default package

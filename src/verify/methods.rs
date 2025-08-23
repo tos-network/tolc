@@ -339,13 +339,13 @@ fn expected_return_for_descriptor(descriptor: &str) -> ExpectedReturn {
     let mut chars = ret.chars();
     let c = chars.next().unwrap_or('V');
     match c {
-        // Void methods can end with RETURN or ATHROW (for methods that only throw exceptions)
+        // JavaC alignment: All methods can end with ATHROW (for methods that only throw exceptions)
         'V' => ExpectedReturn { name: "RETURN or ATHROW", opcodes: &[opcodes::RETURN, opcodes::ATHROW] },
-        'J' => ExpectedReturn { name: "LRETURN", opcodes: &[opcodes::LRETURN] },
-        'F' => ExpectedReturn { name: "FRETURN", opcodes: &[opcodes::FRETURN] },
-        'D' => ExpectedReturn { name: "DRETURN", opcodes: &[opcodes::DRETURN] },
-        'I' | 'S' | 'B' | 'C' | 'Z' => ExpectedReturn { name: "IRETURN", opcodes: &[opcodes::IRETURN] },
-        'L' | '[' => ExpectedReturn { name: "ARETURN", opcodes: &[opcodes::ARETURN] },
+        'J' => ExpectedReturn { name: "LRETURN or ATHROW", opcodes: &[opcodes::LRETURN, opcodes::ATHROW] },
+        'F' => ExpectedReturn { name: "FRETURN or ATHROW", opcodes: &[opcodes::FRETURN, opcodes::ATHROW] },
+        'D' => ExpectedReturn { name: "DRETURN or ATHROW", opcodes: &[opcodes::DRETURN, opcodes::ATHROW] },
+        'I' | 'S' | 'B' | 'C' | 'Z' => ExpectedReturn { name: "IRETURN or ATHROW", opcodes: &[opcodes::IRETURN, opcodes::ATHROW] },
+        'L' | '[' => ExpectedReturn { name: "ARETURN or ATHROW", opcodes: &[opcodes::ARETURN, opcodes::ATHROW] },
         _ => ExpectedReturn { name: "<unknown>", opcodes: &[] },
     }
 }

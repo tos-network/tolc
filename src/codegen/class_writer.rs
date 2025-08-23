@@ -139,6 +139,9 @@ impl ClassWriter {
             self.gen.set_package_context(package.clone());
         }
         
+        // Set generic signatures in Gen
+        self.gen.set_generic_signatures(self.generic_signatures.clone());
+        
         // Set annotation retention context
         self.gen.set_annotation_retention(self.annotation_retention.clone());
         

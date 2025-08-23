@@ -798,7 +798,8 @@ impl Attr {
     
     /// Resolve a type reference to a ResolvedType with full generic support
     fn resolve_type_ref(&self, type_ref: &crate::ast::TypeRef) -> ResolvedType {
-        match type_ref.name.as_str() {
+        // First resolve the base type (ignoring array dimensions for now)
+        let base_type = match type_ref.name.as_str() {
             "void" => ResolvedType::NoType,
             "boolean" => ResolvedType::Primitive(PrimitiveType::Boolean),
             "byte" => ResolvedType::Primitive(PrimitiveType::Byte),
@@ -841,7 +842,18 @@ impl Attr {
                     }
                 }
             }
+        };
+        
+        // Now handle array dimensions - wrap the base type in Array for each dimension
+        let mut result_type = base_type;
+        for _ in 0..type_ref.array_dims {
+            result_type = ResolvedType::Array(Box::new(result_type));
         }
+        
+        eprintln!("🔍 ATTR: Resolved type '{}' with {} dimensions -> {:?}", 
+                 type_ref.name, type_ref.array_dims, result_type);
+        
+        result_type
     }
     
     /// Resolve a type argument (could be a concrete type or wildcard)

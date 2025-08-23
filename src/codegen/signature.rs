@@ -59,10 +59,9 @@ impl TypeNameResolver {
 pub fn type_ref_to_signature(type_ref: &TypeRef, package_name: Option<&str>, current_class_name: Option<&str>, type_resolver: &TypeNameResolver) -> String {
     let mut signature = String::new();
     
-    // Add array dimensions FIRST for type variables (before the type variable itself)
-    // This is crucial for JVM signature format: [TS; not TS;[
-    if type_ref.name.len() == 1 && type_ref.name.chars().next().unwrap().is_uppercase() && type_ref.array_dims > 0 {
-        // Type variable with array dimensions: add [ before the type variable
+    // Add array dimensions FIRST for ALL types (before the type itself)
+    // This is crucial for JVM signature format: [LType<Args>; not LType<Args>;[
+    if type_ref.array_dims > 0 {
         for _ in 0..type_ref.array_dims {
             signature.push('[');
         }
@@ -122,13 +121,10 @@ pub fn type_ref_to_signature(type_ref: &TypeRef, package_name: Option<&str>, cur
         signature.push(';');
     }
     
-    // Add array dimensions for regular types (non-type variables) after type arguments
-    // Only add array dimensions for the final type, not for type arguments
-    if !type_ref.type_args.is_empty() && type_ref.array_dims > 0 {
-        for _ in 0..type_ref.array_dims {
-            signature.push('[');
-        }
-    }
+    // NOTE: Array dimensions should be handled BEFORE the type, not after
+    // The logic above (lines 64-68) already handles array dimensions correctly for type variables
+    // For regular types with type arguments, array dimensions should be prepended to the signature
+    // This section previously had incorrect logic that added '[' at the end instead of the beginning
     
     signature
 }

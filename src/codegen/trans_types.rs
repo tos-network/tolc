@@ -147,6 +147,24 @@ impl TransTypes {
                     self.generic_signatures.insert(format!("interface:{}", interface_decl.name), signature);
                     eprintln!("🔧 TRANS_TYPES: Stored interface signature for '{}'", interface_decl.name);
                 }
+                
+                // Store method signatures for interface methods
+                for member in &interface_decl.body {
+                    if let InterfaceMember::Method(method) = member {
+                        if self.method_needs_signature(method) {
+                            let type_resolver = crate::codegen::signature::TypeNameResolver::with_default_mappings();
+                            let signature = crate::codegen::signature::method_to_signature(
+                                method, 
+                                None, // package_name
+                                Some(&interface_decl.name), 
+                                &type_resolver
+                            );
+                            
+                            self.generic_signatures.insert(format!("method:{}:{}", interface_decl.name, method.name), signature);
+                            eprintln!("🔧 TRANS_TYPES: Stored interface method signature for '{}.{}'", interface_decl.name, method.name);
+                        }
+                    }
+                }
             }
             TypeDecl::Enum(_) => {
                 // Enums typically don't have complex generic signatures
@@ -294,7 +312,14 @@ impl TransTypes {
     /// 1. Method has generic parameters or return type that will be erased
     /// 2. Method overrides a generic method from superclass/interface
     /// 3. Method implements a generic interface method
+    /// NOTE: Interface methods themselves do NOT need bridge methods - only implementations do
     fn method_needs_bridge(&self, method: &MethodDecl) -> bool {
+        // Interface methods (abstract methods) never need bridge methods
+        // Bridge methods are only needed in concrete implementations
+        if method.body.is_none() {
+            return false;
+        }
+        
         // Check if method has generic return type
         if let Some(return_type) = &method.return_type {
             if self.type_ref_uses_generics(return_type) {

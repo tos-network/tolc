@@ -78,6 +78,12 @@ impl ArrayTypeInfo {
             "void" => "V",
             // Reference types
             _ => {
+                // JavaC alignment: Handle generic type parameters (single uppercase letters)
+                // Generic type variables like T, K, V should be erased to their bounds (Object if unbounded)
+                if element_type.len() == 1 && element_type.chars().next().unwrap().is_ascii_uppercase() {
+                    return "Ljava/lang/Object;".to_string();
+                }
+                
                 // Handle class names: java.lang.String -> Ljava/lang/String;
                 let class_name = element_type.replace('.', "/");
                 return format!("L{};", class_name);
