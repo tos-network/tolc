@@ -1155,6 +1155,445 @@ impl Code {
         });
     }
     
+    /// Emit an opcode with no operand field (JavaC emitop0 equivalent)
+    pub fn emitop0(&mut self, op: u8) {
+        self.emitop(op);
+        if !self.alive {
+            return;
+        }
+        
+        // Update stack state based on instruction - following JavaC emitop0 exactly
+        match op {
+            // Array load instructions
+            opcodes::AALOAD => {
+                self.state.pop(1); // index
+                // arrayref remains, but we change type to element type
+                self.state.pop(1); // arrayref  
+                self.state.push(Type::Object("java/lang/Object".to_string())); // Simplified
+            }
+            opcodes::IALOAD | opcodes::BALOAD | opcodes::CALOAD | opcodes::SALOAD => {
+                self.state.pop(2); // arrayref, index
+                self.state.push(Type::Int);
+            }
+            opcodes::LALOAD => {
+                self.state.pop(2); // arrayref, index
+                self.state.push(Type::Long);
+            }
+            opcodes::FALOAD => {
+                self.state.pop(2); // arrayref, index  
+                self.state.push(Type::Float);
+            }
+            opcodes::DALOAD => {
+                self.state.pop(2); // arrayref, index
+                self.state.push(Type::Double);
+            }
+            
+            // Array store instructions
+            opcodes::IASTORE | opcodes::LASTORE | opcodes::FASTORE | 
+            opcodes::DASTORE | opcodes::AASTORE | opcodes::BASTORE | 
+            opcodes::CASTORE | opcodes::SASTORE => {
+                self.state.pop(3); // arrayref, index, value
+            }
+            
+            // Constants
+            opcodes::ACONST_NULL => {
+                self.state.push(Type::Null);
+            }
+            opcodes::ICONST_M1 | opcodes::ICONST_0..=opcodes::ICONST_5 => {
+                self.state.push(Type::Int);
+            }
+            opcodes::LCONST_0 | opcodes::LCONST_1 => {
+                self.state.push(Type::Long);
+            }
+            opcodes::FCONST_0 | opcodes::FCONST_1 | opcodes::FCONST_2 => {
+                self.state.push(Type::Float);
+            }
+            opcodes::DCONST_0 | opcodes::DCONST_1 => {
+                self.state.push(Type::Double);
+            }
+            
+            // Load instructions (0-3 variants)
+            opcodes::ILOAD_0..=opcodes::ILOAD_3 => {
+                self.state.push(Type::Int);
+            }
+            opcodes::LLOAD_0..=opcodes::LLOAD_3 => {
+                self.state.push(Type::Long);
+            }
+            opcodes::FLOAD_0..=opcodes::FLOAD_3 => {
+                self.state.push(Type::Float);
+            }
+            opcodes::DLOAD_0..=opcodes::DLOAD_3 => {
+                self.state.push(Type::Double);
+            }
+            opcodes::ALOAD_0..=opcodes::ALOAD_3 => {
+                // Would need local variable type info for precise typing
+                self.state.push(Type::Object("java/lang/Object".to_string()));
+            }
+            
+            // Store instructions (0-3 variants)
+            opcodes::ISTORE_0..=opcodes::ISTORE_3 |
+            opcodes::FSTORE_0..=opcodes::FSTORE_3 |
+            opcodes::ASTORE_0..=opcodes::ASTORE_3 => {
+                self.state.pop(1);
+            }
+            opcodes::LSTORE_0..=opcodes::LSTORE_3 |
+            opcodes::DSTORE_0..=opcodes::DSTORE_3 => {
+                self.state.pop(2);
+            }
+            
+            // Stack manipulation
+            opcodes::POP => {
+                self.state.pop(1);
+            }
+            opcodes::POP2 => {
+                self.state.pop(2);
+            }
+            opcodes::DUP => {
+                // Duplicate top stack element
+                let top = self.state.stack.last().cloned().unwrap_or(Type::Top);
+                self.state.push(top);
+            }
+            opcodes::DUP_X1 => {
+                // ..., value2, value1 -> ..., value1, value2, value1
+                let value1 = self.state.stack.pop().unwrap_or(Type::Top);
+                let value2 = self.state.stack.pop().unwrap_or(Type::Top);
+                self.state.push(value1.clone());
+                self.state.push(value2);
+                self.state.push(value1);
+            }
+            opcodes::DUP_X2 => {
+                // Complex stack manipulation - simplified
+                if let Some(value1) = self.state.stack.pop() {
+                    self.state.push(value1.clone());
+                    self.state.push(value1);
+                }
+            }
+            opcodes::DUP2 => {
+                // Duplicate top two stack elements (or one double-width)
+                let top = self.state.stack.last().cloned().unwrap_or(Type::Top);
+                if top.width() == 2 {
+                    self.state.push(top);
+                } else {
+                    let second = self.state.stack.get(self.state.stack.len() - 2)
+                        .cloned().unwrap_or(Type::Top);
+                    self.state.push(second);
+                    self.state.push(top);
+                }
+            }
+            opcodes::SWAP => {
+                // Swap top two stack elements
+                if self.state.stack.len() >= 2 {
+                    let len = self.state.stack.len();
+                    self.state.stack.swap(len - 1, len - 2);
+                }
+            }
+            
+            // Arithmetic operations  
+            opcodes::IADD | opcodes::ISUB | opcodes::IMUL | opcodes::IDIV | 
+            opcodes::IREM | opcodes::ISHL | opcodes::ISHR | opcodes::IUSHR |
+            opcodes::IAND | opcodes::IOR | opcodes::IXOR => {
+                self.state.pop(2); // two ints
+                self.state.push(Type::Int);
+            }
+            opcodes::LADD | opcodes::LSUB | opcodes::LMUL | opcodes::LDIV | 
+            opcodes::LREM | opcodes::LAND | opcodes::LOR | opcodes::LXOR => {
+                self.state.pop(4); // two longs
+                self.state.push(Type::Long);
+            }
+            opcodes::LSHL | opcodes::LSHR | opcodes::LUSHR => {
+                self.state.pop(3); // long + int
+                self.state.push(Type::Long);
+            }
+            opcodes::FADD | opcodes::FSUB | opcodes::FMUL | opcodes::FDIV | opcodes::FREM => {
+                self.state.pop(2); // two floats
+                self.state.push(Type::Float);
+            }
+            opcodes::DADD | opcodes::DSUB | opcodes::DMUL | opcodes::DDIV | opcodes::DREM => {
+                self.state.pop(4); // two doubles
+                self.state.push(Type::Double);
+            }
+            
+            // Negation
+            opcodes::INEG => {
+                // int -> int (no net change)
+            }
+            opcodes::LNEG | opcodes::FNEG | opcodes::DNEG => {
+                // No net change for negation
+            }
+            
+            // Type conversions
+            opcodes::I2L => {
+                self.state.pop(1); // int
+                self.state.push(Type::Long);
+            }
+            opcodes::I2F => {
+                self.state.pop(1); // int
+                self.state.push(Type::Float);
+            }
+            opcodes::I2D => {
+                self.state.pop(1); // int
+                self.state.push(Type::Double);
+            }
+            opcodes::L2I => {
+                self.state.pop(2); // long
+                self.state.push(Type::Int);
+            }
+            opcodes::L2F => {
+                self.state.pop(2); // long
+                self.state.push(Type::Float);
+            }
+            opcodes::L2D => {
+                self.state.pop(2); // long
+                self.state.push(Type::Double);
+            }
+            opcodes::F2I => {
+                self.state.pop(1); // float
+                self.state.push(Type::Int);
+            }
+            opcodes::F2L => {
+                self.state.pop(1); // float
+                self.state.push(Type::Long);
+            }
+            opcodes::F2D => {
+                self.state.pop(1); // float
+                self.state.push(Type::Double);
+            }
+            opcodes::D2I => {
+                self.state.pop(2); // double
+                self.state.push(Type::Int);
+            }
+            opcodes::D2L => {
+                self.state.pop(2); // double
+                self.state.push(Type::Long);
+            }
+            opcodes::D2F => {
+                self.state.pop(2); // double
+                self.state.push(Type::Float);
+            }
+            opcodes::I2B | opcodes::I2C | opcodes::I2S => {
+                // int -> int (no net change)
+            }
+            
+            // Comparisons
+            opcodes::LCMP => {
+                self.state.pop(4); // two longs
+                self.state.push(Type::Int);
+            }
+            opcodes::FCMPL | opcodes::FCMPG => {
+                self.state.pop(2); // two floats
+                self.state.push(Type::Int);
+            }
+            opcodes::DCMPL | opcodes::DCMPG => {
+                self.state.pop(4); // two doubles
+                self.state.push(Type::Int);
+            }
+            
+            // Returns and termination
+            opcodes::IRETURN | opcodes::FRETURN | opcodes::ARETURN => {
+                self.state.pop(1);
+                self.mark_dead();
+            }
+            opcodes::LRETURN | opcodes::DRETURN => {
+                self.state.pop(2);
+                self.mark_dead();
+            }
+            opcodes::RETURN => {
+                self.mark_dead();
+            }
+            opcodes::ATHROW => {
+                self.state.pop(1);
+                self.mark_dead();
+            }
+            
+            // Array length
+            opcodes::ARRAYLENGTH => {
+                self.state.pop(1); // arrayref
+                self.state.push(Type::Int);
+            }
+            
+            // Monitor operations
+            opcodes::MONITORENTER | opcodes::MONITOREXIT => {
+                self.state.pop(1); // objectref
+            }
+            
+            // NOP has no effect
+            opcodes::NOP => {}
+            
+            _ => {
+                // Unknown instruction - be conservative
+                if self.debug_code {
+                    eprintln!("Unknown instruction in emitop0: {:#x}", op);
+                }
+            }
+        }
+        
+        // Update max stack size
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    /// Emit method invocation instructions with proper stack tracking (JavaC equivalents)
+    pub fn emit_invokevirtual(&mut self, meth_index: u16, arg_size: u16, return_size: u16) {
+        self.emitop(opcodes::INVOKEVIRTUAL);
+        if !self.alive {
+            return;
+        }
+        self.emit2(meth_index);
+        // Pop 'this' + arguments, push return value
+        self.state.pop(arg_size + 1);
+        if return_size > 0 {
+            self.state.push_stack_item(return_size);
+        }
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    pub fn emit_invokespecial(&mut self, meth_index: u16, arg_size: u16, return_size: u16) {
+        self.emitop(opcodes::INVOKESPECIAL);
+        if !self.alive {
+            return;
+        }
+        self.emit2(meth_index);
+        // Pop 'this' + arguments, push return value  
+        self.state.pop(arg_size + 1);
+        if return_size > 0 {
+            self.state.push_stack_item(return_size);
+        }
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    pub fn emit_invokestatic(&mut self, meth_index: u16, arg_size: u16, return_size: u16) {
+        self.emitop(opcodes::INVOKESTATIC);
+        if !self.alive {
+            return;
+        }
+        self.emit2(meth_index);
+        // Pop arguments, push return value (no 'this' for static)
+        self.state.pop(arg_size);
+        if return_size > 0 {
+            self.state.push_stack_item(return_size);
+        }
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    pub fn emit_invokeinterface(&mut self, meth_index: u16, arg_size: u16, return_size: u16) {
+        self.emitop(opcodes::INVOKEINTERFACE);
+        if !self.alive {
+            return;
+        }
+        self.emit2(meth_index);
+        self.emit1(arg_size as u8 + 1); // Include 'this' in count
+        self.emit1(0); // Reserved byte
+        // Pop 'this' + arguments, push return value
+        self.state.pop(arg_size + 1);
+        if return_size > 0 {
+            self.state.push_stack_item(return_size);
+        }
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    pub fn emit_invokedynamic(&mut self, bootstrap_index: u16, arg_size: u16, return_size: u16) {
+        self.emitop(opcodes::INVOKEDYNAMIC);
+        if !self.alive {
+            return;
+        }
+        self.emit2(bootstrap_index);
+        self.emit2(0); // Reserved bytes
+        // Pop arguments, push return value (no 'this' for invokedynamic)
+        self.state.pop(arg_size);
+        if return_size > 0 {
+            self.state.push_stack_item(return_size);
+        }
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    /// Field access instructions with stack tracking
+    pub fn emit_getstatic(&mut self, field_index: u16, field_size: u16) {
+        self.emitop(opcodes::GETSTATIC);
+        if !self.alive {
+            return;
+        }
+        self.emit2(field_index);
+        // Push field value
+        self.state.push_stack_item(field_size);
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    pub fn emit_putstatic(&mut self, field_index: u16, field_size: u16) {
+        self.emitop(opcodes::PUTSTATIC);
+        if !self.alive {
+            return;
+        }
+        self.emit2(field_index);
+        // Pop field value
+        self.state.pop(field_size);
+    }
+    
+    pub fn emit_getfield(&mut self, field_index: u16, field_size: u16) {
+        self.emitop(opcodes::GETFIELD);
+        if !self.alive {
+            return;
+        }
+        self.emit2(field_index);
+        // Pop object reference, push field value
+        self.state.pop(1);
+        self.state.push_stack_item(field_size);
+        self.max_stack = self.max_stack.max(self.state.stacksize);
+    }
+    
+    pub fn emit_putfield(&mut self, field_index: u16, field_size: u16) {
+        self.emitop(opcodes::PUTFIELD);
+        if !self.alive {
+            return;
+        }
+        self.emit2(field_index);
+        // Pop object reference and field value
+        self.state.pop(1 + field_size);
+    }
+    
+    /// Branch instructions with proper stack tracking
+    pub fn emit_branch(&mut self, op: u8, target: u16) {
+        self.emitop(op);
+        if !self.alive {
+            return;
+        }
+        self.emit2(target);
+        
+        // Update stack based on branch type
+        match op {
+            // Single-operand conditionals
+            opcodes::IFEQ | opcodes::IFNE | opcodes::IFLT | 
+            opcodes::IFGE | opcodes::IFGT | opcodes::IFLE |
+            opcodes::IFNULL | opcodes::IFNONNULL => {
+                self.state.pop(1);
+            }
+            // Two-operand conditionals  
+            opcodes::IF_ICMPEQ | opcodes::IF_ICMPNE | opcodes::IF_ICMPLT |
+            opcodes::IF_ICMPGE | opcodes::IF_ICMPGT | opcodes::IF_ICMPLE |
+            opcodes::IF_ACMPEQ | opcodes::IF_ACMPNE => {
+                self.state.pop(2);
+            }
+            // Unconditional branch
+            opcodes::GOTO => {
+                self.mark_dead();
+            }
+            _ => {}
+        }
+    }
+    
+    /// Get current stack depth (for StackMapTable generation)
+    pub fn stack_depth(&self) -> u16 {
+        self.state.stacksize
+    }
+    
+    /// Get maximum stack depth seen so far
+    pub fn max_stack_depth(&self) -> u16 {
+        self.max_stack
+    }
+    
+    /// Reset alive state (for control flow joins)
+    pub fn mark_alive(&mut self) {
+        self.alive = true;
+    }
+    
 }
 
 impl Default for Code {
