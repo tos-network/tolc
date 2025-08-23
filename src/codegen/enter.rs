@@ -659,6 +659,17 @@ impl Enter {
     
     /// Resolve type name from TypeRef to string representation (JavaC aligned with import resolution)
     fn resolve_type_name(&self, type_ref: &TypeRef) -> String {
+        use crate::codegen::array_type_info::{ArrayTypeInfo, ArrayAwareTypeResolver};
+        
+        // Use ArrayAwareTypeResolver for proper array handling
+        if type_ref.array_dims > 0 {
+            let final_type = ArrayAwareTypeResolver::resolve_type_ref(type_ref);
+            eprintln!("🔍 ENTER: Resolved array type '{}' (array_dims={}) -> '{}'", 
+                     type_ref.name, type_ref.array_dims, final_type);
+            return final_type;
+        }
+        
+        // Non-array type resolution
         let base_name = if type_ref.type_args.is_empty() {
             // Simple type - resolve through import hierarchy (JavaC pattern)
             self.resolve_simple_type_name(&type_ref.name)
@@ -671,33 +682,35 @@ impl Enter {
             format!("{}<{}>", resolved_base, args.join(", "))
         };
         
-        // Handle array dimensions (e.g., int[] -> [I, String[][] -> [[Ljava/lang/String;)
-        let final_type = if type_ref.array_dims > 0 {
-            let array_prefix = "[".repeat(type_ref.array_dims);
-            let descriptor = self.type_name_to_descriptor(&base_name);
-            format!("{}{}", array_prefix, descriptor)
-        } else {
-            base_name
-        };
-        
-        eprintln!("🔍 ENTER: Resolved type '{}' (array_dims={}) -> '{}'", type_ref.name, type_ref.array_dims, final_type);
-        final_type
+        eprintln!("🔍 ENTER: Resolved non-array type '{}' -> '{}'", type_ref.name, base_name);
+        base_name
     }
     
-    /// Convert a type name to JVM descriptor format
+    /// Convert a type name to JVM descriptor format using enhanced ArrayTypeInfo
     fn type_name_to_descriptor(&self, type_name: &str) -> String {
-        match type_name {
-            "test/int" | "int" => "I".to_string(),
-            "test/long" | "long" => "J".to_string(),
-            "test/float" | "float" => "F".to_string(),
-            "test/double" | "double" => "D".to_string(),
-            "test/boolean" | "boolean" => "Z".to_string(),
-            "test/byte" | "byte" => "B".to_string(),
-            "test/char" | "char" => "C".to_string(),
-            "test/short" | "short" => "S".to_string(),
+        use crate::codegen::array_type_info::ArrayTypeInfo;
+        
+        // Clean up malformed type names like "test/int" -> "int"
+        let clean_type_name = if type_name.starts_with("test/") {
+            &type_name[5..] // Remove "test/" prefix
+        } else {
+            type_name
+        };
+        
+        match clean_type_name {
+            // Primitive types
+            "int" => "I".to_string(),
+            "long" => "J".to_string(),
+            "float" => "F".to_string(),
+            "double" => "D".to_string(),
+            "boolean" => "Z".to_string(),
+            "byte" => "B".to_string(),
+            "char" => "C".to_string(),
+            "short" => "S".to_string(),
+            "void" => "V".to_string(),
             _ => {
                 // Reference types: convert to L<classname>;
-                let class_name = type_name.replace('.', "/");
+                let class_name = clean_type_name.replace('.', "/");
                 format!("L{};", class_name)
             }
         }

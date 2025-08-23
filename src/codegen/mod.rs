@@ -41,6 +41,9 @@ pub mod optimization_manager; // Unified optimization management
 pub mod symtab;      // JavaC-aligned symbol table
 pub mod types;       // JavaC-aligned type system  
 pub mod type_inference; // Type inference and checking
+pub mod unified_resolver; // Unified identifier resolution facade
+pub mod array_type_info; // Enhanced array type representation
+pub mod enhanced_type_resolution; // Enhanced type descriptor resolution with strong typing
 
 // Optimizer architecture
 pub mod const_fold; // Constant folding operations

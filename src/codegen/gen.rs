@@ -78,6 +78,8 @@ pub struct Gen {
     /// Type information from wash/attr phase for type-aware code generation
     wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
     
+    /// Unified resolver for JavaC-aligned identifier resolution
+    pub unified_resolver: Option<crate::codegen::unified_resolver::UnifiedResolver>,
     
     /// Inner class relationships for InnerClasses attribute generation
     inner_class_relationships: Vec<crate::codegen::InnerClassInfo>,
@@ -158,6 +160,12 @@ pub struct ScopeContext {
     pub loop_type: Option<LoopType>,
     /// Label if this is a labeled scope
     pub label: Option<String>,
+    /// Class context for this scope (e.g., "com.example.MyClass")
+    pub class_context: Option<String>,
+    /// Method context for this scope (e.g., "myMethod(ILjava/lang/String;)V")
+    pub method_context: Option<String>,
+    /// Current symbol environment snapshot for this scope
+    pub symbol_snapshot: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Local variable with scope information
@@ -196,6 +204,15 @@ pub struct GenContext {
     /// Chain for all unresolved jumps that continue in the current environment
     pub cont: Option<Box<crate::codegen::chain::Chain>>,
     
+    /// Symbol environment reference for unified identifier resolution
+    pub symbol_env: Option<crate::codegen::enter::SymbolEnvironment>,
+    
+    /// Current scope context for nested scoping
+    pub scope_context: ScopeContext,
+    
+    /// Type information cache for efficient lookups
+    pub type_cache: std::collections::HashMap<String, String>,
+    
     /// Is this a switch statement?
     pub is_switch: bool,
 }
@@ -209,12 +226,64 @@ impl Default for GenContext {
             debug_code: false,
             exit: None,
             cont: None,
+            symbol_env: None,
+            scope_context: ScopeContext {
+                scope_id: 0,
+                start_pc: 0,
+                local_vars: Vec::new(),
+                prev_max_locals: 0,
+                is_loop_scope: false,
+                loop_type: None,
+                label: None,
+                class_context: None,
+                method_context: None,
+                symbol_snapshot: None,
+            },
+            type_cache: std::collections::HashMap::new(),
             is_switch: false,
         }
     }
 }
 
 impl GenContext {
+    /// Create a new GenContext with proper default values
+    pub fn new_with_context(
+        method: Option<MethodDecl>,
+        clazz: Option<ClassDecl>,
+        symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
+    ) -> Self {
+        let class_context = clazz.as_ref().map(|c| c.name.clone());
+        let method_context = method.as_ref().map(|m| {
+            format!("{}#{}", 
+                   clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass"), 
+                   m.name)
+        });
+        
+        Self {
+            method,
+            clazz,
+            fatcode: false,
+            debug_code: false,
+            exit: None,
+            cont: None,
+            symbol_env,
+            scope_context: ScopeContext {
+                scope_id: 0,
+                start_pc: 0,
+                local_vars: Vec::new(),
+                prev_max_locals: 0,
+                is_loop_scope: false,
+                loop_type: None,
+                label: None,
+                class_context,
+                method_context,
+                symbol_snapshot: None,
+            },
+            type_cache: std::collections::HashMap::new(),
+            is_switch: false,
+        }
+    }
+    
     /// Add given chain to exit chain (JavaC: addExit)
     pub fn add_exit(&mut self, chain: Option<Box<crate::codegen::chain::Chain>>) {
         self.exit = crate::codegen::code::Code::merge_chains(chain, self.exit.take());
@@ -234,9 +303,192 @@ impl GenContext {
             debug_code: self.debug_code,
             exit: None,  // New environment starts with empty chains
             cont: None,  // New environment starts with empty chains
+            symbol_env: self.symbol_env.clone(), // Share symbol environment
+            scope_context: self.scope_context.clone(),
+            type_cache: self.type_cache.clone(),
             is_switch: false,
         }
     }
+    
+    /// Unified identifier resolution interface - JavaC: Resolve.resolveIdent equivalent
+    /// This is the main entry point for all identifier resolution, following JavaC patterns
+    pub fn resolve_identifier(&self, identifier: &str) -> Option<IdentifierResolution> {
+        // Try cache first for performance
+        if let Some(cached_type) = self.type_cache.get(identifier) {
+            return Some(IdentifierResolution {
+                identifier: identifier.to_string(),
+                resolved_type: cached_type.clone(),
+                resolution_context: ResolutionContext::Cached,
+                scope_depth: self.scope_context.scope_id,
+            });
+        }
+        
+        // Resolve through current scope context first (local variables)
+        if let Some(resolved) = self.resolve_from_scope_context(identifier) {
+            return Some(resolved);
+        }
+        
+        // Resolve through symbol environment (classes, methods, fields)
+        if let Some(ref symbol_env) = self.symbol_env {
+            if let Some(type_name) = symbol_env.resolve_type(identifier) {
+                let resolution = IdentifierResolution {
+                    identifier: identifier.to_string(),
+                    resolved_type: type_name.clone(),
+                    resolution_context: ResolutionContext::SymbolEnvironment,
+                    scope_depth: self.scope_context.scope_id,
+                };
+                return Some(resolution);
+            }
+        }
+        
+        // If no resolution found, return None (JavaC would generate error)
+        None
+    }
+    
+    /// Resolve identifier from current scope context (local variables, parameters)
+    /// JavaC equivalent: Env.info.scope.lookup()
+    fn resolve_from_scope_context(&self, identifier: &str) -> Option<IdentifierResolution> {
+        // Check local variables in current scope
+        for var in &self.scope_context.local_vars {
+            if var.name == identifier {
+                return Some(IdentifierResolution {
+                    identifier: identifier.to_string(),
+                    resolved_type: var.type_desc.clone(),
+                    resolution_context: ResolutionContext::LocalVariable,
+                    scope_depth: self.scope_context.scope_id,
+                });
+            }
+        }
+        
+        // Check method parameters if we have method context
+        if let Some(ref method) = self.method {
+            for param in &method.parameters {
+                if param.name == identifier {
+                    // Convert parameter type to descriptor
+                    let type_desc = self.type_ref_to_descriptor(&param.type_ref);
+                    return Some(IdentifierResolution {
+                        identifier: identifier.to_string(),
+                        resolved_type: type_desc,
+                        resolution_context: ResolutionContext::Parameter,
+                        scope_depth: self.scope_context.scope_id,
+                    });
+                }
+            }
+        }
+        
+        // Check symbol snapshot for this scope
+        if let Some(ref snapshot) = self.scope_context.symbol_snapshot {
+            if let Some(type_name) = snapshot.get(identifier) {
+                return Some(IdentifierResolution {
+                    identifier: identifier.to_string(),
+                    resolved_type: type_name.clone(),
+                    resolution_context: ResolutionContext::ScopeSnapshot,
+                    scope_depth: self.scope_context.scope_id,
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// Convert TypeRef to JVM descriptor
+    /// JavaC equivalent: Types.erasure() + Type.descriptor()
+    fn type_ref_to_descriptor(&self, type_ref: &crate::ast::TypeRef) -> String {
+        let base_desc = match type_ref.name.as_str() {
+            "int" => "I",
+            "long" => "J",
+            "float" => "F",
+            "double" => "D",
+            "boolean" => "Z",
+            "char" => "C",
+            "byte" => "B",
+            "short" => "S",
+            "void" => "V",
+            class_name => {
+                // Handle class names - convert to proper descriptor format
+                if class_name.contains('.') {
+                    &format!("L{};", class_name.replace('.', "/"))
+                } else {
+                    &format!("L{};", class_name)
+                }
+            }
+        };
+        
+        // Handle arrays
+        if type_ref.array_dims > 0 {
+            format!("{}{}", "[".repeat(type_ref.array_dims), base_desc)
+        } else {
+            base_desc.to_string()
+        }
+    }
+    
+    /// Update type cache for efficient lookups
+    /// This helps avoid repeated symbol environment queries
+    pub fn cache_type(&mut self, identifier: String, resolved_type: String) {
+        self.type_cache.insert(identifier, resolved_type);
+    }
+    
+    /// Create new scope context for nested blocks
+    /// JavaC equivalent: Env.dup() with new scope
+    pub fn enter_scope(&mut self, is_loop: bool, loop_type: Option<LoopType>, label: Option<String>) {
+        let new_scope = ScopeContext {
+            scope_id: self.scope_context.scope_id + 1,
+            start_pc: 0, // Will be set by caller
+            local_vars: Vec::new(),
+            prev_max_locals: self.scope_context.local_vars.len() as u16,
+            is_loop_scope: is_loop,
+            loop_type,
+            label,
+            class_context: self.scope_context.class_context.clone(),
+            method_context: self.scope_context.method_context.clone(),
+            symbol_snapshot: self.scope_context.symbol_snapshot.clone(),
+        };
+        self.scope_context = new_scope;
+    }
+    
+    /// Exit current scope and return to parent
+    /// JavaC equivalent: restoration of previous environment
+    pub fn exit_scope(&mut self) -> ScopeContext {
+        let current_scope = self.scope_context.clone();
+        // Note: In a full implementation, we'd maintain a scope stack
+        // For now, we just reset to a basic scope
+        self.scope_context.scope_id = if self.scope_context.scope_id > 0 { 
+            self.scope_context.scope_id - 1 
+        } else { 
+            0 
+        };
+        current_scope
+    }
+}
+
+/// Result of identifier resolution - JavaC equivalent: Symbol
+#[derive(Debug, Clone)]
+pub struct IdentifierResolution {
+    /// The original identifier name
+    pub identifier: String,
+    /// The resolved type descriptor (JVM format)
+    pub resolved_type: String,
+    /// Context where resolution occurred
+    pub resolution_context: ResolutionContext,
+    /// Scope depth where identifier was found
+    pub scope_depth: u16,
+}
+
+/// Context where identifier resolution occurred
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolutionContext {
+    /// Found in type cache
+    Cached,
+    /// Found as local variable in current scope
+    LocalVariable,
+    /// Found as method parameter
+    Parameter,
+    /// Found in scope snapshot
+    ScopeSnapshot,
+    /// Found in symbol environment (classes, methods, fields)
+    SymbolEnvironment,
+    /// Not found
+    NotFound,
 }
 
 /// Class-level generation context (transitional)
@@ -286,6 +538,7 @@ impl Gen {
             generic_signatures: None,               // Generic signatures from TransTypes
             wash_type_info: None,                    // Type information from wash/attr phase
             wash_symbol_env: None,                   // Symbol environment from wash/enter phase
+            unified_resolver: None,                  // Unified resolver for identifier resolution
             inner_class_relationships: Vec::new(),  // Inner class relationships for InnerClasses attribute
             parent_class_name: None,                 // Parent class name for inner classes
             lambda_counter: 0,                       // Lambda method counter for unique names
@@ -321,7 +574,10 @@ impl Gen {
         symbol_env: crate::codegen::enter::SymbolEnvironment
     ) {
         self.wash_type_info = Some(type_info);
-        self.wash_symbol_env = Some(symbol_env);
+        self.wash_symbol_env = Some(symbol_env.clone());
+        
+        // Initialize unified resolver with symbol environment
+        self.unified_resolver = Some(crate::codegen::unified_resolver::UnifiedResolver::new(symbol_env));
     }
     
     /// Get type information from wash/attr phase
@@ -333,6 +589,8 @@ impl Gen {
     pub fn get_wash_symbol_env(&self) -> Option<&crate::codegen::enter::SymbolEnvironment> {
         self.wash_symbol_env.as_ref()
     }
+    
+    /// Get unified resolver for identifier resolution - removed, use gen_visitor method instead
     
     /// ========== WASH INTEGRATION INTERFACE - JavaC-aligned architecture ==========
     /// 
@@ -457,6 +715,22 @@ impl Gen {
             debug_code: false,
             exit: None,
             cont: None,
+            symbol_env: self.wash_symbol_env.clone(),
+            scope_context: ScopeContext {
+                scope_id: 0,
+                start_pc: 0,
+                local_vars: Vec::new(),
+                prev_max_locals: 0,
+                is_loop_scope: false,
+                loop_type: None,
+                label: None,
+                class_context: self.class_context.class.as_ref().map(|c| c.name.clone()),
+                method_context: Some(format!("{}#{}", 
+                    self.class_context.class.as_ref().map(|c| c.name.as_str()).unwrap_or("Unknown"), 
+                    method.name)),
+                symbol_snapshot: None,
+            },
+            type_cache: std::collections::HashMap::new(),
             is_switch: false,
         };
         
@@ -491,6 +765,22 @@ impl Gen {
             debug_code: false,
             exit: None,
             cont: None,
+            symbol_env: self.wash_symbol_env.clone(),
+            scope_context: ScopeContext {
+                scope_id: 0,
+                start_pc: 0,
+                local_vars: Vec::new(),
+                prev_max_locals: 0,
+                is_loop_scope: false,
+                loop_type: None,
+                label: None,
+                class_context: self.class_context.class.as_ref().map(|c| c.name.clone()),
+                method_context: Some(format!("{}#{}", 
+                    self.class_context.class.as_ref().map(|c| c.name.as_str()).unwrap_or("Unknown"), 
+                    method.name)),
+                symbol_snapshot: None,
+            },
+            type_cache: std::collections::HashMap::new(),
             is_switch: false,
         };
         
@@ -576,15 +866,11 @@ impl Gen {
     /// Generate statement - JavaC genStat equivalent with proper context
     /// Delegates to the unified visit_stmt method with current environment
     pub fn gen_stmt(&mut self, stmt: &Stmt) -> Result<()> {
-        let env = self.env.clone().unwrap_or_else(|| GenContext {
-            method: None,
-            clazz: None,
-            fatcode: false,
-            debug_code: false,
-            exit: None,
-            cont: None,
-            is_switch: false,
-        });
+        let env = self.env.clone().unwrap_or_else(|| GenContext::new_with_context(
+            None,
+            None,
+            self.wash_symbol_env.clone()
+        ));
         
         // Use unified visitor method for consistent context passing
         self.visit_stmt(stmt, &env)
@@ -672,15 +958,11 @@ impl Gen {
     pub fn gen_expr(&mut self, expr: &Expr) -> Result<BytecodeItem> {
         let env = self.env.clone().unwrap_or_else(|| {
             eprintln!("DEBUG: gen_expr: self.env is None, creating default env");
-            GenContext {
-                method: None,
-                clazz: None,
-                fatcode: false,
-                debug_code: false,
-                exit: None,
-                cont: None,
-                is_switch: false,
-            }
+            GenContext::new_with_context(
+                None,
+                None,
+                self.wash_symbol_env.clone()
+            )
         });
         
         // Use context-aware expression generation
@@ -1345,15 +1627,11 @@ impl Gen {
         // localEnv.enclMethod = tree;
         
         // Create method-specific generation context
-        let method_env = GenContext {
-            method: Some(method.clone()),
-            clazz: env.clazz.clone(),
-            fatcode: env.fatcode,
-            debug_code: env.debug_code,
-            exit: None,
-            cont: None,
-            is_switch: false,
-        };
+        let method_env = GenContext::new_with_context(
+            Some(method.clone()),
+            env.clazz.clone(),
+            env.symbol_env.clone()
+        );
         
         // Initialize method in type inference system
         let method_symbol = super::symtab::MethodSymbol {
@@ -1446,15 +1724,11 @@ impl Gen {
         // localEnv.enclClass = tree;
         
         // Create class-specific generation context
-        let class_env = GenContext {
-            method: None,
-            clazz: Some(class.clone()),
-            fatcode: env.fatcode,
-            debug_code: env.debug_code,
-            exit: None,
-            cont: None,
-            is_switch: false,
-        };
+        let class_env = GenContext::new_with_context(
+            None,
+            Some(class.clone()),
+            env.symbol_env.clone()
+        );
         
         eprintln!("DEBUG: gen_def_class: Created class_env for class '{}', clazz = {:?}", class.name, class_env.clazz.as_ref().map(|c| &c.name));
         
@@ -1804,30 +2078,29 @@ impl Gen {
     
     /// Create a new environment context for nested scopes - JavaC Env.dup() equivalent
     pub fn create_nested_env(&self, base_env: &GenContext, is_switch: bool) -> GenContext {
-        GenContext {
-            method: base_env.method.clone(),
-            clazz: base_env.clazz.clone(),
-            fatcode: base_env.fatcode,
-            debug_code: base_env.debug_code,
-            exit: base_env.exit.clone(),
-            cont: base_env.cont.clone(),
-            is_switch,
-        }
+        let mut nested_env = GenContext::new_with_context(
+            base_env.method.clone(),
+            base_env.clazz.clone(),
+            base_env.symbol_env.clone()
+        );
+        nested_env.exit = base_env.exit.clone();
+        nested_env.cont = base_env.cont.clone();
+        nested_env.is_switch = is_switch;
+        nested_env
     }
     
     /// Create environment for loop context - JavaC pattern for loops
     pub fn create_loop_env(&self, base_env: &GenContext, 
                           break_chain: Option<Box<crate::codegen::chain::Chain>>,
                           continue_chain: Option<Box<crate::codegen::chain::Chain>>) -> GenContext {
-        GenContext {
-            method: base_env.method.clone(),
-            clazz: base_env.clazz.clone(),
-            fatcode: base_env.fatcode,
-            debug_code: base_env.debug_code,
-            exit: break_chain,
-            cont: continue_chain,
-            is_switch: false,
-        }
+        let mut loop_env = GenContext::new_with_context(
+            base_env.method.clone(),
+            base_env.clazz.clone(),
+            base_env.symbol_env.clone()
+        );
+        loop_env.exit = break_chain;
+        loop_env.cont = continue_chain;
+        loop_env
     }
     
     // ========== JavaC Gen.java Feature Alignment Verification ==========
@@ -2091,15 +2364,11 @@ impl Gen {
         }
         
         // 7. Generate all methods with proper class context
-        let class_env = GenContext {
-            method: None,
-            clazz: Some(class.clone()),
-            fatcode: false,
-            debug_code: false,
-            exit: None,
-            cont: None,
-            is_switch: false,
-        };
+        let class_env = GenContext::new_with_context(
+            None,
+            Some(class.clone()),
+            self.wash_symbol_env.clone()
+        );
         
         for member in &class.body {
             match member {
@@ -3636,6 +3905,9 @@ impl LoopScopeManager {
             is_loop_scope,
             loop_type,
             label,
+            class_context: None,
+            method_context: None,
+            symbol_snapshot: None,
         };
         self.scope_stack.push(context);
         self.current_depth += 1;

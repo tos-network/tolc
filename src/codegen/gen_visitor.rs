@@ -94,6 +94,134 @@ struct FunctionalInterface {
 }
 
 impl Gen {
+    // ========== UNIFIED RESOLVER INTEGRATION - JavaC patterns ==========
+    
+    /// Get unified resolver for identifier resolution
+    fn get_unified_resolver(&mut self) -> Option<&mut crate::codegen::unified_resolver::UnifiedResolver> {
+        self.unified_resolver.as_mut()
+    }
+    
+    /// Get current class context for resolution
+    fn get_current_class_context(&self) -> Option<String> {
+        self.class_context.class.as_ref().map(|c| c.name.clone())
+    }
+    
+    /// Get current method context for resolution
+    fn get_current_method_context(&self) -> Option<String> {
+        if let (Some(class), Some(method)) = (&self.class_context.class, &self.method_context.method) {
+            Some(format!("{}#{}", class.name, method.name))
+        } else {
+            None
+        }
+    }
+    
+    /// Parse JVM descriptor to TypeEnum
+    fn parse_jvm_descriptor(&self, descriptor: &str) -> TypeEnum {
+        use crate::ast::{TypeEnum, PrimitiveType, ReferenceType};
+        match descriptor {
+            "I" => TypeEnum::Primitive(PrimitiveType::Int),
+            "J" => TypeEnum::Primitive(PrimitiveType::Long),
+            "F" => TypeEnum::Primitive(PrimitiveType::Float),
+            "D" => TypeEnum::Primitive(PrimitiveType::Double),
+            "Z" => TypeEnum::Primitive(PrimitiveType::Boolean),
+            "C" => TypeEnum::Primitive(PrimitiveType::Char),
+            "B" => TypeEnum::Primitive(PrimitiveType::Byte),
+            "S" => TypeEnum::Primitive(PrimitiveType::Short),
+            "V" => TypeEnum::Void,
+            desc if desc.starts_with('L') && desc.ends_with(';') => {
+                // Reference type: Ljava/lang/String; -> java.lang.String
+                let class_name = &desc[1..desc.len()-1].replace('/', ".");
+                TypeEnum::Reference(ReferenceType::Class(class_name.to_string()))
+            }
+            desc if desc.starts_with('[') => {
+                // Array type: [I -> int[], [[I -> int[][], [Ljava/lang/String; -> String[]
+                let dims = desc.chars().take_while(|&c| c == '[').count();
+                let element_desc = &desc[dims..];
+                let mut element_type = Box::new(match element_desc {
+                    "I" => crate::ast::TypeRef {
+                        name: "int".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "J" => crate::ast::TypeRef {
+                        name: "long".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "F" => crate::ast::TypeRef {
+                        name: "float".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "D" => crate::ast::TypeRef {
+                        name: "double".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "Z" => crate::ast::TypeRef {
+                        name: "boolean".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "C" => crate::ast::TypeRef {
+                        name: "char".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "B" => crate::ast::TypeRef {
+                        name: "byte".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    "S" => crate::ast::TypeRef {
+                        name: "short".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                    desc if desc.starts_with('L') && desc.ends_with(';') => {
+                        let class_name = &desc[1..desc.len()-1];
+                        crate::ast::TypeRef {
+                            name: class_name.to_string(),
+                            type_args: vec![],
+                            annotations: vec![],
+                            array_dims: 0,
+                            span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                        }
+                    },
+                    _ => crate::ast::TypeRef {
+                        name: "java/lang/Object".to_string(),
+                        type_args: vec![],
+                        annotations: vec![],
+                        array_dims: 0,
+                        span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+                    },
+                });
+                element_type.array_dims = dims;
+                TypeEnum::Reference(ReferenceType::Array(element_type))
+            }
+            _ => {
+                eprintln!("⚠️  Unknown JVM descriptor: {}, defaulting to Object", descriptor);
+                TypeEnum::Reference(ReferenceType::Class("java.lang.Object".to_string()))
+            }
+        }
+    }
+    
     // ========== TYPE CHECKING INFRASTRUCTURE - JavaC Attr.java patterns ==========
     // ARCHITECTURAL NOTE: Most type checking logic belongs in wash/attr.rs (semantic analysis).
     // Codegen should only handle primitive bytecode generation after all types are resolved.
@@ -593,10 +721,25 @@ impl Gen {
             Expr::Literal(lit) => Ok(self.get_literal_type(lit)),
             
             Expr::Identifier(ident) => {
-                // First try wash symbol environment (our primary symbol table)
+                // Use UnifiedResolver for improved identifier resolution
+                // Get context information first to avoid borrow conflicts
+                let class_context = self.get_current_class_context();
+                let method_context = self.get_current_method_context();
+                
+                if let Some(resolver) = self.get_unified_resolver() {
+                    if let Some(resolution) = resolver.resolve_identifier(&ident.name, class_context.as_deref(), method_context.as_deref()) {
+                        eprintln!("✅ UNIFIED RESOLVER: Resolved '{}' -> {} (context: {:?})", 
+                                 ident.name, resolution.resolved_type, resolution.resolution_context);
+                        
+                        // Convert resolved type to TypeEnum
+                        return Ok(self.parse_jvm_descriptor(&resolution.resolved_type));
+                    }
+                    
+                    eprintln!("⚠️  UNIFIED RESOLVER: Failed to resolve identifier '{}'", ident.name);
+                }
+                
+                // Fallback to old wash symbol environment for compatibility
                 if let Some(ref symbol_env) = self.wash_symbol_env {
-                    // Get context for symbol resolution from current Gen state
-                    // Try to get class name from symbol environment or fall back to hardcoded value
                     let class_context = symbol_env.classes.keys().next()
                         .unwrap_or(&"StackMapExpressions".to_string()).clone();
                     
@@ -604,30 +747,22 @@ impl Gen {
                         .map(|m| format!("{}#{}", class_context.replace('.', ""), m.name));
                     
                     if let Some(var_symbol) = symbol_env.resolve_identifier(&ident.name, method_context.as_deref(), &class_context) {
-                        eprintln!("✅ TYPE INFER: Resolved '{}' from wash symbol table: {}", 
+                        eprintln!("✅ FALLBACK: Resolved '{}' from wash symbol table: {}", 
                                  ident.name, var_symbol.var_type);
-                        // Convert var_type string to TypeEnum
                         return Ok(self.parse_type_string(&var_symbol.var_type));
-                    }
-                    
-                    // If not found with default class context, try searching in all available classes
-                    for (class_name, _) in &symbol_env.classes {
-                        if let Some(var_symbol) = symbol_env.resolve_identifier(&ident.name, method_context.as_deref(), class_name) {
-                            eprintln!("✅ TYPE INFER: Found '{}' in class '{}' from wash symbol table: {}", 
-                                     ident.name, class_name, var_symbol.var_type);
-                            return Ok(self.parse_type_string(&var_symbol.var_type));
-                        }
                     }
                 }
                 
-                // Fallback to old symbol table
+                // Second fallback to old symbol table (after UnifiedResolver and wash_symbol_env)
                 if let Some(symbol) = self.type_inference.types().symtab().lookup_symbol(&ident.name) {
+                    eprintln!("🔧 SYMTAB FALLBACK: Found '{}' in old symbol table: {}", 
+                             ident.name, self.type_to_string(&symbol.typ));
                     Ok(symbol.typ.clone())
                 } else {
                     // CRITICAL FIX: Use heuristics for common variable names instead of Object fallback
                     // This fixes array access type inference when variables aren't in symbol table
                     let heuristic_type = self.infer_type_from_variable_name(&ident.name);
-                    eprintln!("🔧 HEURISTIC: Variable '{}' not in symbol table, inferring type: {}", 
+                    eprintln!("🔧 HEURISTIC: Variable '{}' not in any symbol table, inferring type: {}", 
                         ident.name, self.type_to_string(&heuristic_type));
                     Ok(heuristic_type)
                 }
@@ -749,9 +884,29 @@ impl Gen {
         // Handle context-sensitive expressions directly to avoid losing context
         match expr {
             Expr::Identifier(ident) => {
-                // First try wash symbol environment with proper context
+                // First try UnifiedResolver with context from env
+                if let Some(resolver) = self.get_unified_resolver() {
+                    let class_context = env.clazz.as_ref().map(|c| c.name.as_str());
+                    let method_context = env.method.as_ref().map(|m| {
+                        format!("{}#{}", 
+                               env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass"), 
+                               m.name)
+                    });
+                    
+                    eprintln!("🔍 UNIFIED RESOLVER (with context): Resolving '{}' with method_context={:?}, class_context={:?}", 
+                             ident.name, method_context, class_context);
+                    
+                    if let Some(resolution) = resolver.resolve_identifier(&ident.name, class_context, method_context.as_deref()) {
+                        eprintln!("✅ UNIFIED RESOLVER: Resolved '{}' -> {} (context: {:?})", 
+                                 ident.name, resolution.resolved_type, resolution.resolution_context);
+                        return Ok(self.parse_jvm_descriptor(&resolution.resolved_type));
+                    }
+                    
+                    eprintln!("⚠️ UNIFIED RESOLVER: Could not resolve identifier '{}' in context", ident.name);
+                }
+                
+                // Fallback to old wash symbol environment
                 if let Some(ref symbol_env) = self.wash_symbol_env {
-                    // Get current method and class context from env
                     let method_context = env.method.as_ref().map(|m| {
                         format!("{}#{}", 
                                env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass"), 
@@ -759,19 +914,14 @@ impl Gen {
                     });
                     let class_context = env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass");
                     
-                    eprintln!("🔍 DEBUG: Resolving '{}' with method_context={:?}, class_context='{}'", 
-                             ident.name, method_context, class_context);
-                    
                     if let Some(var_symbol) = symbol_env.resolve_identifier(&ident.name, method_context.as_deref(), class_context) {
-                        eprintln!("✅ RESOLVED: Found '{}' in symbol table: {}", 
+                        eprintln!("✅ FALLBACK RESOLVED: Found '{}' in symbol table: {}", 
                                  ident.name, var_symbol.var_type);
                         return Ok(self.parse_type_string(&var_symbol.var_type));
                     }
-                    
-                    eprintln!("⚠️ RESOLVE_ID: Could not resolve identifier '{}' in context", ident.name);
                 }
                 
-                // Fallback to original logic
+                // Final fallback to original logic
                 self.infer_expression_type(expr)
             }
             Expr::Binary(binary) => {
@@ -2078,18 +2228,50 @@ impl Gen {
         let class_context = env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass");
         let method_context = env.method.as_ref().map(|m| format!("{}#{}", class_context, m.name));
         
-        // Use wash/SymbolEnvironment for symbol resolution
-        eprintln!("🔍 DEBUG: Attempting to resolve identifier '{}' with method_context={:?}, class_context='{}'", 
+        // First try UnifiedResolver for improved resolution
+        eprintln!("🔍 UNIFIED RESOLVER: Attempting to resolve identifier '{}' with method_context={:?}, class_context='{}'", 
                   tree.name, method_context, class_context);
-        let resolved_symbol = if let Some(ref symbol_env) = self.wash_symbol_env {
-            let result = symbol_env.resolve_identifier(&tree.name, method_context.as_deref(), class_context).cloned();
-            if result.is_none() {
-                eprintln!("🔍 DEBUG: Failed to resolve '{}', checking available symbols...", tree.name);
-                eprintln!("🔍 DEBUG: Available fields: {:?}", symbol_env.fields.keys().collect::<Vec<_>>());
+        
+        let resolved_symbol = if let Some(resolver) = self.get_unified_resolver() {
+            let class_ctx = env.clazz.as_ref().map(|c| c.name.as_str());
+            if let Some(resolution) = resolver.resolve_identifier(&tree.name, class_ctx, method_context.as_deref()) {
+                eprintln!("✅ UNIFIED RESOLVER: Resolved '{}' -> {} (context: {:?})", 
+                         tree.name, resolution.resolved_type, resolution.resolution_context);
+                
+                // Create compatible VariableSymbol for existing code
+                Some(crate::codegen::enter::VariableSymbol {
+                    name: tree.name.clone(),
+                    var_type: resolution.resolved_type.clone(),
+                    kind: match resolution.resolution_context {
+                        crate::codegen::gen::ResolutionContext::Parameter => 
+                            crate::codegen::enter::SymbolKind::Variable,
+                        crate::codegen::gen::ResolutionContext::LocalVariable => 
+                            crate::codegen::enter::SymbolKind::Variable,
+                        _ => crate::codegen::enter::SymbolKind::Field
+                    },
+                    owner: "current".to_string(),
+                    local_slot: Some(resolution.scope_depth as usize), // Use scope depth as slot approximation
+                    is_static: false,
+                    is_parameter: matches!(resolution.resolution_context, crate::codegen::gen::ResolutionContext::Parameter),
+                    modifiers: vec![],
+                })
+            } else {
+                eprintln!("⚠️ UNIFIED RESOLVER: Failed to resolve '{}'", tree.name);
+                None
             }
-            result
         } else {
-            None
+            // Fallback to old wash/SymbolEnvironment for compatibility
+            eprintln!("🔍 DEBUG: Using fallback SymbolEnvironment for identifier '{}'", tree.name);
+            if let Some(ref symbol_env) = self.wash_symbol_env {
+                let result = symbol_env.resolve_identifier(&tree.name, method_context.as_deref(), class_context).cloned();
+                if result.is_none() {
+                    eprintln!("🔍 DEBUG: Failed to resolve '{}', checking available symbols...", tree.name);
+                    eprintln!("🔍 DEBUG: Available fields: {:?}", symbol_env.fields.keys().collect::<Vec<_>>());
+                }
+                result
+            } else {
+                None
+            }
         };
         
         if let Some(var_symbol) = resolved_symbol {
@@ -2288,6 +2470,19 @@ impl Gen {
                 });
             }
         }
+        
+        // Try UnifiedResolver first for field resolution
+        let field_resolution = if let Some(resolver) = self.get_unified_resolver() {
+            let class_ctx = env.clazz.as_ref().map(|c| c.name.as_str());
+            let method_ctx = env.method.as_ref().map(|m| {
+                format!("{}#{}", 
+                       env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass"), 
+                       m.name)
+            });
+            resolver.resolve_identifier(&tree.name, class_ctx, method_ctx.as_deref())
+        } else {
+            None
+        };
         
         // Extract symbol and class info before borrowing
         let symbol_opt = self.type_inference.types().symtab().lookup_symbol(&tree.name).cloned();
@@ -5492,6 +5687,15 @@ impl Gen {
             let var_type_str = self.type_to_string(&type_enum);
             let method_context = env.method.as_ref().map(|m| m.name.as_str()).unwrap_or("unknown");
             
+            // Register variable using UnifiedResolver first, then fallback to wash_symbol_env
+            if let Some(resolver) = self.get_unified_resolver() {
+                // Update the underlying symbol environment through UnifiedResolver
+                let symbol_env = resolver.get_symbol_environment();
+                // Note: We can't directly modify through the resolver interface, 
+                // so we'll still use the wash_symbol_env for now
+                eprintln!("🔧 UNIFIED REG: UnifiedResolver available for variable '{}'", var.name);
+            }
+            
             if let Some(ref mut symbol_env) = self.wash_symbol_env {
                 eprintln!("🔧 WASH REG: Registering variable '{}' to wash environment in method '{}'", 
                     var.name, method_context);
@@ -6518,6 +6722,9 @@ impl Gen {
             debug_code: env.debug_code,
             exit: None,
             cont: None,
+            symbol_env: env.symbol_env.clone(),
+            scope_context: env.scope_context.clone(),
+            type_cache: env.type_cache.clone(),
             is_switch: false,
         };
         
@@ -6733,6 +6940,9 @@ impl Gen {
             debug_code: env.debug_code,
             exit: env.exit.clone(),
             cont: env.cont.clone(),
+            symbol_env: env.symbol_env.clone(),
+            scope_context: env.scope_context.clone(),
+            type_cache: env.type_cache.clone(),
             is_switch: true,
         };
         
