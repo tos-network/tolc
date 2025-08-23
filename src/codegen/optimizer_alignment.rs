@@ -1,15 +1,15 @@
-//! JavaC Optimizer Alignment Verification Report
+//! Optimizer Alignment Verification Report
 //!
 //! This module provides comprehensive verification that tolc's optimizer architecture
-//! is 100% aligned with Oracle's javac optimizer implementation.
+//! is properly aligned with standard compiler optimization patterns.
 
 use crate::common::error::Result;
 
-/// JavaC Optimizer Alignment Verifier
-pub struct JavaCOptimizerAlignment;
+/// Optimizer Alignment Verifier
+pub struct OptimizerAlignment;
 
-impl JavaCOptimizerAlignment {
-    /// Verify complete JavaC optimizer alignment
+impl OptimizerAlignment {
+    /// Verify complete optimizer alignment
     pub fn verify_complete_alignment() -> Result<OptimizerAlignmentReport> {
         let mut report = OptimizerAlignmentReport::new();
         
@@ -118,7 +118,7 @@ tolc's optimizer has been completely restructured to match Oracle javac's exact 
 ## Architecture Alignment
 
 ### 1. ConstFold.java (100% Aligned)
-- **File**: `src/codegen/const_fold_javac.rs`
+- **File**: `src/codegen/const_fold.rs`
 - **Purpose**: Compile-time constant folding and evaluation
 - **Features**: All bytecode opcodes supported, exception handling, type coercion
 - **Alignment**: Identical to javac ConstFold.java methods and behavior

@@ -1,17 +1,17 @@
-//! Constant folding system - 100% JavaC ConstFold.java aligned
+//! Constant folding system
 //!
 //! This module implements the exact same constant folding algorithms as Oracle's
-//! javac ConstFold.java, providing compile-time constant evaluation and optimization.
+//! providing compile-time constant evaluation and optimization.
 
 use crate::ast::{Literal, BinaryOp, UnaryOp, TypeEnum, PrimitiveType};
 use super::symtab::Symtab;
 use super::opcodes;
 use std::collections::HashMap;
 
-/// Constant folding system - 100% JavaC ConstFold equivalent
+/// Constant folding system equivalent
 /// Handles compile-time constant evaluation and type coercion
-/// This class is marked strictfp as mandated by JLS 15.4 (like JavaC)
-pub struct ConstFoldJavaC {
+/// This class is marked strictfp as mandated by JLS 15.4
+pub struct ConstFold {
     /// Reference to symbol table
     symtab: Symtab,
     
@@ -19,12 +19,12 @@ pub struct ConstFoldJavaC {
     constant_cache: HashMap<String, Literal>,
 }
 
-impl ConstFoldJavaC {
-    /// Create new ConstFold instance - JavaC constructor equivalent
+impl ConstFold {
+    /// Create new ConstFold instance
     pub fn new(symtab: Symtab) -> Self {
         let mut cache = HashMap::new();
         
-        // JavaC pre-cached constants
+        // Pre-cached constants
         cache.insert("minusOne".to_string(), Literal::Integer(-1));
         cache.insert("zero".to_string(), Literal::Integer(0));
         cache.insert("one".to_string(), Literal::Integer(1));
@@ -35,7 +35,7 @@ impl ConstFoldJavaC {
         }
     }
     
-    /// Fold binary or unary operation - JavaC fold equivalent
+    /// Fold binary or unary operation
     /// Return None if fold failed due to an arithmetic exception
     /// @param opcode: The operation's opcode instruction (usually a byte code)
     /// @param operands: The operation's operands (1 or 2 values)
@@ -392,7 +392,7 @@ impl ConstFoldJavaC {
 }
 
 /// Integration point for JavaC-style constant folding in tolc
-impl ConstFoldJavaC {
+impl ConstFold {
     /// Apply constant folding to binary expression - JavaC integration point
     pub fn fold_binary_expr(&self, op: &BinaryOp, left: &Literal, right: &Literal) -> Option<Literal> {
         // Handle short-circuit logical operators first (JavaC pattern)

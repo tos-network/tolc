@@ -1,4 +1,4 @@
-//! Simplified JavaC-style visitor methods for Gen - avoiding borrowing conflicts
+//! Simplified visitor methods for Gen - avoiding borrowing conflicts
 //!
 //! This module provides simplified implementations of all visitor methods
 //! to resolve borrowing issues. Full implementations will be added later.
@@ -6,13 +6,13 @@
 use crate::ast::*;
 use crate::common::error::Result;
 use super::gen::{Gen, GenContext};
-use super::items_javac::{Item as JavacItem, CondItem, Items, typecodes};
+use super::items::{Item as BytecodeItem, CondItem, Items, typecodes};
 use super::opcodes;
 use crate::wash::attr::ResolvedType;
 
 impl Gen {
-    /// Visit literal expression - JavaC Gen.visitLiteral equivalent
-    pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<JavacItem> {
+    /// Visit literal expression
+    pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<BytecodeItem> {
         // Handle constants that need constant pool first (to avoid borrowing conflicts)
         let pool_data = match &tree.value {
             Literal::String(s) => {
@@ -188,7 +188,7 @@ impl Gen {
         }
         
         // Return appropriate item type based on literal type
-        use super::items_javac::{Item, typecodes};
+        use super::items::{Item, typecodes};
         Ok(Item::Immediate { 
             typecode: match &tree.value {
                 Literal::Integer(_) => typecodes::INT,
@@ -205,12 +205,12 @@ impl Gen {
     }
     
     /// Visit identifier expression - simplified version
-    /// Visit identifier expression - JavaC Gen.visitIdent equivalent  
-    /// Uses symbol-based resolution following JavaC's approach
-    pub fn visit_ident(&mut self, tree: &IdentifierExpr, env: &GenContext) -> Result<JavacItem> {
-        eprintln!("🔍 GEN: visit_ident for '{}' (JavaC-style symbol resolution)", tree.name);
+    /// Visit identifier expression
+    /// Uses symbol-based resolution
+    pub fn visit_ident(&mut self, tree: &IdentifierExpr, env: &GenContext) -> Result<BytecodeItem> {
+        eprintln!("🔍 GEN: visit_ident for '{}' (symbol-based resolution)", tree.name);
         
-        // Handle special identifiers following JavaC pattern
+        // Handle special identifiers
         if tree.name == "this" {
             return self.with_items(|items| {
                 let this_item = items.make_this_item();
@@ -227,7 +227,7 @@ impl Gen {
         let method_context = env.method.as_ref().map(|m| m.name.as_str());
         let class_context = env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass");
         
-        // Use wash/SymbolEnvironment for JavaC-style symbol resolution
+        // Use wash/SymbolEnvironment for symbol resolution
         let resolved_symbol = if let Some(ref symbol_env) = self.wash_symbol_env {
             symbol_env.resolve_identifier(&tree.name, method_context, class_context).cloned()
         } else {
@@ -332,7 +332,7 @@ impl Gen {
     }
     
     /// Visit field access expression - simplified version
-    pub fn visit_select(&mut self, tree: &FieldAccessExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_select(&mut self, tree: &FieldAccessExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Handle special cases like System.out
         if let Some(ref target) = tree.target {
             if let Expr::Identifier(id) = target.as_ref() {
@@ -352,7 +352,7 @@ impl Gen {
                         Ok(())
                     })?;
                     
-                    return Ok(JavacItem::Stack { typecode: typecodes::OBJECT });
+                    return Ok(BytecodeItem::Stack { typecode: typecodes::OBJECT });
                 }
             }
             
@@ -405,7 +405,7 @@ impl Gen {
                     };
                     items.code.state.push(field_type);
                     
-                    Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
+                    Ok(BytecodeItem::Stack { typecode: typecodes::OBJECT })
                 });
             }
             
@@ -416,7 +416,7 @@ impl Gen {
                 return self.with_items(|items| {
                     // Create a field item for the 'value' field
                     let current_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("java/lang/Object".to_string());
-                    let field_item = JavacItem::Member {
+                    let field_item = BytecodeItem::Member {
                         typecode: typecodes::OBJECT,
                         member_name: "value".to_string(),
                         class_name: current_class,
@@ -455,7 +455,7 @@ impl Gen {
     }
     
     /// Visit method call expression with generic type inference
-    pub fn visit_apply(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_apply(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Enhanced JavaC: visitApply method with wash type integration for generics
         eprintln!("DEBUG: Method call '{}' with {} arguments", tree.name, tree.arguments.len());
         
@@ -498,7 +498,7 @@ impl Gen {
         tree: &MethodCallExpr, 
         env: &GenContext, 
         method_type: &crate::wash::attr::ResolvedType
-    ) -> Result<JavacItem> {
+    ) -> Result<BytecodeItem> {
         eprintln!("DEBUG: Generating generic method call with wash type inference");
         
         // Generate arguments with type awareness (moved outside to avoid borrowing issues)
@@ -633,7 +633,7 @@ impl Gen {
     }
     
     /// Generate static method call (invokestatic)
-    fn gen_static_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
+    fn gen_static_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<BytecodeItem> {
         // JavaC pattern: generate arguments first and collect their types
         let mut arg_types = Vec::new();
         for arg in &tree.arguments {
@@ -667,7 +667,7 @@ impl Gen {
     }
     
     /// Generate constructor call (invokespecial)
-    fn gen_constructor_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
+    fn gen_constructor_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<BytecodeItem> {
         // JavaC pattern: object reference already on stack from NEW instruction
         
         // Generate arguments
@@ -688,7 +688,7 @@ impl Gen {
     }
     
     /// Generate super method call (invokespecial)
-    fn gen_super_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
+    fn gen_super_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Generate 'this' reference
         self.with_items(|items| {
             items.code.emitop(super::opcodes::ALOAD_0); // Load 'this'
@@ -721,7 +721,7 @@ impl Gen {
     }
     
     /// Generate instance method call (invokevirtual or invokeinterface)
-    fn gen_instance_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<JavacItem> {
+    fn gen_instance_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Check if this is an interface method call first (before any mutable borrows)
         let is_interface = self.is_interface_method_call(tree);
         
@@ -964,7 +964,7 @@ impl Gen {
     }
     
     /// Visit new expression - JavaC Gen.visitNewClass equivalent
-    pub fn visit_new(&mut self, tree: &NewExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_new(&mut self, tree: &NewExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Check if this is array creation (has array dimensions)
         if tree.target_type.array_dims > 0 {
             return self.visit_new_array(tree, env);
@@ -1018,12 +1018,12 @@ impl Gen {
             items.code.state.pop(arg_count as u16);
             
             // The result is the object reference (from the first 'dup')
-            Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
+            Ok(BytecodeItem::Stack { typecode: super::items::typecodes::OBJECT })
         })
     }
     
     /// Handle array creation using newarray/anewarray/multianewarray
-    fn visit_new_array(&mut self, tree: &NewExpr, env: &GenContext) -> Result<JavacItem> {
+    fn visit_new_array(&mut self, tree: &NewExpr, env: &GenContext) -> Result<BytecodeItem> {
         let element_type = &tree.target_type.name;
         let dimensions = tree.target_type.array_dims;
         
@@ -1080,7 +1080,7 @@ impl Gen {
                 items.code.state.push(super::code::Type::Object(array_descriptor));
             }
             
-            Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
+            Ok(BytecodeItem::Stack { typecode: super::items::typecodes::OBJECT })
         })
     }
     
@@ -1120,7 +1120,7 @@ impl Gen {
     }
     
     /// Visit binary expression - JavaC-aligned implementation
-    pub fn visit_binary(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_binary(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<BytecodeItem> {
         use crate::ast::BinaryOp;
         
         // Handle short-circuit operators first (they need special logic)
@@ -1388,7 +1388,7 @@ impl Gen {
     }
     
     /// Visit LogicalAnd expression with proper short circuit evaluation (JavaC aligned)
-    fn visit_logical_and(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<JavacItem> {
+    fn visit_logical_and(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<BytecodeItem> {
         // JavaC pattern for && : if left is false, jump to false result
         let _left_item = self.visit_expr(&tree.left, env)?;
         
@@ -1427,7 +1427,7 @@ impl Gen {
     }
     
     /// Visit LogicalOr expression with proper short circuit evaluation (JavaC aligned)
-    fn visit_logical_or(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<JavacItem> {
+    fn visit_logical_or(&mut self, tree: &BinaryExpr, env: &GenContext) -> Result<BytecodeItem> {
         // JavaC pattern for || : if left is true, jump to true result
         let _left_item = self.visit_expr(&tree.left, env)?;
         
@@ -1473,9 +1473,9 @@ impl Gen {
     }
     
     /// Infer binary operation result type based on operands and operator
-    fn infer_binary_result_type(&self, left_item: &JavacItem, right_item: &JavacItem, operator: &BinaryOp) -> TypeEnum {
+    fn infer_binary_result_type(&self, left_item: &BytecodeItem, right_item: &BytecodeItem, operator: &BinaryOp) -> TypeEnum {
         use crate::ast::BinaryOp;
-        use super::items_javac::typecodes;
+        use super::items::typecodes;
         
         // Get type codes from items
         let left_type = left_item.typecode();
@@ -1505,7 +1505,7 @@ impl Gen {
     }
     
     /// Visit unary expression - JavaC-aligned implementation
-    pub fn visit_unary(&mut self, tree: &UnaryExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_unary(&mut self, tree: &UnaryExpr, env: &GenContext) -> Result<BytecodeItem> {
         use crate::ast::UnaryOp;
         
         // Generate operand
@@ -1591,9 +1591,9 @@ impl Gen {
     }
     
     /// Infer unary operation result type based on operand and operator
-    fn infer_unary_result_type(&self, operand_item: &JavacItem, operator: &UnaryOp) -> TypeEnum {
+    fn infer_unary_result_type(&self, operand_item: &BytecodeItem, operator: &UnaryOp) -> TypeEnum {
         use crate::ast::UnaryOp;
-        use super::items_javac::typecodes;
+        use super::items::typecodes;
         
         let operand_type = operand_item.typecode();
         
@@ -1613,7 +1613,7 @@ impl Gen {
     }
     
     /// Visit assignment expression - JavaC-aligned version following visitAssign pattern
-    pub fn visit_assign_javac(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_assign_javac(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
         self.visit_assign_javac_internal(tree, env, true)
     }
     
@@ -1624,8 +1624,8 @@ impl Gen {
     }
     
     /// Internal JavaC assignment implementation
-    fn visit_assign_javac_internal(&mut self, tree: &AssignmentExpr, env: &GenContext, need_result: bool) -> Result<JavacItem> {
-        use crate::codegen::items_javac::{Item, typecodes};
+    fn visit_assign_javac_internal(&mut self, tree: &AssignmentExpr, env: &GenContext, need_result: bool) -> Result<BytecodeItem> {
+        use crate::codegen::items::{Item, typecodes};
         
         // JavaC pattern: Item l = genExpr(tree.lhs, tree.lhs.type);
         //                genExpr(tree.rhs, tree.lhs.type).load();
@@ -1653,14 +1653,14 @@ impl Gen {
             self.with_items(|items| {
                 // For statement context, store directly without stashing (no dup needed)
                 lhs_item.store(items)?;
-                Ok(JavacItem::Stack { typecode: typecodes::VOID })
+                Ok(BytecodeItem::Stack { typecode: typecodes::VOID })
             })
         }
     }
     
     /// Generate left-hand side item for assignment (JavaC genExpr equivalent for lhs)
-    fn generate_lhs_item_javac(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<crate::codegen::items_javac::Item> {
-        use crate::codegen::items_javac::{Item, typecodes};
+    fn generate_lhs_item_javac(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<crate::codegen::items::Item> {
+        use crate::codegen::items::{Item, typecodes};
         
         match tree.target.as_ref() {
             Expr::Identifier(ident) => {
@@ -1863,7 +1863,7 @@ impl Gen {
     }
     
     /// Visit assignment expression - simplified version (original)
-    pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
         // For critical assignments involving interface method calls, use JavaC-aligned approach
         if self.should_use_javac_assignment(tree) {
             eprintln!("🚀 DEBUG: Using JavaC-style assignment for complex expression");
@@ -1980,7 +1980,7 @@ impl Gen {
     }
     
     /// Visit type cast expression - simplified version
-    pub fn visit_type_cast(&mut self, tree: &CastExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_type_cast(&mut self, tree: &CastExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Generate expression to cast
         let _expr_item = self.visit_expr(&tree.expr, env)?;
         
@@ -2021,7 +2021,7 @@ impl Gen {
     }
     
     /// Visit array access expression - JavaC-aligned implementation
-    pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Generate array and index expressions
         let _array_item = self.visit_expr(&tree.array, env)?;
         let _index_item = self.visit_expr(&tree.index, env)?;
@@ -2153,7 +2153,7 @@ impl Gen {
     }
     
     /// Visit array initializer (e.g., {1, 2, 3, 4, 5})
-    pub fn visit_array_initializer(&mut self, values: &[Expr], env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_array_initializer(&mut self, values: &[Expr], env: &GenContext) -> Result<BytecodeItem> {
         // For array initializers like {1, 2, 3}, we need to:
         // 1. Create the array with the correct size
         // 2. Store each value at the appropriate index
@@ -2315,7 +2315,7 @@ impl Gen {
         
         // Return the array reference (still on stack)
         self.with_items(|items| {
-            Ok(JavacItem::Stack { typecode: super::items_javac::typecodes::OBJECT })
+            Ok(BytecodeItem::Stack { typecode: super::items::typecodes::OBJECT })
         })
     }
     
@@ -2439,7 +2439,7 @@ impl Gen {
     /// Generate condition item from expression (JavaC: genCond)
     fn gen_cond(&mut self, expr: &Expr, env: &GenContext) -> Result<CondItem> {
         use crate::ast::Expr;
-        use super::items_javac::CondItem;
+        use super::items::CondItem;
         
         match expr {
             // Binary operations - direct conditional generation
@@ -4021,7 +4021,7 @@ impl Gen {
     
     /// Convert typecode to TypeEnum for type inference
     fn typecode_to_type_enum(&self, typecode: u8) -> TypeEnum {
-        use super::items_javac::typecodes;
+        use super::items::typecodes;
         match typecode {
             typecodes::VOID => TypeEnum::Void,
             typecodes::BYTE => TypeEnum::Primitive(PrimitiveType::Byte),
@@ -4073,7 +4073,7 @@ impl Gen {
     }
     
     /// Visit lambda expression - Generate invokedynamic instruction
-    pub fn visit_lambda(&mut self, lambda: &LambdaExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_lambda(&mut self, lambda: &LambdaExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Generate unique lambda method name
         let lambda_method_name = format!("lambda$main${}", self.lambda_counter);
         self.lambda_counter += 1;
@@ -4148,11 +4148,11 @@ impl Gen {
         self.generate_lambda_method(lambda, &lambda_method_name, env)?;
         
         // Return functional interface type
-        Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
+        Ok(BytecodeItem::Stack { typecode: typecodes::OBJECT })
     }
     
     /// Visit method reference - Generate method handle
-    pub fn visit_method_reference(&mut self, method_ref: &MethodReferenceExpr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_method_reference(&mut self, method_ref: &MethodReferenceExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Placeholder implementation for method reference
         // Full implementation will need:
         // 1. Method handle creation for different reference types
@@ -4165,7 +4165,7 @@ impl Gen {
             Ok(())
         })?;
         
-        Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
+        Ok(BytecodeItem::Stack { typecode: typecodes::OBJECT })
     }
     
     /// Generate synthetic method for lambda implementation

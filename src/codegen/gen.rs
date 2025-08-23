@@ -1,7 +1,7 @@
-//! Java bytecode generation - corresponds to javac's Gen.java
+//! Java bytecode generation - main code generator
 //! 
 //! This is the main entry point for converting AST to bytecode.
-//! Following javac's architecture, this module focuses on bytecode generation
+//! Following standard compiler architecture, this module focuses on bytecode generation
 //! without complex optimizations (those are handled in Lower stage).
 
 use crate::ast::*;
@@ -11,7 +11,7 @@ use crate::Config;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
-use super::items_javac::{Items, Item as JavacItem, CondItem};
+use super::items::{Items, Item as BytecodeItem, CondItem};
 use super::method_context::MethodContext;
 use super::symtab::Symtab;
 use super::type_inference::TypeInference;
@@ -22,22 +22,21 @@ use super::attribute;
 use super::field;
 use super::method;
 
-/// Main bytecode generator - corresponds to javac's Gen class
-/// 100% aligned with javac Gen.java architecture
+/// Main bytecode generator - primary code generation interface
 pub struct Gen {
-    /// Code buffer - JavaC equivalent (recreated per method)
+    /// Code buffer (recreated per method)
     code: Option<Code>,
     
-    /// Items system - JavaC equivalent (tied to Code)  
+    /// Items system (tied to Code)  
     /// Note: Items requires both code and pool, managed through lifetime
     
-    /// Constant pool - JavaC Pool equivalent
+    /// Constant pool
     pool: ConstantPool,
     
-    /// Class file being generated - JavaC ClassFile equivalent
+    /// Class file being generated
     class_file: ClassFile,
     
-    /// Generation environment - JavaC Env<GenContext> equivalent
+    /// Generation environment
     env: Option<GenContext>,
     
     /// Configuration for code generation
@@ -49,7 +48,7 @@ pub struct Gen {
     /// Class-level context (transitional) 
     pub class_context: ClassContext,
     
-    /// Type inference system - JavaC Types equivalent
+    /// Type inference system
     pub type_inference: TypeInference,
     
     /// Optimization manager - coordinates all optimization passes
@@ -73,7 +72,7 @@ pub struct Gen {
     /// Generic signatures stored during TransTypes phase
     generic_signatures: Option<std::collections::HashMap<String, String>>,
     
-    /// Wash symbol environment for JavaC-style identifier resolution
+    /// Wash symbol environment for identifier resolution
     pub wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>,
     
     /// Type information from wash/attr phase for type-aware code generation
@@ -97,7 +96,7 @@ pub struct Gen {
 }
 
 
-// Items system is now implemented in items_javac.rs with 100% JavaC alignment
+// Items system is now implemented in items.rs
 // Direct Code buffer manipulation without Rc<RefCell> complexity
 
 /// Optimized loop context for efficient jump resolution
@@ -167,7 +166,7 @@ pub struct ScopedLocalVar {
     pub length: usize,
 }
 
-/// JavaC GenContext equivalent - unified environment
+/// GenContext - unified environment
 #[derive(Debug, Clone)]
 pub struct GenContext {
     /// Current method being compiled
@@ -182,10 +181,10 @@ pub struct GenContext {
     /// Debug information enabled
     pub debug_code: bool,
     
-    /// Chain for all unresolved jumps that exit the current environment (JavaC pattern)
+    /// Chain for all unresolved jumps that exit the current environment
     pub exit: Option<Box<crate::codegen::chain::Chain>>,
     
-    /// Chain for all unresolved jumps that continue in the current environment (JavaC pattern)
+    /// Chain for all unresolved jumps that continue in the current environment
     pub cont: Option<Box<crate::codegen::chain::Chain>>,
     
     /// Is this a switch statement?
@@ -567,7 +566,7 @@ impl Gen {
     }
     
     /// Generate expression - delegates to visitor methods with optimization integration
-    pub fn gen_expr(&mut self, expr: &Expr) -> Result<JavacItem> {
+    pub fn gen_expr(&mut self, expr: &Expr) -> Result<BytecodeItem> {
         let env = self.env.clone().unwrap_or_else(|| {
             eprintln!("DEBUG: gen_expr: self.env is None, creating default env");
             GenContext {
@@ -645,7 +644,7 @@ impl Gen {
                 // Restored constant folding using optimization manager"
                 // if let (Expr::Literal(left_lit), Expr::Literal(right_lit)) = (&*bin.left, &*bin.right) {
                 //     // Use JavaC-aligned constant folding  
-                //     let cfolder = super::const_fold_javac::ConstFoldJavaC::new(
+                //     let cfolder = super::const_fold::ConstFold::new(
                 //         self.type_inference.types().symtab().clone()
                 //     );
                 //     
@@ -1108,8 +1107,8 @@ impl Gen {
     // ========== JavaC Gen.java Feature Alignment Verification ==========
     
     /// Verify 100% Gen.java functionality alignment
-    pub fn verify_javac_alignment(&self) -> Result<()> {
-        // Check that all core JavaC Gen.java methods are implemented
+    pub fn verify_compiler_alignment(&self) -> Result<()> {
+        // Check that all core compiler methods are implemented
         
         // Core generation methods (gen_def family)
         self.verify_gen_def_alignment()?;
@@ -1239,7 +1238,7 @@ impl Gen {
     }
     
     /// Get alignment percentage (for monitoring)
-    pub fn get_javac_alignment_percentage(&self) -> f64 {
+    pub fn get_compiler_alignment_percentage(&self) -> f64 {
         // Based on verification above, we have achieved 100% alignment
         // across all major Gen.java subsystems:
         // - genDef methods: 100%
@@ -2751,7 +2750,7 @@ impl Gen {
     
     /// Visit expression - unified entry point for all expressions
     /// This dispatches to the appropriate visitor method in gen_visitor.rs
-    pub fn visit_expr(&mut self, expr: &Expr, env: &GenContext) -> Result<JavacItem> {
+    pub fn visit_expr(&mut self, expr: &Expr, env: &GenContext) -> Result<BytecodeItem> {
         match expr {
             Expr::Literal(literal) => self.visit_literal(literal, env),
             Expr::Identifier(ident) => self.visit_ident(ident, env),

@@ -17,18 +17,18 @@ pub mod gen_visitor;  // JavaC-style visitor methods (100% Gen.java aligned)
 // Backed up: pub mod gen_items;    // Legacy item system management
 // Backed up: pub mod items;        // New JavaC Items system (100% aligned)
 // Backed up: pub mod items_simple; // Simplified Items system for Phase 2
-pub mod items_javac;  // 100% JavaC-aligned Items system with direct Code manipulation
+pub mod items;  // Bytecode Items system with direct Code manipulation
 pub mod method_context; // Method-level context management
 pub mod optimization_manager; // Unified optimization management
 pub mod symtab;      // JavaC-aligned symbol table
 pub mod types;       // JavaC-aligned type system  
 pub mod type_inference; // Type inference and checking
 
-// JavaC-aligned optimizer architecture
-pub mod const_fold_javac; // 100% JavaC ConstFold.java aligned
-pub mod attr_optimizer;   // JavaC Attr.java phase optimizations
-pub mod lower_optimizer;  // JavaC Lower.java phase optimizations
-pub mod javac_optimizer_alignment; // JavaC optimizer alignment verification
+// Optimizer architecture
+pub mod const_fold; // Constant folding operations
+pub mod attr_optimizer;   // Attribute phase optimizations
+pub mod lower_optimizer;  // Lower phase optimizations
+pub mod optimizer_alignment; // Optimizer alignment verification
 
 // Backed up: pub mod advanced_optimizer;
 pub mod annotation;  // Needed by class_writer.rs  

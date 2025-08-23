@@ -1,7 +1,7 @@
-//! Semantic analysis pipeline - JavaC-aligned compilation phases
+//! Semantic analysis pipeline - standard compilation phases
 //! 
-//! This module implements the semantic analysis phases that JavaC uses between
-//! parsing and code generation. Each phase corresponds to a JavaC compilation stage:
+//! This module implements the semantic analysis phases used between
+//! parsing and code generation. Each phase corresponds to a compilation stage:
 //! 
 //! - Enter: Symbol table construction and import resolution
 //! - Attr: Type checking and method resolution 
@@ -19,7 +19,7 @@ use crate::ast::Ast;
 use crate::common::error::Result;
 
 /// Main semantic analysis pipeline that orchestrates all phases
-/// Follows JavaC's compilation flow: Enter → Attr → Flow → TransTypes → Lower
+/// Follows standard compilation flow: Enter → Attr → Flow → TransTypes → Lower
 pub struct SemanticAnalyzer {
     pub enter: enter::Enter,
     pub attr: attr::Attr,

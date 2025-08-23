@@ -4,7 +4,7 @@
 //! 
 //! ## Architecture
 //! 
-//! The compiler follows the JavaC compilation pipeline:
+//! The compiler follows a standard compilation pipeline:
 //! 
 //! - **parser**: Lexical analysis and parsing of Java source into AST
 //! - **wash**: Semantic analysis pipeline (Enter → Attr → Flow → TransTypes → Lower)
@@ -68,7 +68,7 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
     Ok(bytecode)
 }
 
-/// Complete Java compilation pipeline following JavaC's approach
+/// Complete Java compilation pipeline following standard approach
 /// 
 /// This is the main entry point that orchestrates the entire compilation process:
 /// Java Source → Parser → AST → Wash Pipeline → Code Generation → .class files

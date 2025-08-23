@@ -1,19 +1,19 @@
-//! Lower phase optimizer - JavaC Lower.java aligned
+//! Lower phase optimizer
 //!
 //! This module implements optimizations that occur during the lowering phase,
-//! following the exact same patterns as Oracle's javac Lower.java.
+//! following standard code lowering patterns.
 
 use crate::ast::*;
 use crate::common::error::Result;
-use super::const_fold_javac::ConstFoldJavaC;
+use super::const_fold::ConstFold;
 use super::symtab::Symtab;
 use super::types::Types;
 
-/// Lower phase optimizer - JavaC Lower equivalent
+/// Lower phase optimizer
 /// Handles code lowering and transformations before bytecode generation
 pub struct LowerOptimizer {
     /// Constant folding system
-    cfolder: ConstFoldJavaC,
+    cfolder: ConstFold,
     
     /// Types system
     types: Types,
@@ -26,9 +26,9 @@ pub struct LowerOptimizer {
 }
 
 impl LowerOptimizer {
-    /// Create new lower optimizer - JavaC Lower constructor equivalent
+    /// Create new lower optimizer
     pub fn new(symtab: Symtab, types: Types) -> Self {
-        let cfolder = ConstFoldJavaC::new(symtab.clone());
+        let cfolder = ConstFold::new(symtab.clone());
         
         Self {
             cfolder,

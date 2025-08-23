@@ -1,19 +1,19 @@
-//! Attribute phase optimizer - JavaC Attr.java aligned
+//! Attribute phase optimizer
 //!
 //! This module implements optimizations that occur during the attribute analysis phase,
-//! following the exact same patterns as Oracle's javac Attr.java.
+//! following standard attribute analysis patterns.
 
 use crate::ast::*;
 use crate::common::error::Result;
-use super::const_fold_javac::ConstFoldJavaC;
+use super::const_fold::ConstFold;
 use super::symtab::Symtab;
 use super::types::Types;
 
-/// Attribute phase optimizer - JavaC Attr equivalent
+/// Attribute phase optimizer
 /// Handles type attribution and early optimizations during semantic analysis
 pub struct AttrOptimizer {
     /// Constant folding system
-    cfolder: ConstFoldJavaC,
+    cfolder: ConstFold,
     
     /// Types system
     types: Types,
@@ -23,9 +23,9 @@ pub struct AttrOptimizer {
 }
 
 impl AttrOptimizer {
-    /// Create new attribute optimizer - JavaC Attr constructor equivalent
+    /// Create new attribute optimizer
     pub fn new(symtab: Symtab, types: Types) -> Self {
-        let cfolder = ConstFoldJavaC::new(symtab.clone());
+        let cfolder = ConstFold::new(symtab.clone());
         
         Self {
             cfolder,
