@@ -772,6 +772,93 @@ impl<'a> Items<'a> {
         let name_and_type_index = self.pool.add_name_and_type(name, descriptor);
         self.pool.add_invoke_dynamic(bootstrap_method_attr_index, name_and_type_index)
     }
+    
+    /// Make static field item using resolved type - JavaC makeStaticItem equivalent
+    pub fn make_static_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::wash::attr::ResolvedType) -> Item {
+        let typecode = match resolved_type {
+            crate::wash::attr::ResolvedType::Primitive(prim) => match prim {
+                crate::wash::attr::PrimitiveType::Int | 
+                crate::wash::attr::PrimitiveType::Boolean | 
+                crate::wash::attr::PrimitiveType::Byte | 
+                crate::wash::attr::PrimitiveType::Short | 
+                crate::wash::attr::PrimitiveType::Char => typecodes::INT,
+                crate::wash::attr::PrimitiveType::Long => typecodes::LONG,
+                crate::wash::attr::PrimitiveType::Float => typecodes::FLOAT,
+                crate::wash::attr::PrimitiveType::Double => typecodes::DOUBLE,
+            },
+            _ => typecodes::OBJECT,
+        };
+        
+        let descriptor = resolved_type_to_descriptor(resolved_type);
+        Item::Member {
+            typecode,
+            member_name: name.to_string(),
+            class_name: owner_class.replace('.', "/"),
+            descriptor,
+            is_static: true,
+            nonvirtual: false,
+        }
+    }
+    
+    /// Make instance member item using resolved type - JavaC makeMemberItem equivalent
+    pub fn make_member_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::wash::attr::ResolvedType, is_private: bool) -> Item {
+        let typecode = match resolved_type {
+            crate::wash::attr::ResolvedType::Primitive(prim) => match prim {
+                crate::wash::attr::PrimitiveType::Int | 
+                crate::wash::attr::PrimitiveType::Boolean | 
+                crate::wash::attr::PrimitiveType::Byte | 
+                crate::wash::attr::PrimitiveType::Short | 
+                crate::wash::attr::PrimitiveType::Char => typecodes::INT,
+                crate::wash::attr::PrimitiveType::Long => typecodes::LONG,
+                crate::wash::attr::PrimitiveType::Float => typecodes::FLOAT,
+                crate::wash::attr::PrimitiveType::Double => typecodes::DOUBLE,
+            },
+            _ => typecodes::OBJECT,
+        };
+        
+        let descriptor = resolved_type_to_descriptor(resolved_type);
+        Item::Member {
+            typecode,
+            member_name: name.to_string(),
+            class_name: owner_class.replace('.', "/"), 
+            descriptor,
+            is_static: false,
+            nonvirtual: is_private, // Private methods are non-virtual
+        }
+    }
+}
+
+/// Helper function to convert ResolvedType to JVM descriptor
+fn resolved_type_to_descriptor(resolved_type: &crate::wash::attr::ResolvedType) -> String {
+    match resolved_type {
+        crate::wash::attr::ResolvedType::Primitive(prim) => match prim {
+            crate::wash::attr::PrimitiveType::Boolean => "Z".to_string(),
+            crate::wash::attr::PrimitiveType::Byte => "B".to_string(),
+            crate::wash::attr::PrimitiveType::Char => "C".to_string(),
+            crate::wash::attr::PrimitiveType::Short => "S".to_string(),
+            crate::wash::attr::PrimitiveType::Int => "I".to_string(),
+            crate::wash::attr::PrimitiveType::Long => "J".to_string(),
+            crate::wash::attr::PrimitiveType::Float => "F".to_string(),
+            crate::wash::attr::PrimitiveType::Double => "D".to_string(),
+        },
+        crate::wash::attr::ResolvedType::Reference(class_name) => {
+            let internal_name = class_name.replace('.', "/");
+            format!("L{};", internal_name)
+        },
+        crate::wash::attr::ResolvedType::Array(element_type) => {
+            let mut result = "[".to_string();
+            result.push_str(&resolved_type_to_descriptor(element_type));
+            result
+        },
+        crate::wash::attr::ResolvedType::Generic(_, _) => {
+            // Generic types erase to Object at runtime
+            "Ljava/lang/Object;".to_string()
+        },
+        _ => {
+            // Fallback for other types (wildcards, type variables, etc.)
+            "Ljava/lang/Object;".to_string()
+        },
+    }
 }
 
 /// Item representing addressable entities in bytecode (100% JavaC aligned)

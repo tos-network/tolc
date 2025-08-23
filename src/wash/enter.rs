@@ -9,6 +9,32 @@ use crate::common::error::Result;
 use crate::common::classpath;
 use std::collections::HashMap;
 
+/// Symbol kinds matching JavaC's Kinds.java
+#[derive(Debug, Clone, PartialEq)]
+pub enum SymbolKind {
+    /// Variables (local variables, parameters) - JavaC VAR kind
+    Variable,
+    /// Instance and static fields - JavaC VAR kind with class owner
+    Field,
+    /// Methods and constructors - JavaC MTH kind  
+    Method,
+    /// Types (classes, interfaces, enums) - JavaC TYP kind
+    Type,
+}
+
+/// Variable symbol following JavaC's VarSymbol pattern
+#[derive(Debug, Clone)]
+pub struct VariableSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub owner: String,          // Method or class that declares this (e.g., "method:main", "class:MyClass")
+    pub var_type: String,       // Resolved type name
+    pub is_static: bool,        // For fields - whether it's static
+    pub is_parameter: bool,     // For variables - whether it's a method parameter
+    pub local_slot: Option<usize>, // For local variables - JVM local slot number
+    pub modifiers: Vec<String>, // Access modifiers (public, private, etc.)
+}
+
 /// Type parameter symbol for generic types
 #[derive(Debug, Clone)]
 pub struct TypeParameterSymbol {
@@ -53,7 +79,7 @@ pub struct ClassSymbol {
 }
 
 /// Global symbol environment containing all symbols
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SymbolEnvironment {
     /// Map from class name to ClassSymbol
     pub classes: HashMap<String, ClassSymbol>,
@@ -71,6 +97,12 @@ pub struct SymbolEnvironment {
     pub type_parameters: HashMap<String, TypeParameterSymbol>,
     /// Map from method signature to MethodSymbol
     pub methods: HashMap<String, MethodSymbol>,
+    /// Variable symbols - local variables and parameters (scoped by owner method)
+    /// Key format: "method:owner::varname" (e.g., "method:main::x", "method:foo::args")
+    pub variables: HashMap<String, VariableSymbol>,
+    /// Field symbols - instance and static fields (scoped by owner class)
+    /// Key format: "class:owner::fieldname" (e.g., "class:MyClass::next", "class:System::out")
+    pub fields: HashMap<String, VariableSymbol>,
     /// Generic instantiation cache (T -> String, T -> Integer, etc.)
     pub instantiation_cache: HashMap<String, Vec<String>>,
 }
@@ -130,6 +162,96 @@ impl SymbolEnvironment {
         self.resolve_type(simple_name)
             .unwrap_or_else(|| simple_name.to_string())
             .replace('.', "/")
+    }
+    
+    /// Add a variable symbol (local variable or parameter) - follows JavaC's VarSymbol creation
+    pub fn add_variable(&mut self, name: &str, owner_method: &str, var_type: &str, 
+                       is_parameter: bool, local_slot: Option<usize>) {
+        let key = format!("method:{}::{}", owner_method, name);
+        let symbol = VariableSymbol {
+            name: name.to_string(),
+            kind: SymbolKind::Variable,
+            owner: format!("method:{}", owner_method),
+            var_type: var_type.to_string(),
+            is_static: false,
+            is_parameter,
+            local_slot,
+            modifiers: Vec::new(),
+        };
+        self.variables.insert(key, symbol);
+        eprintln!("📝 ENTER: Added variable symbol '{}' in method '{}' (slot: {:?})", name, owner_method, local_slot);
+    }
+    
+    /// Add a field symbol (instance or static field) - follows JavaC's VarSymbol creation for fields
+    pub fn add_field(&mut self, name: &str, owner_class: &str, field_type: &str, 
+                     is_static: bool, modifiers: Vec<String>) {
+        let key = format!("class:{}::{}", owner_class, name);
+        let symbol = VariableSymbol {
+            name: name.to_string(),
+            kind: SymbolKind::Field,
+            owner: format!("class:{}", owner_class),
+            var_type: field_type.to_string(),
+            is_static,
+            is_parameter: false,
+            local_slot: None,
+            modifiers,
+        };
+        self.fields.insert(key, symbol);
+        eprintln!("📝 ENTER: Added field symbol '{}' in class '{}' (static: {})", name, owner_class, is_static);
+    }
+    
+    /// Look up a variable symbol by name and method context - follows JavaC's lookup pattern
+    pub fn lookup_variable(&self, name: &str, method_context: &str) -> Option<&VariableSymbol> {
+        let key = format!("method:{}::{}", method_context, name);
+        self.variables.get(&key)
+    }
+    
+    /// Look up a field symbol by name and class context - follows JavaC's lookup pattern
+    pub fn lookup_field(&self, name: &str, class_context: &str) -> Option<&VariableSymbol> {
+        let key = format!("class:{}::{}", class_context, name);
+        self.fields.get(&key)
+    }
+    
+    /// Resolve identifier in context (like JavaC's Resolve.resolveIdent)
+    /// Returns the appropriate symbol based on scoping rules
+    pub fn resolve_identifier(&self, name: &str, method_context: Option<&str>, class_context: &str) -> Option<&VariableSymbol> {
+        // 1. First check local variables and parameters if we're in a method
+        if let Some(method) = method_context {
+            if let Some(var_symbol) = self.lookup_variable(name, method) {
+                eprintln!("🔍 RESOLVE_ID: Found variable '{}' in method '{}'", name, method);
+                return Some(var_symbol);
+            }
+        }
+        
+        // 2. Then check instance and static fields of the current class
+        if let Some(field_symbol) = self.lookup_field(name, class_context) {
+            eprintln!("🔍 RESOLVE_ID: Found field '{}' in class '{}'", name, class_context);
+            return Some(field_symbol);
+        }
+        
+        // TODO: 3. Check inherited fields from superclasses
+        // TODO: 4. Check static imports
+        
+        eprintln!("⚠️ RESOLVE_ID: Could not resolve identifier '{}'", name);
+        None
+    }
+}
+
+impl Default for SymbolEnvironment {
+    fn default() -> Self {
+        Self {
+            classes: HashMap::new(),
+            imports: HashMap::new(),
+            wildcard_imports: Vec::new(),
+            static_imports: HashMap::new(),
+            static_wildcard_imports: Vec::new(),
+            current_package: None,
+            type_parameters: HashMap::new(),
+            methods: HashMap::new(),
+            variables: HashMap::new(),      // Initialize new field
+            fields: HashMap::new(),         // Initialize new field  
+            instantiation_cache: HashMap::new(),
+        }
     }
 }
 

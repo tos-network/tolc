@@ -73,11 +73,12 @@ pub struct Gen {
     /// Generic signatures stored during TransTypes phase
     generic_signatures: Option<std::collections::HashMap<String, String>>,
     
+    /// Wash symbol environment for JavaC-style identifier resolution
+    pub wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>,
+    
     /// Type information from wash/attr phase for type-aware code generation
     wash_type_info: Option<std::collections::HashMap<String, crate::wash::attr::ResolvedType>>,
     
-    /// Symbol environment from wash/enter phase for symbol resolution
-    wash_symbol_env: Option<crate::wash::enter::SymbolEnvironment>,
     
     /// Inner class relationships for InnerClasses attribute generation
     inner_class_relationships: Vec<crate::codegen::InnerClassInfo>,

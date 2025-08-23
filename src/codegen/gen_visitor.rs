@@ -205,208 +205,130 @@ impl Gen {
     }
     
     /// Visit identifier expression - simplified version
+    /// Visit identifier expression - JavaC Gen.visitIdent equivalent  
+    /// Uses symbol-based resolution following JavaC's approach
     pub fn visit_ident(&mut self, tree: &IdentifierExpr, env: &GenContext) -> Result<JavacItem> {
-        eprintln!("DEBUG: visit_ident called for identifier '{}'", tree.name);
+        eprintln!("🔍 GEN: visit_ident for '{}' (JavaC-style symbol resolution)", tree.name);
+        
+        // Handle special identifiers following JavaC pattern
         if tree.name == "this" {
-            self.with_items(|items| {
+            return self.with_items(|items| {
                 let this_item = items.make_this_item();
                 items.load_item(&this_item)
-            })
+            });
         } else if tree.name == "super" {
-            self.with_items(|items| {
+            return self.with_items(|items| {
                 let super_item = items.make_super_item();
                 items.load_item(&super_item)
-            })
-        } else {
-            // Look up local variable or field
-            let local_var = self.type_inference.lookup_local(&tree.name).cloned();
-            
-            if let Some(local_var) = local_var {
-                eprintln!("DEBUG: Found local variable '{}' at slot {}", tree.name, local_var.reg);
-                
-                // Try to use wash type information first for better type awareness
-                let resolved_type_opt = self.get_wash_type_info().and_then(|wash_types| {
-                    wash_types.get(&tree.name).cloned()
-                });
-                
-                if let Some(resolved_type) = resolved_type_opt {
-                    eprintln!("DEBUG: Using wash type info for local variable '{}': {:?}", tree.name, resolved_type);
-                    self.with_items(|items| {
-                        let local_item = items.make_local_item_for_resolved_type(&resolved_type, local_var.reg);
-                        items.load_item(&local_item)
-                    })
-                } else {
-                    eprintln!("DEBUG: Using legacy type info for local variable '{}'", tree.name);
-                    self.with_items(|items| {
-                        let local_item = items.make_local_item(&local_var.typ, local_var.reg);
-                        items.load_item(&local_item)
-                    })
-                }
-            } else {
-                eprintln!("DEBUG: No local variable found for '{}', checking symbol table", tree.name);
-                // Try wash type information first for type-aware variable loading
-                let resolved_type_opt = self.get_wash_type_info().and_then(|wash_types| {
-                    wash_types.get(&tree.name).cloned()
-                });
-                
-                if let Some(resolved_type) = resolved_type_opt {
-                    eprintln!("DEBUG: Found wash type info for '{}': {:?}", tree.name, resolved_type);
-                    
-                    // Check if this is an instance field by looking for "this.fieldname" in wash types
-                    let field_key = format!("this.{}", tree.name);
-                    let is_field = self.get_wash_type_info()
-                        .map(|wash_types| wash_types.contains_key(&field_key))
-                        .unwrap_or(false);
-                    
-                    if is_field {
-                        // This is an implicit field access: identifier -> this.field
-                        eprintln!("DEBUG: '{}' is an implicit field access, generating this.{}", tree.name, tree.name);
-                        let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
-                        let field_name = tree.name.clone();
-                        
-                        return self.with_items(|items| {
-                            // First, load 'this' reference
-                            items.code.emitop(super::opcodes::ALOAD_0);
-                            
-                            // Create type-aware field item using wash information
-                            let field_item = items.make_field_item_for_resolved_type(
-                                field_name,
-                                owner_class,
-                                &resolved_type,
-                                false // Assume non-static for instance field access
-                            );
-                            
-                            // Load the field using the items system (type-aware)
-                            items.load_item(&field_item)
-                        });
-                    } else {
-                        // This is a local variable or parameter
-                        return self.with_items(|items| {
-                            // Use wash type information to create type-aware local item
-                            // For now, assume slot 1 for simplicity - this should be improved with proper slot tracking
-                            let local_item = items.make_local_item_for_resolved_type(&resolved_type, 1);
-                            items.load_item(&local_item)
-                        });
-                    }
-                }
-                
-                // Fallback to hardcoded logic for specific known variables (deprecated)
-                match tree.name.as_str() {
-                    "value" => {
-                        // Use type-aware loading instead of hardcoded ALOAD_1
-                        eprintln!("WARNING: Using fallback loading for 'value' - should use wash type info");
-                        self.with_items(|items| {
-                            // Create a reference type item and load it
-                            let local_item = JavacItem::Local { 
-                                typecode: typecodes::OBJECT, 
-                                reg: 1 
-                            };
-                            items.load_item(&local_item)
-                        })
-                    }
-                    "x" => {
-                        // Use type-aware loading instead of hardcoded ILOAD_1
-                        eprintln!("WARNING: Using fallback loading for 'x' - should use wash type info");
-                        self.with_items(|items| {
-                            // Create an int type item and load it
-                            let local_item = JavacItem::Local { 
-                                typecode: typecodes::INT, 
-                                reg: 1 
-                            };
-                            items.load_item(&local_item)
-                        })
-                    }
-                    "args" => {
-                        // Use type-aware loading instead of hardcoded ALOAD_0
-                        eprintln!("WARNING: Using fallback loading for 'args' - should use wash type info");
-                        self.with_items(|items| {
-                            // Create an object array type item and load it
-                            let local_item = JavacItem::Local { 
-                                typecode: typecodes::OBJECT, 
-                                reg: 0 
-                            };
-                            items.load_item(&local_item)
-                        })
-                    }
-                    "next" => {
-                        // Special case for 'next' field in HashMapMyIterator
-                        eprintln!("DEBUG: Generating field access for 'next' field");
-                        
-                        // Get field reference from constant pool outside the closure
-                        let field_ref_idx = self.get_pool_mut().add_field_ref(
-                            "java/util/HashMapMyIterator",
-                            "next",
-                            "Ljava/util/HashMapCell;"
-                        );
-                        
-                        self.with_items(|items| {
-                            // Load 'this' reference first
-                            items.code.emitop(super::opcodes::ALOAD_0);
-                            
-                            // Generate GETFIELD instruction
-                            items.code.emitop(super::opcodes::GETFIELD);
-                            items.code.emit2(field_ref_idx);
-                            
-                            // Push reference type onto stack
-                            items.code.state.push(super::code::Type::Object("java/util/HashMapCell".to_string()));
-                            
-                            Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
-                        })
-                    }
-                    _ => {
-                        // Try to resolve through symbol table
-                        let symbol = self.type_inference.types().symtab().lookup_symbol(&tree.name).cloned();
-                        
-                        // Check if this might be an implicit field access
-                        if symbol.is_none() {
-                            eprintln!("DEBUG: Trying implicit field access for '{}'", tree.name);
-                            // Assume it's a field access and generate this.fieldname
-                            let current_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
-                            
-                            // Try to create a reasonable field descriptor
-                            let field_descriptor = match tree.name.as_str() {
-                                "hashMap" => "Ljava/util/HashMap;",
-                                "next" => "Ljava/util/HashMapCell;",
-                                _ => "Ljava/lang/Object;", // Default to Object
-                            };
-                            
-                            // Get field reference from constant pool outside the closure
-                            let field_ref_idx = self.get_pool_mut().add_field_ref(
-                                &current_class,
-                                &tree.name,
-                                field_descriptor
-                            );
-                            
-                            return self.with_items(|items| {
-                                // Load 'this' reference first
-                                items.code.emitop(super::opcodes::ALOAD_0);
-                                
-                                // Generate GETFIELD instruction
-                                items.code.emitop(super::opcodes::GETFIELD);
-                                items.code.emit2(field_ref_idx);
-                                
-                                // Push reference type onto stack
-                                items.code.state.push(super::code::Type::Object(field_descriptor.trim_start_matches('L').trim_end_matches(';').to_string()));
-                                
-                                Ok(JavacItem::Stack { typecode: typecodes::OBJECT })
-                            });
-                        }
-                        
-                        self.with_items(|items| {
-                            if let Some(symbol) = symbol {
-                                let is_static = symbol.kind == super::symtab::SymbolKind::Field && 
-                                               symbol.modifiers.contains(&"static".to_string());
-                                Ok(items.make_member_item(tree.name.clone(), "FIELD_CLASS".to_string(), "FIELD_DESC".to_string(), is_static, &symbol.typ))
-                            } else {
-                                eprintln!("⚠️  WARNING: Cannot resolve symbol '{}', defaulting to int", tree.name);
-                                let typ = TypeEnum::Primitive(PrimitiveType::Int);
-                                Ok(items.make_member_item(tree.name.clone(), "FIELD_CLASS".to_string(), "FIELD_DESC".to_string(), false, &typ))
-                            }
-                        })
-                    }
-                }
-            }
+            });
         }
+        
+        // Get current method and class context for symbol resolution
+        let method_context = env.method.as_ref().map(|m| m.name.as_str());
+        let class_context = env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("UnknownClass");
+        
+        // Use wash/SymbolEnvironment for JavaC-style symbol resolution
+        let resolved_symbol = if let Some(ref symbol_env) = self.wash_symbol_env {
+            symbol_env.resolve_identifier(&tree.name, method_context, class_context).cloned()
+        } else {
+            None
+        };
+        
+        if let Some(var_symbol) = resolved_symbol {
+            eprintln!("✅ GEN: Resolved '{}' via symbol table: kind={:?}, owner={}", 
+                     tree.name, var_symbol.kind, var_symbol.owner);
+            
+            return match var_symbol.kind {
+                // Local variable (like JavaC: sym.kind == VAR && sym.owner.kind == MTH)
+                crate::wash::enter::SymbolKind::Variable => {
+                    let slot = var_symbol.local_slot.unwrap_or(1) as u16;
+                    let var_type = var_symbol.var_type.clone();
+                    eprintln!("📍 GEN: Loading local variable '{}' from slot {}", tree.name, slot);
+                    self.with_items(|items| {
+                        // Create type-aware local item using resolved type
+                        let resolved_type = crate::wash::attr::ResolvedType::Reference(var_type);
+                        let local_item = items.make_local_item_for_resolved_type(&resolved_type, slot);
+                        items.load_item(&local_item)
+                    })
+                }
+                
+                // Field access (like JavaC: static vs instance field handling)
+                crate::wash::enter::SymbolKind::Field => {
+                    let field_name = tree.name.clone();
+                    let owner_class = var_symbol.owner.trim_start_matches("class:").to_string();
+                    let var_type = var_symbol.var_type.clone();
+                    let is_static = var_symbol.is_static;
+                    
+                    if is_static {
+                        eprintln!("📍 GEN: Loading static field '{}'", field_name);
+                        // Static field (like JavaC: (sym.flags() & STATIC) != 0)
+                        self.with_items(|items| {
+                            let resolved_type = crate::wash::attr::ResolvedType::Reference(var_type);
+                            let static_item = items.make_static_item_for_resolved_type(
+                                &field_name, 
+                                &owner_class,
+                                &resolved_type
+                            );
+                            items.load_item(&static_item)
+                        })
+                    } else {
+                        eprintln!("📍 GEN: Loading instance field '{}'", field_name);
+                        // Instance field (like JavaC: load this, then member)
+                        self.with_items(|items| {
+                            let this_item = items.make_this_item();
+                            items.load_item(&this_item)?; // Load 'this' first
+                            let resolved_type = crate::wash::attr::ResolvedType::Reference(var_type);
+                            let member_item = items.make_member_item_for_resolved_type(
+                                &field_name,
+                                &owner_class,
+                                &resolved_type,
+                                false
+                            );
+                            items.load_item(&member_item)
+                        })
+                    }
+                }
+                
+                _ => {
+                    eprintln!("⚠️ GEN: Unsupported symbol kind for '{}': {:?}", tree.name, var_symbol.kind);
+                    Err(crate::common::error::Error::codegen_error(
+                        format!("Unsupported symbol kind for identifier '{}'", tree.name)
+                    ))
+                }
+            };
+        }
+        
+        // Fallback: try legacy type inference system for backward compatibility
+        eprintln!("🔄 GEN: Symbol not found in wash environment, trying legacy resolution for '{}'", tree.name);
+        
+        let local_var = self.type_inference.lookup_local(&tree.name).cloned();
+        if let Some(local_var) = local_var {
+            eprintln!("📍 GEN: Found '{}' in legacy local variables (slot {})", tree.name, local_var.reg);
+            return self.with_items(|items| {
+                let local_item = items.make_local_item(&local_var.typ, local_var.reg);
+                items.load_item(&local_item)
+            });
+        }
+        
+        // Final fallback: assume it's an unresolved field access
+        eprintln!("⚠️ GEN: Could not resolve '{}', assuming implicit field access", tree.name);
+        self.with_items(|items| {
+            // Load 'this' first for instance field access
+            let this_item = items.make_this_item();
+            items.load_item(&this_item)?;
+            
+            // Create a generic member item with Object type as fallback
+            let fallback_type = crate::ast::TypeEnum::Reference(
+                crate::ast::ReferenceType::Class("java/lang/Object".to_string())
+            );
+            Ok(items.make_member_item(
+                tree.name.clone(), 
+                class_context.to_string(), 
+                "Ljava/lang/Object;".to_string(), 
+                false, 
+                &fallback_type
+            ))
+        })
     }
     
     /// Visit field access expression - simplified version
