@@ -9,7 +9,7 @@ use tolc::wash::SemanticAnalyzer;
 use tolc::parser::parse_java;
 use tolc::codegen::constpool::ConstantPool;
 use tolc::codegen::code::Code;
-use tolc::codegen::items_javac::{Items, typecodes};
+use tolc::codegen::items::{Items, typecodes, Item};
 use tolc::wash::attr::{ResolvedType, PrimitiveType};
 
 #[test]
@@ -104,7 +104,7 @@ fn test_resolved_type_local_variable_creation() {
     
     assert_eq!(local_item.typecode(), typecodes::INT);
     match local_item {
-        tolc::codegen::items_javac::Item::Local { typecode, reg } => {
+        Item::Local { typecode, reg } => {
             assert_eq!(typecode, typecodes::INT);
             assert_eq!(reg, 1);
         }

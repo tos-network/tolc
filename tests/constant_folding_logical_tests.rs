@@ -1,13 +1,13 @@
 use tolc::parser::parse_tol;
 use tolc::ast::{AstPrinter, TypeDecl, Literal, BinaryOp};
-use tolc::codegen::const_fold_javac::ConstFoldJavaC;
+use tolc::codegen::const_fold::ConstFold;
 use tolc::codegen::symtab::Symtab;
 
 /// Test constant folding for LogicalAnd (&&) operations
 #[test]
 fn test_logical_and_constant_folding() {
     let symtab = Symtab::new();
-    let folder = ConstFoldJavaC::new(symtab);
+    let folder = ConstFold::new(symtab);
 
     // Test false && X = false (short-circuit)
     let left = Literal::Boolean(false);
@@ -34,7 +34,7 @@ fn test_logical_and_constant_folding() {
 #[test]
 fn test_logical_or_constant_folding() {
     let symtab = Symtab::new();
-    let folder = ConstFoldJavaC::new(symtab);
+    let folder = ConstFold::new(symtab);
 
     // Test true || X = true (short-circuit)
     let left = Literal::Boolean(true);
@@ -61,7 +61,7 @@ fn test_logical_or_constant_folding() {
 #[test]
 fn test_can_fold_logical() {
     let symtab = Symtab::new();
-    let folder = ConstFoldJavaC::new(symtab);
+    let folder = ConstFold::new(symtab);
 
     // LogicalAnd cases
     assert!(folder.can_fold_logical(
@@ -108,7 +108,7 @@ fn test_can_fold_logical() {
 #[test]
 fn test_logical_no_fold_non_boolean() {
     let symtab = Symtab::new();
-    let folder = ConstFoldJavaC::new(symtab);
+    let folder = ConstFold::new(symtab);
 
     // LogicalAnd with integer operands should not fold
     let left = Literal::Integer(1);
@@ -168,7 +168,7 @@ class ConstantFoldingTest {
     
     // Test constant folding capability
     let symtab = Symtab::new();
-    let folder = ConstFoldJavaC::new(symtab);
+    let folder = ConstFold::new(symtab);
     
     // Test the constant expressions
     let true_literal = Literal::Boolean(true);

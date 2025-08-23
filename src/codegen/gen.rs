@@ -99,6 +99,9 @@ pub struct Gen {
     
     /// Instance field initializers to be generated in constructors  
     instance_field_initializers: Vec<(String, Expr)>,
+    
+    /// Pending lambda methods for class file generation
+    pub pending_lambda_methods: Vec<crate::codegen::gen_visitor::LambdaMethodInfo>,
 }
 
 
@@ -290,6 +293,7 @@ impl Gen {
             package_context: None,                   // Package context for current compilation unit
             static_field_initializers: Vec::new(),  // Static field initializers for <clinit>
             instance_field_initializers: Vec::new(), // Instance field initializers for constructors
+            pending_lambda_methods: Vec::new(),      // Pending lambda methods for class file generation
         }
     }
     

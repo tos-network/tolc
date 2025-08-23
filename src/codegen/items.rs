@@ -40,9 +40,11 @@ pub struct Items<'a> {
     /// Type information from wash/attr phase for type-aware code generation
     wash_type_info: Option<&'a std::collections::HashMap<String, ResolvedType>>,
     
-    // TODO: Add syms and types when available
-    // syms: &'a Symtab,
-    // types: &'a Types,
+    // Symbol table for method resolution (JavaC syms field)
+    symbol_table: Option<&'a std::collections::HashMap<String, crate::wash::attr::ResolvedSymbol>>,
+    
+    // Type information for interface detection (JavaC types field)
+    type_table: Option<&'a std::collections::HashMap<String, crate::wash::attr::TypeInfo>>,
 }
 
 impl<'a> Items<'a> {
@@ -53,6 +55,8 @@ impl<'a> Items<'a> {
             code,
             optimizer: OptimizationManager::new(),
             wash_type_info: None,
+            symbol_table: None,
+            type_table: None,
         }
     }
     
@@ -67,6 +71,26 @@ impl<'a> Items<'a> {
             code,
             optimizer: OptimizationManager::new(),
             wash_type_info: Some(wash_type_info),
+            symbol_table: None,
+            type_table: None,
+        }
+    }
+    
+    /// Create new Items manager with full symbol and type information (JavaC equivalent)
+    pub fn new_with_symbols(
+        pool: &'a mut ConstantPool, 
+        code: &'a mut Code,
+        wash_type_info: &'a std::collections::HashMap<String, ResolvedType>,
+        symbol_table: &'a std::collections::HashMap<String, crate::wash::attr::ResolvedSymbol>,
+        type_table: &'a std::collections::HashMap<String, crate::wash::attr::TypeInfo>
+    ) -> Self {
+        Self {
+            pool,
+            code,
+            optimizer: OptimizationManager::new(),
+            wash_type_info: Some(wash_type_info),
+            symbol_table: Some(symbol_table),
+            type_table: Some(type_table),
         }
     }
     
@@ -74,13 +98,15 @@ impl<'a> Items<'a> {
     pub fn new_with_optimization(
         pool: &'a mut ConstantPool, 
         code: &'a mut Code, 
-        _level: OptimizationLevel
+        level: OptimizationLevel
     ) -> Self {
         Self {
             pool,
             code,
-            optimizer: OptimizationManager::new(),
+            optimizer: OptimizationManager::with_level(level),
             wash_type_info: None,
+            symbol_table: None,
+            type_table: None,
         }
     }
     
@@ -442,6 +468,27 @@ impl<'a> Items<'a> {
         Ok(Item::Stack { typecode: target_typecode })
     }
     
+    // ========== Constant Pool Methods ==========
+    
+    /// Add method handle to constant pool - JavaC equivalent
+    pub fn add_method_handle(&mut self, reference_kind: u8, class_name: &str, name: &str, descriptor: &str) -> u16 {
+        // First add the method reference
+        let method_ref_index = self.pool.add_method_ref(class_name, name, descriptor);
+        // Then create the method handle pointing to it
+        self.pool.add_method_handle(reference_kind, method_ref_index)
+    }
+
+    /// Add method type to constant pool - JavaC equivalent  
+    pub fn add_method_type(&mut self, descriptor: &str) -> u16 {
+        self.pool.add_method_type(descriptor)
+    }
+
+    /// Add invoke dynamic to constant pool - JavaC equivalent
+    pub fn add_invoke_dynamic(&mut self, bootstrap_method_attr_index: u16, name: &str, descriptor: &str) -> u16 {
+        let name_and_type_index = self.pool.add_name_and_type(name, descriptor);
+        self.pool.add_invoke_dynamic(bootstrap_method_attr_index, name_and_type_index)
+    }
+    
     // ========== Bytecode Generation Methods ==========
     
     /// Merge two jump chains (JavaC Chain.merge equivalent)
@@ -711,14 +758,114 @@ impl<'a> Items<'a> {
         
         if is_static {
             self.code.emitop(opcodes::INVOKESTATIC);
+            self.code.emit2(method_ref_idx);
         } else if nonvirtual {
             self.code.emitop(opcodes::INVOKESPECIAL);
+            self.code.emit2(method_ref_idx);
         } else {
-            self.code.emitop(opcodes::INVOKEVIRTUAL);
-            // TODO: Add interface method detection for INVOKEINTERFACE
+            // Check if target class is an interface (JavaC pattern)
+            if self.is_interface_method(class_name, member_name) {
+                self.emit_invoke_interface(method_ref_idx, method_descriptor)?;
+            } else {
+                self.code.emitop(opcodes::INVOKEVIRTUAL);
+                self.code.emit2(method_ref_idx);
+            }
         }
-        self.code.emit2(method_ref_idx); // Proper constant pool index
         Ok(())
+    }
+    
+    /// Check if a method belongs to an interface (JavaC (member.owner.flags() & Flags.INTERFACE) != 0)
+    fn is_interface_method(&self, class_name: &str, _method_name: &str) -> bool {
+        // Check type table for interface flag if available
+        if let Some(type_table) = self.type_table {
+            if let Some(type_info) = type_table.get(class_name) {
+                return type_info.is_interface;
+            }
+        }
+        
+        // Fallback: check known interface classes
+        match class_name {
+            // Common Java interface patterns
+            "java/lang/Runnable" |
+            "java/lang/Iterable" |
+            "java/util/Iterator" |
+            "java/util/Collection" |
+            "java/util/List" |
+            "java/util/Set" |
+            "java/util/Map" |
+            "java/io/Serializable" |
+            "java/lang/Comparable" |
+            "java/lang/CharSequence" => true,
+            
+            // Check for interface naming conventions
+            name if name.contains("Interface") || name.ends_with("able") => true,
+            
+            _ => false,
+        }
+    }
+    
+    /// Emit invokeinterface instruction (JavaC emitInvokeinterface equivalent)
+    fn emit_invoke_interface(&mut self, method_ref_idx: u16, method_descriptor: &str) -> Result<()> {
+        self.code.emitop(opcodes::INVOKEINTERFACE);
+        self.code.emit2(method_ref_idx);
+        
+        // Calculate argument count from method descriptor (required for invokeinterface)
+        let arg_count = self.calculate_method_args(method_descriptor);
+        self.code.emit1(arg_count);
+        self.code.emit1(0); // Reserved byte (always 0)
+        
+        Ok(())
+    }
+    
+    /// Calculate method argument count from descriptor (JavaC pattern)
+    fn calculate_method_args(&self, descriptor: &str) -> u8 {
+        let mut count = 1u8; // Start with 1 for 'this' parameter
+        let mut chars = descriptor.chars().skip(1); // Skip opening '('
+        
+        while let Some(ch) = chars.next() {
+            if ch == ')' {
+                break;
+            }
+            
+            match ch {
+                'L' => {
+                    // Object type - skip to semicolon
+                    while let Some(c) = chars.next() {
+                        if c == ';' {
+                            break;
+                        }
+                    }
+                    count += 1;
+                }
+                '[' => {
+                    // Array type - find element type
+                    while let Some(c) = chars.next() {
+                        if c != '[' {
+                            if c == 'L' {
+                                // Skip to semicolon for object arrays
+                                while let Some(sc) = chars.next() {
+                                    if sc == ';' {
+                                        break;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    count += 1;
+                }
+                'J' | 'D' => {
+                    // long and double take 2 slots
+                    count += 2;
+                }
+                _ => {
+                    // Primitive types take 1 slot
+                    count += 1;
+                }
+            }
+        }
+        
+        count
     }
     
     /// Emit type conversion instructions (JavaC coerce pattern)
@@ -756,22 +903,6 @@ impl<'a> Items<'a> {
         }
     }
     
-    /// Add method handle to constant pool
-    pub fn add_method_handle(&mut self, reference_kind: u8, class_name: &str, method_name: &str, descriptor: &str) -> u16 {
-        let method_ref_index = self.pool.add_method_ref(class_name, method_name, descriptor);
-        self.pool.add_method_handle(reference_kind, method_ref_index)
-    }
-    
-    /// Add method type to constant pool
-    pub fn add_method_type(&mut self, descriptor: &str) -> u16 {
-        self.pool.add_method_type(descriptor)
-    }
-    
-    /// Add invoke dynamic to constant pool
-    pub fn add_invoke_dynamic(&mut self, bootstrap_method_attr_index: u16, name: &str, descriptor: &str) -> u16 {
-        let name_and_type_index = self.pool.add_name_and_type(name, descriptor);
-        self.pool.add_invoke_dynamic(bootstrap_method_attr_index, name_and_type_index)
-    }
     
     /// Make static field item using resolved type - JavaC makeStaticItem equivalent
     pub fn make_static_item_for_resolved_type(&self, name: &str, owner_class: &str, resolved_type: &crate::wash::attr::ResolvedType) -> Item {

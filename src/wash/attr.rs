@@ -205,6 +205,93 @@ pub enum DeferredTaskType {
     DiamondNew,
 }
 
+/// Resolved symbol information for Items system - JavaC Symbol equivalent
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedSymbol {
+    /// Symbol name
+    pub name: String,
+    /// Symbol owner (class/package)
+    pub owner: String,
+    /// Symbol type
+    pub symbol_type: ResolvedType,
+    /// Symbol flags (static, final, etc.)
+    pub flags: SymbolFlags,
+    /// Symbol kind (class, method, field, etc.)
+    pub kind: SymbolKind,
+}
+
+/// Symbol flags corresponding to JavaC Flags
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolFlags {
+    pub is_static: bool,
+    pub is_final: bool,
+    pub is_abstract: bool,
+    pub is_interface: bool,
+    pub is_public: bool,
+    pub is_private: bool,
+    pub is_protected: bool,
+    pub is_synchronized: bool,
+    pub is_native: bool,
+    pub is_strictfp: bool,
+    pub is_synthetic: bool,
+    pub is_annotation: bool,
+    pub is_enum: bool,
+}
+
+impl Default for SymbolFlags {
+    fn default() -> Self {
+        Self {
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            is_interface: false,
+            is_public: false,
+            is_private: false,
+            is_protected: false,
+            is_synchronized: false,
+            is_native: false,
+            is_strictfp: false,
+            is_synthetic: false,
+            is_annotation: false,
+            is_enum: false,
+        }
+    }
+}
+
+/// Symbol kind enumeration
+#[derive(Debug, Clone, PartialEq)]
+pub enum SymbolKind {
+    Class,
+    Interface,
+    Method,
+    Field,
+    LocalVar,
+    Parameter,
+    Package,
+    TypeParameter,
+}
+
+/// Type information for interface detection - JavaC Types equivalent
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeInfo {
+    /// Type name
+    pub name: String,
+    /// Whether this type is an interface
+    pub is_interface: bool,
+    /// Whether this type is a class
+    pub is_class: bool,
+    /// Whether this type is an enum
+    pub is_enum: bool,
+    /// Whether this type is an annotation
+    pub is_annotation: bool,
+    /// Type flags
+    pub flags: SymbolFlags,
+    /// Supertype information
+    pub supertype: Option<String>,
+    /// Interface implementations
+    pub interfaces: Vec<String>,
+}
+
 /// Attr phase processor - corresponds to JavaC's Attr class
 pub struct Attr {
     pub attr_env: AttrEnvironment,

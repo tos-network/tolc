@@ -10,6 +10,26 @@ use super::items::{Item as BytecodeItem, CondItem, Items, typecodes};
 use super::opcodes;
 use crate::wash::attr::ResolvedType;
 
+/// Lambda method information for deferred generation
+#[derive(Debug, Clone)]
+pub struct LambdaMethodInfo {
+    pub name: String,
+    pub descriptor: String,
+    pub body: LambdaBody,
+    pub parameters: Vec<LambdaParameter>,
+    pub is_static: bool,
+    pub access_flags: u16,
+}
+
+/// Functional interface information for lambda expressions
+#[derive(Debug, Clone)]
+struct FunctionalInterface {
+    interface_name: String,
+    interface_descriptor: String,
+    method_name: String,
+    method_descriptor: String,
+}
+
 impl Gen {
     // ========== TYPE CHECKING INFRASTRUCTURE - JavaC Attr.java patterns ==========
     
@@ -4539,42 +4559,131 @@ impl Gen {
         Ok(BytecodeItem::Stack { typecode: typecodes::OBJECT })
     }
     
-    /// Generate synthetic method for lambda implementation
+    /// Generate synthetic method for lambda implementation - JavaC pattern
     fn generate_lambda_method(&mut self, lambda: &LambdaExpr, method_name: &str, env: &GenContext) -> Result<()> {
-        // For now, create a placeholder implementation
-        // Full method generation will be implemented when method creation infrastructure is ready
+        eprintln!("🚀 DEBUG: Generating lambda method: {}", method_name);
         
-        // TODO: Generate actual synthetic method for lambda implementation
-        // This requires:
-        // 1. Method creation in class file
-        // 2. Code generation for lambda body
-        // 3. Proper return value handling
-        // 4. Bootstrap method registration
+        // Create method context for lambda (similar to gen.rs pattern)
+        let _lambda_context = GenContext {
+            method: None, // Lambda method will be synthetic
+            clazz: env.clazz.clone(),
+            fatcode: env.fatcode,
+            debug_code: env.debug_code,
+            exit: None,
+            cont: None,
+            is_switch: false,
+        };
         
-        // Placeholder: Just register that we need to generate this method
-        // The actual implementation will need to integrate with the class file generation
+        // Lambda method descriptor based on parameters
+        let lambda_descriptor = self.generate_lambda_descriptor(lambda);
+        eprintln!("🔧 DEBUG: Lambda descriptor: {}", lambda_descriptor);
         
+        // Store current lambda method for later class file generation
+        // In a complete implementation, this would create the actual method in the class file
+        let lambda_info = LambdaMethodInfo {
+            name: method_name.to_string(),
+            descriptor: lambda_descriptor,
+            body: lambda.body.clone(),
+            parameters: lambda.parameters.clone(),
+            is_static: true,
+            access_flags: 0x1008, // ACC_STATIC | ACC_SYNTHETIC
+        };
+        
+        // Store for class file generation
+        self.pending_lambda_methods.push(lambda_info);
+        
+        eprintln!("✅ DEBUG: Lambda method '{}' registered for generation", method_name);
         Ok(())
     }
     
-    /// Infer functional interface for lambda expression
-    fn infer_functional_interface(&self, lambda: &LambdaExpr) -> Result<FunctionalInterface> {
-        // Simplified: assume Function interface for now
-        // In a full implementation, this would analyze the context to determine the target type
+    /// Infer functional interface for lambda expression - JavaC Attr.visitLambda equivalent
+    fn infer_functional_interface(&mut self, lambda: &LambdaExpr) -> Result<FunctionalInterface> {
+        use crate::codegen::descriptor::{functional_interface_descriptor, type_enum_to_descriptor};
+        
+        // Determine functional interface based on lambda signature
+        let param_count = lambda.parameters.len();
+        let return_type = self.infer_lambda_return_type(lambda);
+        
+        let (interface_name, interface_descriptor, method_name) = match param_count {
+            0 => {
+                // Supplier interface
+                ("java/util/function/Supplier", "Ljava/util/function/Supplier;", "get")
+            }
+            1 => {
+                // Function interface  
+                ("java/util/function/Function", "Ljava/util/function/Function;", "apply")
+            }
+            2 => {
+                // BiFunction interface
+                ("java/util/function/BiFunction", "Ljava/util/function/BiFunction;", "apply")
+            }
+            _ => {
+                // Generic functional interface for more parameters
+                ("java/lang/Object", "Ljava/lang/Object;", "apply")
+            }
+        };
+        
+        // Generate proper method descriptor based on inferred parameter types
+        let mut param_types = Vec::new();
+        for _param in &lambda.parameters {
+            // For now, use Object type - full implementation would use type inference
+            param_types.push(self.type_inference.types().symtab().object_type.clone());
+        }
+        
+        let method_descriptor = functional_interface_descriptor(&param_types, &return_type);
+        
+        eprintln!("🔍 DEBUG: Inferred functional interface: {} with descriptor: {}", 
+            interface_name, method_descriptor);
+        
         Ok(FunctionalInterface {
-            interface_name: "java/util/function/Function".to_string(),
-            interface_descriptor: "Ljava/util/function/Function;".to_string(),
-            method_name: "apply".to_string(),
-            method_descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
+            interface_name: interface_name.to_string(),
+            interface_descriptor: interface_descriptor.to_string(),
+            method_name: method_name.to_string(),
+            method_descriptor,
         })
     }
     
-    /// Generate method descriptor for lambda implementation
-    fn generate_lambda_descriptor(&self, lambda: &LambdaExpr) -> String {
-        // Simplified: generate based on parameter count
-        let param_count = lambda.parameters.len();
-        let params = "Ljava/lang/Object;".repeat(param_count);
-        format!("({})Ljava/lang/Object;", params)
+    /// Generate method descriptor for lambda implementation - JavaC Gen.lambdaMethodType equivalent
+    fn generate_lambda_descriptor(&mut self, lambda: &LambdaExpr) -> String {
+        use crate::codegen::descriptor::lambda_method_descriptor;
+        
+        // Infer return type from lambda body (simplified for now)
+        let return_type = self.infer_lambda_return_type(lambda);
+        
+        match lambda_method_descriptor(&lambda.parameters, Some(&return_type)) {
+            Ok(descriptor) => {
+                eprintln!("🔧 DEBUG: Generated lambda descriptor: {}", descriptor);
+                descriptor
+            }
+            Err(e) => {
+                eprintln!("⚠️ ERROR: Failed to generate lambda descriptor: {}", e);
+                // Fallback to simple descriptor
+                let param_count = lambda.parameters.len();
+                let params = "Ljava/lang/Object;".repeat(param_count);
+                format!("({})Ljava/lang/Object;", params)
+            }
+        }
+    }
+    
+    /// Infer return type from lambda body - JavaC Gen.lambdaReturnType equivalent
+    fn infer_lambda_return_type(&mut self, lambda: &LambdaExpr) -> TypeEnum {
+        match &lambda.body {
+            LambdaBody::Expression(expr) => {
+                // Try to infer type from expression
+                match self.infer_expression_type(expr) {
+                    Ok(expr_type) => expr_type,
+                    Err(_) => {
+                        // Fallback to Object if inference fails
+                        self.type_inference.types().symtab().object_type.clone()
+                    }
+                }
+            }
+            LambdaBody::Block(_block) => {
+                // For block bodies, would need to analyze return statements
+                // For now, default to Object
+                self.type_inference.types().symtab().object_type.clone()
+            }
+        }
     }
     
     /// Add bootstrap method to the bootstrap methods table
@@ -4582,6 +4691,51 @@ impl Gen {
         let index = self.bootstrap_methods.len() as u16;
         self.bootstrap_methods.push(method_arguments);
         index
+    }
+    
+    /// Generate method descriptor from method declaration - JavaC Gen.methodDescriptor equivalent
+    pub fn generate_method_descriptor_from_decl(&self, method: &MethodDecl) -> Result<String> {
+        use crate::codegen::descriptor::method_descriptor;
+        
+        // Convert parameter types
+        let mut param_types = Vec::new();
+        for param in &method.parameters {
+            param_types.push(param.type_ref.clone());
+        }
+        
+        // Get return type
+        let return_type = method.return_type.as_ref();
+        
+        let descriptor = method_descriptor(&param_types, return_type);
+        eprintln!("🔧 DEBUG: Generated method descriptor for {}: {}", method.name, descriptor);
+        
+        Ok(descriptor)
+    }
+    
+    /// Generate constructor descriptor from constructor declaration - JavaC equivalent
+    pub fn generate_constructor_descriptor(&self, constructor: &crate::ast::ConstructorDecl) -> Result<String> {
+        use crate::codegen::descriptor::constructor_descriptor;
+        
+        // Convert constructor parameters to TypeEnums
+        let mut param_types = Vec::new();
+        for param in &constructor.parameters {
+            param_types.push(param.type_ref.as_type_enum());
+        }
+        
+        let descriptor = constructor_descriptor(&param_types);
+        eprintln!("🔧 DEBUG: Generated constructor descriptor: {}", descriptor);
+        
+        Ok(descriptor)
+    }
+    
+    /// Generate field descriptor from field declaration - JavaC equivalent
+    pub fn generate_field_descriptor(&self, field: &crate::ast::FieldDecl) -> Result<String> {
+        use crate::codegen::descriptor::{field_descriptor_from_type_enum, type_to_descriptor};
+        
+        let descriptor = type_to_descriptor(&field.type_ref);
+        eprintln!("🔧 DEBUG: Generated field descriptor for {}: {}", field.name, descriptor);
+        
+        Ok(descriptor)
     }
     
     /// Get field descriptor from resolved type
@@ -4730,12 +4884,4 @@ impl Gen {
     }
 }
 
-/// Functional interface information for lambda compilation
-#[derive(Debug, Clone)]
-struct FunctionalInterface {
-    interface_name: String,
-    interface_descriptor: String,
-    method_name: String,
-    method_descriptor: String,
-}
 
