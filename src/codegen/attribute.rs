@@ -1042,4 +1042,29 @@ pub fn make_stack_map_attribute(constant_pool: &mut ConstantPool, frames: &[Stac
     Ok(NamedAttribute::new(ConstPoolIndex::from(name_index), AttributeInfo::StackMapTable(attr)))
 }
 
+/// Create a RuntimeInvisibleAnnotations attribute for @Override and similar annotations
+pub fn make_runtime_invisible_annotations_attribute(
+    constant_pool: &mut ConstantPool, 
+    annotation_names: &[&str]
+) -> Result<NamedAttribute, AttributeCreateError> {
+    let name_index = constant_pool.try_add_utf8("RuntimeInvisibleAnnotations")?;
+    
+    // Create annotation entries for each annotation
+    let mut annotations = Vec::new();
+    for annotation_name in annotation_names {
+        // Add annotation class name to constant pool in internal format  
+        let class_name = format!("L{};", annotation_name);
+        let type_name_index = constant_pool.try_add_utf8(&class_name)?;
+        
+        annotations.push(AnnotationEntry {
+            type_name: ConstPoolIndex::from(type_name_index),
+            retention: Some(RetentionPolicy::Source), // @Override is source-level
+            targets: Vec::new(), // No specific targets for method annotations
+        });
+    }
+    
+    let attr = RuntimeInvisibleAnnotationsAttribute { annotations };
+    Ok(NamedAttribute::new(ConstPoolIndex::from(name_index), AttributeInfo::RuntimeInvisibleAnnotations(attr)))
+}
+
 

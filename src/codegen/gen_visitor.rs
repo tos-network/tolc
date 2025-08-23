@@ -3263,19 +3263,29 @@ impl Gen {
         let is_constructor = tree.name == "<init>";
         let is_super_call = self.is_super_method_call(tree);
         
-        if is_static {
+        let result = if is_static {
             // Static method call: invokestatic
-            self.gen_static_method_call(tree, env)
+            self.gen_static_method_call(tree, env)?
         } else if is_constructor {
             // Constructor call: invokespecial
-            self.gen_constructor_call(tree, env)
+            self.gen_constructor_call(tree, env)?
         } else if is_super_call {
             // Super method call: invokespecial
-            self.gen_super_method_call(tree, env)
+            self.gen_super_method_call(tree, env)?
         } else {
             // Instance method call: invokevirtual or invokeinterface
-            self.gen_instance_method_call(tree, env)
-        }
+            self.gen_instance_method_call(tree, env)?
+        };
+        
+        // JavaC alignment: Method calls keep code alive (Gen.java:visitApply)
+        // This is critical for BitSet.cardinality() pattern where method calls in loop conditions
+        // must maintain proper alive state for subsequent return statement generation
+        self.with_items(|items| {
+            items.code.alive = true;
+            Ok(())
+        })?;
+        
+        Ok(result)
     }
     
     /// Generate generic method call with wash type inference
@@ -4876,7 +4886,7 @@ impl Gen {
         match &target_type {
             TypeEnum::Reference(ref_type) => {
                 // Generate checkcast instruction for reference types
-                let class_name = match ref_type {
+                let raw_class_name = match ref_type {
                     crate::ast::ReferenceType::Class(class) => class.clone(),
                     crate::ast::ReferenceType::Interface(interface) => interface.clone(),
                     crate::ast::ReferenceType::Array(_) => {
@@ -4884,6 +4894,9 @@ impl Gen {
                         format!("[{}", "Ljava/lang/Object;") // Simplified for now
                     }
                 };
+                
+                // Use normalize_type_name to convert to fully qualified name
+                let class_name = self.normalize_type_name(&raw_class_name);
                 
                 // Add class to constant pool and emit checkcast
                 let class_idx = self.get_pool_mut().add_class(&class_name);
@@ -5527,6 +5540,23 @@ impl Gen {
                         Ok(CondItem::new(opcodes::IFNE))
                     }
                 }
+            }
+            
+            // Method calls and other complex expressions - handle alive state properly (JavaC pattern)
+            Expr::MethodCall(_) => {
+                // JavaC: genExpr(_tree, syms.booleanType).mkCond() 
+                // Method calls require special alive state handling
+                let result = self.visit_expr(expr, env)?;
+                
+                // Ensure alive state is maintained after method call evaluation
+                // This is critical for loop conditions with method calls like nextSetBit(0)
+                self.with_items(|items| {
+                    // Method calls should keep code alive unless they throw exceptions
+                    items.code.alive = true;
+                    Ok(())
+                })?;
+                
+                Ok(CondItem::new(opcodes::IFNE))
             }
             
             // For all other expressions, evaluate and test != 0
@@ -6364,6 +6394,7 @@ impl Gen {
         }
         
         // JavaC: Chain exit = loopEnv.info.exit; - break statements  
+        let has_breaks = loop_env.exit.is_some();
         if let Some(exit_chain) = loop_env.exit.take() {
             // JavaC: code.resolve(exit);
             self.with_items(|items| {
@@ -6375,7 +6406,53 @@ impl Gen {
             // Loop scope variables are already managed by the scope manager
         }
         
+        // JavaC alive state handling: alive = resolveBreaks(tree, prevPendingExits) || 
+        // tree.cond != null && !tree.cond.type.isTrue();
+        let loop_alive = if let Some(condition) = condition {
+            // Check if condition is a constant true
+            let is_constant_true = self.is_constant_true_condition(condition)?;
+            let result = has_breaks || !is_constant_true;
+            eprintln!("🔍 DEBUG: Loop alive calculation - has_breaks: {}, is_constant_true: {}, result: {}", 
+                     has_breaks, is_constant_true, result);
+            result
+        } else {
+            // No condition means infinite loop, so alive only if there are breaks
+            eprintln!("🔍 DEBUG: Infinite loop - alive only if has_breaks: {}", has_breaks);
+            has_breaks
+        };
+        
+        // Update alive state in code
+        self.with_items(|items| {
+            eprintln!("🔍 DEBUG: Setting code.alive from {} to {} after loop", items.code.alive, loop_alive);
+            items.code.alive = loop_alive;
+            Ok(())
+        })?;
+        
         Ok(())
+    }
+    
+    /// Check if condition is a constant true expression - JavaC Type.isTrue() equivalent
+    fn is_constant_true_condition(&self, condition: &Expr) -> Result<bool> {
+        match condition {
+            Expr::Literal(literal_expr) => {
+                match &literal_expr.value {
+                    crate::ast::Literal::Boolean(true) => Ok(true),
+                    crate::ast::Literal::Integer(i) if *i != 0 => Ok(true),
+                    _ => Ok(false)
+                }
+            },
+            Expr::Binary(binary_expr) => {
+                // For complex conditions like i >= 0, we assume they are not constant true
+                // unless we can prove otherwise through constant folding
+                Ok(false)
+            },
+            Expr::MethodCall(_) => {
+                // Method calls are never constant true - they can change state
+                // This is critical for alive state tracking in loops like BitSet.cardinality()
+                Ok(false)
+            },
+            _ => Ok(false)
+        }
     }
     
     /// Visit return statement - JavaC Gen.visitReturn equivalent
@@ -6391,18 +6468,26 @@ impl Gen {
                 if let Some(ref return_type) = method.return_type {
                     // Use method's declared return type for instruction selection
                     // Skip type validation here - that's handled in earlier phases (Attr)
-                    Self::get_return_instruction_for_type(return_type)
+                    let opcode = Self::get_return_instruction_for_type(return_type);
+                    eprintln!("🔍 DEBUG: Return opcode for method {}: 0x{:02X} (return_type: {:?})", 
+                             method.name, opcode, return_type);
+                    opcode
                 } else {
+                    eprintln!("🔍 DEBUG: No return type for method {}, using RETURN", method.name);
                     super::opcodes::RETURN // Should not happen for non-void with value
                 }
             } else {
+                eprintln!("🔍 DEBUG: No method context, using ARETURN");
                 // Fallback if no method context - this shouldn't happen in well-formed code
                 super::opcodes::ARETURN // Assume object return
             };
             
             if let Some(code) = self.code_mut() {
+                eprintln!("🔍 DEBUG: Emitting return opcode 0x{:02X} at position {}", return_opcode, code.cp);
                 code.emitop(return_opcode);
                 code.alive = false; // Mark code as unreachable after return
+            } else {
+                eprintln!("❌ ERROR: No code context available for return emission");
             }
         } else {
             // Void return statement

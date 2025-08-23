@@ -237,6 +237,7 @@ impl Code {
     /// Emit one byte of code (javac emit1)
     pub fn emit1(&mut self, od: u8) {
         if !self.alive {
+            // eprintln!("❌ DEBUG: emit1 - code not alive (0x{:02X} at {}), skipping", od, self.cp);
             return;
         }
         
@@ -245,6 +246,7 @@ impl Code {
             self.code.resize(self.cp + 1, 0);
         }
         
+        // eprintln!("✅ DEBUG: emit1 - writing 0x{:02X} at position {} (alive={})", od, self.cp, self.alive);
         self.code[self.cp] = od;
         self.cp += 1;
     }
@@ -1104,7 +1106,9 @@ impl Code {
     
     /// Get the final bytecode
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.code.clone()
+        // Return only the bytes up to the current position (cp)
+        // This prevents returning uninitialized bytes after the actual code
+        self.code[..self.cp].to_vec()
     }
     
     /// Get the final stack information

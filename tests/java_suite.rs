@@ -802,6 +802,11 @@ fn normalize_javap_output(lines: &[&str]) -> Vec<String> {
     for &line in lines {
         let trimmed = line.trim();
         
+        // Skip empty lines to normalize spacing between methods
+        if trimmed.is_empty() {
+            continue;
+        }
+        
         // Detect section boundaries
         if trimmed.starts_with("public ") && (trimmed.contains("class") || trimmed.contains("interface")) {
             // Class/interface declaration - flush current section and start new
