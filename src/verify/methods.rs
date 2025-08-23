@@ -204,6 +204,7 @@ fn verify_method_attributes(class_file: &ClassFile, method: &crate::codegen::met
                 
                 // If method has a body, verify last opcode matches descriptor return
                 let desc = cp_utf8(class_file, method.descriptor_index)?;
+                let method_name = cp_utf8(class_file, method.name_index)?;
                 if let Some(last) = code_attr.code.last() {
                     let expected = expected_return_for_descriptor(&desc);
                     if !matches_return_opcode(*last, &expected) {
@@ -338,7 +339,8 @@ fn expected_return_for_descriptor(descriptor: &str) -> ExpectedReturn {
     let mut chars = ret.chars();
     let c = chars.next().unwrap_or('V');
     match c {
-        'V' => ExpectedReturn { name: "RETURN", opcodes: &[opcodes::RETURN] },
+        // Void methods can end with RETURN or ATHROW (for methods that only throw exceptions)
+        'V' => ExpectedReturn { name: "RETURN or ATHROW", opcodes: &[opcodes::RETURN, opcodes::ATHROW] },
         'J' => ExpectedReturn { name: "LRETURN", opcodes: &[opcodes::LRETURN] },
         'F' => ExpectedReturn { name: "FRETURN", opcodes: &[opcodes::FRETURN] },
         'D' => ExpectedReturn { name: "DRETURN", opcodes: &[opcodes::DRETURN] },

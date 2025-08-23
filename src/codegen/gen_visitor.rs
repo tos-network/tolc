@@ -249,6 +249,24 @@ impl Gen {
     /// Handles identifiers, field access, method calls, and complex expressions
     fn evaluate_class_name_from_expr(&self, expr: &Expr, env: &GenContext) -> Result<String> {
         match expr {
+            // Handle parenthesized expressions (crucial for type casts)
+            Expr::Parenthesized(inner) => {
+                // Check if this is a type cast inside parentheses
+                if let Expr::Cast(cast_expr) = inner.as_ref() {
+                    // Return the cast target type - this is the key JavaC alignment fix!
+                    return Ok(self.normalize_type_name(&cast_expr.target_type.name));
+                } else {
+                    // Regular parenthesized expression - evaluate the inner expression
+                    return self.evaluate_class_name_from_expr(inner, env);
+                }
+            },
+            
+            // Direct type cast without extra parentheses
+            Expr::Cast(cast_expr) => {
+                // Return the cast target type - JavaC-aligned behavior
+                return Ok(self.normalize_type_name(&cast_expr.target_type.name));
+            },
+            
             // Simple identifier - check symbol table or use heuristics
             Expr::Identifier(id) => {
                 // For immutable context, skip unified resolver and use direct heuristics
@@ -365,6 +383,42 @@ impl Gen {
             
             // Default case
             _ => Ok("java/lang/Object".to_string()),
+        }
+    }
+    
+    /// Normalize type name to internal format (JavaC-aligned)
+    /// Converts simple type names to fully qualified internal names
+    fn normalize_type_name(&self, type_name: &str) -> String {
+        match type_name {
+            // Interface types that are commonly cast
+            "Comparable" => "java/lang/Comparable".to_string(),
+            "Comparator" => "java/util/Comparator".to_string(),
+            "Iterable" => "java/lang/Iterable".to_string(),
+            "Iterator" => "java/util/Iterator".to_string(),
+            "Collection" => "java/util/Collection".to_string(),
+            "List" => "java/util/List".to_string(),
+            "Set" => "java/util/Set".to_string(),
+            "Map" => "java/util/Map".to_string(),
+            "Queue" => "java/util/Queue".to_string(),
+            "Deque" => "java/util/Deque".to_string(),
+            
+            // Common class types
+            "Object" => "java/lang/Object".to_string(),
+            "String" => "java/lang/String".to_string(),
+            "Integer" => "java/lang/Integer".to_string(),
+            "Long" => "java/lang/Long".to_string(),
+            "Double" => "java/lang/Double".to_string(),
+            "Float" => "java/lang/Float".to_string(),
+            "Boolean" => "java/lang/Boolean".to_string(),
+            "Character" => "java/lang/Character".to_string(),
+            "Byte" => "java/lang/Byte".to_string(),
+            "Short" => "java/lang/Short".to_string(),
+            
+            // Already qualified names - convert dots to slashes
+            name if name.contains('.') => name.replace('.', "/"),
+            
+            // Simple names - assume java.lang package if not found elsewhere
+            simple_name => format!("java/lang/{}", simple_name),
         }
     }
     
@@ -6045,19 +6099,16 @@ impl Gen {
     /// Visit return statement - JavaC Gen.visitReturn equivalent
     pub fn visit_return(&mut self, tree: &ReturnStmt, env: &GenContext) -> Result<()> {
         if let Some(ref expr) = tree.value {
-            // Generate expression for return value and validate type
+            // Generate expression for return value
             let _result = self.visit_expr(expr, env)?;
             
             // Determine return instruction based on method return type (aligned with javac)
+            // JavaC pattern: code.emitop0(ireturn + Code.truncate(Code.typecode(pt)))
+            // where pt is the method's return type
             let return_opcode = if let Some(ref method) = env.method {
                 if let Some(ref return_type) = method.return_type {
-                    // Validate return type compatibility - JavaC aligned type checking
-                    let expr_type = if let Some(ref value) = tree.value {
-                        self.infer_expression_type_with_context(value, env)?
-                    } else {
-                        TypeEnum::Void // Return without value
-                    };
-                    let _is_compatible = self.validate_return_type(&expr_type, return_type, env)?;
+                    // Use method's declared return type for instruction selection
+                    // Skip type validation here - that's handled in earlier phases (Attr)
                     Self::get_return_instruction_for_type(return_type)
                 } else {
                     super::opcodes::RETURN // Should not happen for non-void with value

@@ -8,7 +8,6 @@ fn java_root() -> PathBuf {
 }
 
 #[test]
-#[ignore]
 /// Test TOLC's bytecode generation alignment with javac
 /// 
 /// This test does NOT verify compilation success (TOLC already compiles successfully).
@@ -496,10 +495,23 @@ fn parse_all_java_files_under_tests_java() {
         let file_name = path.file_stem().unwrap().to_string_lossy().to_string();
         
         // Determine package path from file location for reference comparison
-        let relative_path = path.strip_prefix(&root).unwrap_or(path);
-        let parent_path = relative_path.parent().unwrap_or(Path::new(""));
-        let pkg_path_full = parent_path.to_string_lossy().replace("/", "/");
+        // The file_list contains paths like "tests/java/util/ArraysComparator.java"
+        // We need to extract just the package part "util" for reference lookup
         
+        // Since file_path is a relative path like "tests/java/util/ArraysComparator.java"
+        // and we want to extract just "util", we need to strip the "tests/java/" prefix
+        let relative_path = if file_path.starts_with("tests/java/") {
+            &file_path[11..] // Remove "tests/java/" prefix (11 characters: "tests/java/")
+        } else {
+            file_path
+        };
+        
+        let parent_path = Path::new(relative_path).parent().unwrap_or(Path::new(""));
+        let pkg_path_full = parent_path.to_string_lossy().to_string();
+        
+        // For reference class lookup, we need to strip the "tests/java/" prefix
+        // and use just the package path relative to the classes directory
+        // The relative_path will be like "util/ArraysComparator.java", so parent_path is "util"
         let ref_pkg_sub = if pkg_path_full.is_empty() { 
             String::new() 
         } else { 
