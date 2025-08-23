@@ -113,8 +113,6 @@ pub mod writer;
 // Performance optimization modules
 pub mod constpool_optimized;
 pub mod bytecode_optimized;
-// TODO: Fix trait bounds and dependencies
-// pub mod gen_visitor_optimized;
 pub mod performance_monitor;
 
 
@@ -131,8 +129,6 @@ pub use opcode_generator::*;
 // Re-export optimization modules
 pub use constpool_optimized::{OptimizedConstantPool, InternedString};
 pub use bytecode_optimized::{OptimizedBytecodeBuffer, InstructionCache};
-// TODO: Re-enable when trait bounds are fixed
-// pub use gen_visitor_optimized::{OptimizedGenVisitor};
 pub use performance_monitor::{PerformanceMetrics};
 
 pub use vec::*;
