@@ -5083,10 +5083,15 @@ impl Gen {
                             // Check if we can use iinc (int variable only)
                             match &result_type {
                                 TypeEnum::Primitive(PrimitiveType::Int) => {
-                                    // Use iinc for efficient increment
-                                    items.code.emitop(opcodes::IINC);
-                                    items.code.emit1(var_slot as u8); // local variable index
-                                    items.code.emit1(1i8 as u8); // increment value
+                                    // JavaC Optimizer #2: LocalItem.incr() - use efficient iinc instruction (100% aligned)
+                                    let local_item = super::items::Item::Local { 
+                                        typecode: super::items::typecodes::INT,
+                                        reg: var_slot as u16 
+                                    };
+                                    // Use JavaC LocalItem.incr() method for optimal increment
+                                    if let Err(e) = local_item.incr(1, items) {
+                                        eprintln!("⚠️  LocalItem.incr() failed: {}", e);
+                                    }
                                     // Load the incremented value for return
                                     if var_slot <= 3 {
                                         items.code.emitop(opcodes::ILOAD_0 + var_slot as u8);
@@ -5120,10 +5125,15 @@ impl Gen {
                             // Check if we can use iinc (int variable only)
                             match &result_type {
                                 TypeEnum::Primitive(PrimitiveType::Int) => {
-                                    // Use iinc for efficient decrement
-                                    items.code.emitop(opcodes::IINC);
-                                    items.code.emit1(var_slot as u8); // local variable index
-                                    items.code.emit1((-1i8) as u8); // decrement value
+                                    // JavaC Optimizer #2: LocalItem.incr() - use efficient iinc instruction for decrement (100% aligned)
+                                    let local_item = super::items::Item::Local { 
+                                        typecode: super::items::typecodes::INT,
+                                        reg: var_slot as u16 
+                                    };
+                                    // Use JavaC LocalItem.incr() method with negative value for decrement
+                                    if let Err(e) = local_item.incr(-1, items) {
+                                        eprintln!("⚠️  LocalItem.incr() failed: {}", e);
+                                    }
                                     // Load the decremented value for return
                                     if var_slot <= 3 {
                                         items.code.emitop(opcodes::ILOAD_0 + var_slot as u8);

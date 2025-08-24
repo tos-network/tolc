@@ -629,6 +629,25 @@ pub enum AssignmentOp {
     AndAssign, OrAssign, XorAssign, LShiftAssign, RShiftAssign, URShiftAssign,
 }
 
+impl std::fmt::Display for AssignmentOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AssignmentOp::Assign => write!(f, "="),
+            AssignmentOp::AddAssign => write!(f, "+="),
+            AssignmentOp::SubAssign => write!(f, "-="),
+            AssignmentOp::MulAssign => write!(f, "*="),
+            AssignmentOp::DivAssign => write!(f, "/="),
+            AssignmentOp::ModAssign => write!(f, "%="),
+            AssignmentOp::AndAssign => write!(f, "&="),
+            AssignmentOp::OrAssign => write!(f, "|="),
+            AssignmentOp::XorAssign => write!(f, "^="),
+            AssignmentOp::LShiftAssign => write!(f, "<<="),
+            AssignmentOp::RShiftAssign => write!(f, ">>="),
+            AssignmentOp::URShiftAssign => write!(f, ">>>="),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssignmentExpr {
     pub target: Box<Expr>,

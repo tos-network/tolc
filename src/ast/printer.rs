@@ -865,7 +865,7 @@ impl AstVisitor for AstPrinter {
     
     fn visit_assignment_expr(&mut self, assignment: &AssignmentExpr) {
         self.visit_expr(&assignment.target);
-        self.output.push_str(&format!(" {:?} ", assignment.operator).to_lowercase());
+        self.output.push_str(&format!(" {} ", assignment.operator));
         self.visit_expr(&assignment.value);
     }
     
