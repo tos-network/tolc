@@ -19,6 +19,7 @@ use super::symtab::Symtab;
 use super::type_inference::{TypeInference, ConstantValue};
 use super::class::ClassFile;
 use super::optimization_manager::OptimizationManager;
+use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
 use super::flag::access_flags;
 use super::attribute;
 use super::field;
@@ -55,6 +56,9 @@ pub struct Gen {
     
     /// Optimization manager - coordinates all optimization passes
     optimizer: OptimizationManager,
+    
+    /// Branch optimizer for conditional jump optimization (JavaC alignment)
+    pub branch_optimizer: BranchOptimizer,
     
     /// Register allocation manager for local variables (JavaC alignment)
     pub register_alloc: crate::codegen::register_alloc::RegisterAllocator,
@@ -541,6 +545,7 @@ impl Gen {
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
             optimizer: OptimizationManager::new(),   // Optimization coordinator
+            branch_optimizer: BranchOptimizer::new(), // Branch optimization for conditional jumps
             register_alloc: crate::codegen::register_alloc::RegisterAllocator::new(), // Register allocation manager
             dynamic_class_loader: None,              // Dynamic class loader (initialized on demand)
             current_break_chain: None,               // Phase 2.3: break statement chain

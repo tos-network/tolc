@@ -10,6 +10,7 @@ use crate::codegen::{
     instruction_optimizer::{InstructionOptimizer, PeepholeOptimizer},
     pending_jumps::PendingJumpsManager,
     constant_optimizer::{ConstantOptimizer, ConstantInstruction},
+    branch_optimizer::{BranchOptimizer, BranchOptimizationContext},
 };
 use std::collections::{HashMap, HashSet};
 
@@ -177,6 +178,9 @@ pub struct OptimizationManager {
     
     /// Jump optimization manager for complex jump handling (JavaC pattern)
     pub jump_manager: PendingJumpsManager,
+    
+    /// Branch optimization manager (JavaC pattern)
+    pub branch_optimizer: BranchOptimizer,
 }
 
 impl OptimizationManager {
@@ -192,6 +196,7 @@ impl OptimizationManager {
             parallel_execution: false,
             method_size_threshold: 1000,
             jump_manager: PendingJumpsManager::new(),
+            branch_optimizer: BranchOptimizer::new(),
         };
         
         manager.initialize_default_passes();
@@ -584,6 +589,9 @@ impl OptimizationManager {
             OptimizationType::JumpOptimization => {
                 self.run_jump_optimization(bytecode, context)
             }
+            OptimizationType::BranchOptimization => {
+                self.run_branch_optimization(bytecode, context)
+            }
             OptimizationType::StringOptimization => {
                 self.run_string_optimization(bytecode, context)
             }
@@ -679,6 +687,30 @@ impl OptimizationManager {
             if optimized.len() != bytecode.len() {
                 return Ok(Some(optimized));
             }
+        }
+        
+        Ok(None)
+    }
+    
+    fn run_branch_optimization(&self, bytecode: Vec<u8>, context: &OptimizationContext) -> Result<Option<Vec<u8>>> {
+        // JavaC-aligned branch optimization using BranchOptimizer
+        if self.optimization_level >= OptimizationLevel::Standard {
+            let branch_context = BranchOptimizationContext {
+                method_name: context.method.name.clone(),
+                branch_frequency: HashMap::new(), // Could be enhanced with profiling data
+                target_size_limit: context.max_bytecode_size,
+                preserve_debug_info: context.preserve_debug_info,
+            };
+            
+            // Create a temporary branch optimizer for this method
+            // In a full implementation, we'd use the shared one with synchronization
+            let mut branch_optimizer = BranchOptimizer::new();
+            let optimized = branch_optimizer.optimize_branches(bytecode, &branch_context)?;
+            
+            // Update global statistics (simplified for single-threaded case)
+            // In multi-threaded case, we'd need proper synchronization
+            
+            return Ok(Some(optimized));
         }
         
         Ok(None)

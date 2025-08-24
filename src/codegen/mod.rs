@@ -57,6 +57,7 @@ pub mod optimizer_alignment; // Optimizer alignment verification
 pub mod annotation;  // Needed by class_writer.rs  
 // Backed up: pub mod assignment_optimizer;
 pub mod attribute;
+pub mod branch_optimizer;    // JavaC-aligned branch optimization
 pub mod bytecode; // Still needed by some existing code
 pub mod code;        // New JavaC-aligned code buffer
 // Backed up: pub mod code_builder; // High-level builder using Code
