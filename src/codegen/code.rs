@@ -41,11 +41,7 @@ impl State {
     /// Push a value onto the operand stack
     pub fn push(&mut self, t: Type) {
         self.stacksize += t.width();
-        let old_max = self.max_stacksize;
         self.max_stacksize = self.max_stacksize.max(self.stacksize);
-        if self.max_stacksize > old_max {
-            eprintln!("DEBUG STACK: max_stacksize updated: {} -> {} (pushed {:?})", old_max, self.max_stacksize, t);
-        }
         self.stack.push(t);
     }
     

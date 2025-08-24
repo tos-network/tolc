@@ -4436,20 +4436,14 @@ impl Gen {
         let class_idx = self.get_pool_mut().add_class(&internal_class_name);
         
         self.with_items(|items| {
-            eprintln!("DEBUG CONSTRUCTOR: Before NEW - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
-            
             // 1. Generate 'new' instruction - allocate object
             items.code.emitop(super::opcodes::NEW);
             items.code.emit2(class_idx);
             items.code.state.push(super::code::Type::Object(internal_class_name.clone()));
             
-            eprintln!("DEBUG CONSTRUCTOR: After NEW - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
-            
             // 2. Duplicate reference for constructor call
             items.code.emitop(super::opcodes::DUP);
             items.code.state.push(super::code::Type::Object(internal_class_name.clone()));
-            
-            eprintln!("DEBUG CONSTRUCTOR: After DUP - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
             
             Ok(())
         })?;
