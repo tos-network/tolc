@@ -207,8 +207,8 @@ fn verify_method_attributes(class_file: &ClassFile, method: &crate::codegen::met
                 let method_name = cp_utf8(class_file, method.name_index)?;
                 if let Some(last) = code_attr.code.last() {
                     let expected = expected_return_for_descriptor(&desc);
-                    eprintln!("🔍 DEBUG: Verifying method '{}' with descriptor '{}' - last opcode: 0x{:02X}, expected: {}", 
-                             method_name, desc, last, expected.name);
+                    // eprintln!("🔍 DEBUG: Verifying method '{}' with descriptor '{}' - last opcode: 0x{:02X}, expected: {}", 
+                    //          method_name, desc, last, expected.name);
                     if !matches_return_opcode(*last, &expected) {
                         return Err(MethodVerifyError::ReturnMismatch {
                             expected: expected.name,

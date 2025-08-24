@@ -126,7 +126,10 @@ impl TransTypes {
                             let type_resolver = crate::codegen::signature::TypeNameResolver::with_default_mappings();
                             let signature = self.constructor_to_signature(constructor, Some(&class_decl.name), &type_resolver);
                             
-                            self.generic_signatures.insert(format!("method:{}:<init>", class_decl.name), signature);
+                            // Include descriptor to distinguish constructor overloads
+                            let descriptor = self.constructor_to_descriptor(constructor);
+                            let key = format!("method:{}:<init>:{}", class_decl.name, descriptor);
+                            self.generic_signatures.insert(key, signature);
                             eprintln!("🔧 TRANS_TYPES: Stored constructor signature for '{}'", class_decl.name);
                         }
                     }
@@ -672,6 +675,66 @@ impl TransTypes {
     /// Get erased types for use by subsequent phases
     pub fn get_erased_types(&self) -> &HashMap<String, String> {
         &self.erased_types
+    }
+    
+    /// Generate constructor descriptor for overload disambiguation
+    fn constructor_to_descriptor(&self, constructor: &crate::ast::ConstructorDecl) -> String {
+        let mut descriptor = String::from("(");
+        
+        // Add parameter descriptors
+        for param in &constructor.parameters {
+            descriptor.push_str(&self.type_ref_to_descriptor(&param.type_ref));
+        }
+        
+        descriptor.push(')');
+        descriptor.push('V'); // Constructors always return void
+        
+        descriptor
+    }
+    
+    /// Convert TypeRef to JVM descriptor string  
+    fn type_ref_to_descriptor(&self, type_ref: &crate::ast::TypeRef) -> String {
+        let mut descriptor = String::new();
+        
+        // Add array dimensions
+        for _ in 0..type_ref.array_dims {
+            descriptor.push('[');
+        }
+        
+        // Add base type descriptor
+        match type_ref.name.as_str() {
+            "boolean" => descriptor.push('Z'),
+            "byte" => descriptor.push('B'),
+            "char" => descriptor.push('C'),
+            "short" => descriptor.push('S'),
+            "int" => descriptor.push('I'),
+            "long" => descriptor.push('J'),
+            "float" => descriptor.push('F'),
+            "double" => descriptor.push('D'),
+            "void" => descriptor.push('V'),
+            _ => {
+                // Object type - ensure full package path
+                descriptor.push('L');
+                let class_name = if type_ref.name.contains('.') {
+                    type_ref.name.replace('.', "/")
+                } else {
+                    // Try to expand short names to full package names
+                    match type_ref.name.as_str() {
+                        "Collection" => "java/util/Collection".to_string(),
+                        "List" => "java/util/List".to_string(),
+                        "Set" => "java/util/Set".to_string(),
+                        "Map" => "java/util/Map".to_string(),
+                        "String" => "java/lang/String".to_string(),
+                        "Object" => "java/lang/Object".to_string(),
+                        _ => type_ref.name.replace('.', "/")
+                    }
+                };
+                descriptor.push_str(&class_name);
+                descriptor.push(';');
+            }
+        }
+        
+        descriptor
     }
 }
 

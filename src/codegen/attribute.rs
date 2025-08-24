@@ -406,9 +406,22 @@ pub struct RuntimeInvisibleAnnotationsAttribute {
 }
 
 impl RuntimeInvisibleAnnotationsAttribute {
-    fn write_to_classfile(&self, buffer: &mut Vec<u8>, _const_pool: &ConstantPool) {
-        // Placeholder implementation
+    fn write_to_classfile(&self, buffer: &mut Vec<u8>, const_pool: &ConstantPool) {
+        // JVM spec: RuntimeInvisibleAnnotations_attribute format
+        // u2 num_annotations;
+        // annotation annotations[num_annotations];
+        
         buffer.extend_from_slice(&(self.annotations.len() as u16).to_be_bytes());
+        
+        for annotation in &self.annotations {
+            // annotation format:
+            // u2 type_index;
+            // u2 num_element_value_pairs;
+            // element_value_pair[num_element_value_pairs];
+            
+            buffer.extend_from_slice(&annotation.type_name.as_u16().to_be_bytes());
+            buffer.extend_from_slice(&(0u16).to_be_bytes()); // num_element_value_pairs = 0 for simple annotations like @Override
+        }
     }
 }
 

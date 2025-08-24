@@ -248,7 +248,37 @@ impl Gen {
     
     /// Evaluate class name from expression - Enhanced expression type resolution
     /// Handles identifiers, field access, method calls, and complex expressions
-    fn evaluate_class_name_from_expr(&self, expr: &Expr, env: &GenContext) -> Result<String> {
+    fn evaluate_class_name_from_expr(&mut self, expr: &Expr, env: &GenContext) -> Result<String> {
+        // CONSERVATIVE FIX: Only use enhanced inference for complex expressions, not simple casts
+        // This avoids breaking simple interface method calls while helping complex field access patterns
+        match expr {
+            // Skip enhanced inference for simple casts to avoid interface method call issues
+            Expr::Cast(_) => {
+                // Let existing logic handle casts - they work correctly
+            },
+            // Use enhanced inference for field access and other complex expressions
+            Expr::FieldAccess(_) | Expr::Identifier(_) => {
+                if let Ok(inferred_type) = self.infer_expression_type(expr) {
+                    match inferred_type {
+                        TypeEnum::Reference(ReferenceType::Class(class_name)) => {
+                            eprintln!("🎯 METHOD TARGET: Expression resolved to class '{}'", class_name);
+                            return Ok(class_name.replace('.', "/"));
+                        },
+                        TypeEnum::Reference(ReferenceType::Interface(interface_name)) => {
+                            eprintln!("🎯 METHOD TARGET: Expression resolved to interface '{}'", interface_name);
+                            return Ok(interface_name.replace('.', "/"));
+                        },
+                        _ => {
+                            // Fall through to existing logic
+                        }
+                    }
+                }
+            },
+            _ => {
+                // Let existing logic handle other cases
+            }
+        }
+        
         match expr {
             // Handle parenthesized expressions (crucial for type casts)
             Expr::Parenthesized(inner) => {
@@ -270,8 +300,22 @@ impl Gen {
             
             // Simple identifier - check symbol table or use heuristics
             Expr::Identifier(id) => {
-                // For immutable context, skip unified resolver and use direct heuristics
-                // In a full implementation, we'd have an immutable resolver interface
+                // First try unified resolver if available (handles parameters, local vars, etc.)
+                if let Some(unified_type) = self.try_resolve_identifier_type(&id.name) {
+                    match unified_type {
+                        TypeEnum::Reference(ReferenceType::Class(class_name)) => {
+                            eprintln!("🔍 EVALUATE: '{}' resolved to class '{}' via unified resolver", id.name, class_name);
+                            return Ok(class_name);
+                        },
+                        TypeEnum::Reference(ReferenceType::Interface(interface_name)) => {
+                            eprintln!("🔍 EVALUATE: '{}' resolved to interface '{}' via unified resolver", id.name, interface_name);
+                            return Ok(interface_name);
+                        },
+                        _ => {
+                            // Fall through to heuristics
+                        }
+                    }
+                }
                 
                 // Fallback to well-known class mappings
                 Ok(match id.name.as_str() {
@@ -300,10 +344,17 @@ impl Gen {
                 })
             },
             
-            // Field access like System.out or obj.field
+            // Field access like System.out or java.base.Data
             Expr::FieldAccess(field_access) => {
                 if let Some(ref target) = field_access.target {
-                    // Handle specific patterns
+                    // Check if this is a qualified class name like java.base.Data
+                    if let Some(qualified_class) = self.extract_qualified_class_name_for_evaluation(expr) {
+                        eprintln!("🔍 EVALUATE_CLASS: Found qualified class name: {}", qualified_class);
+                        // Convert to internal format (java.base.Data -> java/base/Data)
+                        return Ok(qualified_class.replace('.', "/"));
+                    }
+                    
+                    // Handle specific field access patterns
                     if let Expr::Identifier(ref obj) = target.as_ref() {
                         match (obj.name.as_str(), field_access.name.as_str()) {
                             ("System", "out") => Ok("java/io/PrintStream".to_string()),
@@ -312,14 +363,13 @@ impl Gen {
                             _ => {
                                 // Try to evaluate target class and infer field type
                                 let target_class = self.evaluate_class_name_from_expr(target, env)?;
-                                // For now, return Object as we don't have full field type resolution
-                                Ok("java/lang/Object".to_string())
+                                // TODO: Implement proper field type resolution
+                                Ok(target_class)
                             }
                         }
                     } else {
                         // Complex target expression - evaluate recursively
                         let target_class = self.evaluate_class_name_from_expr(target, env)?;
-                        // Return the target class as the type
                         Ok(target_class)
                     }
                 } else {
@@ -1714,25 +1764,78 @@ impl Gen {
     /// Get array component type
     fn get_array_component_type(&self, array_type: &TypeEnum) -> Result<TypeEnum> {
         eprintln!("🔍 ARRAY COMP: Getting component type for array: {}", self.type_to_string(array_type));
+        eprintln!("🔍 ARRAY COMP DEBUG: array_type = {:?}", array_type);
         match array_type {
             TypeEnum::Reference(ReferenceType::Array(component_ref)) => {
-                // CRITICAL FIX: Directly create component type from TypeRef name instead of using as_type_enum()
-                // This fixes the array element type resolution issue
-                let component_type = if component_ref.array_dims > 0 {
-                    // Multi-dimensional array: return the component type using proper conversion
-                    self.convert_type_ref_to_type_enum(&component_ref)
-                } else if component_ref.name == "int" {
-                    TypeEnum::Primitive(PrimitiveType::Int)
-                } else if component_ref.name == "long" {
-                    TypeEnum::Primitive(PrimitiveType::Long)
-                } else if component_ref.name == "String" || component_ref.name == "java.lang.String" {
-                    TypeEnum::Reference(ReferenceType::Class("java.lang.String".to_string()))
-                } else if component_ref.name == "boolean" {
-                    TypeEnum::Primitive(PrimitiveType::Boolean)
+                // CRITICAL FIX: Handle array component types based on the actual representation
+                eprintln!("🔍 ARRAY COMP: component_ref.name='{}', array_dims={}", component_ref.name, component_ref.array_dims);
+                
+                let component_type = if component_ref.name.ends_with("[]") {
+                    // Multi-dimensional array represented as "int[]" name
+                    let base_name = &component_ref.name[..component_ref.name.len() - 2];
+                    eprintln!("🔍 ARRAY COMP: Multi-dimensional array, base_name='{}' ", base_name);
+                    
+                    if base_name.ends_with("[]") {
+                        // Still multi-dimensional (e.g., "int[][]" -> "int[]")
+                        let new_component_ref = crate::ast::TypeRef {
+                            name: base_name.to_string(),
+                            type_args: vec![],
+                            annotations: vec![],
+                            array_dims: 0,
+                            span: component_ref.span.clone(),
+                        };
+                        TypeEnum::Reference(ReferenceType::Array(Box::new(new_component_ref)))
+                    } else {
+                        // Component of multi-dimensional array (e.g., "int[][]" -> "int[]")
+                        // Return an array type, not primitive type
+                        let new_component_ref = crate::ast::TypeRef {
+                            name: base_name.to_string(),
+                            type_args: vec![],
+                            annotations: vec![],
+                            array_dims: 0,
+                            span: component_ref.span.clone(),
+                        };
+                        TypeEnum::Reference(ReferenceType::Array(Box::new(new_component_ref)))
+                    }
+                } else if component_ref.array_dims > 0 {
+                    // Multi-dimensional array: create a new array type with reduced dimensions
+                    let mut new_component_ref = component_ref.as_ref().clone();
+                    new_component_ref.array_dims -= 1;
+                    
+                    if new_component_ref.array_dims > 0 {
+                        // Still multi-dimensional, return as array
+                        TypeEnum::Reference(ReferenceType::Array(Box::new(new_component_ref)))
+                    } else {
+                        // Now single type, convert based on name
+                        match new_component_ref.name.as_str() {
+                            "int" => TypeEnum::Primitive(PrimitiveType::Int),
+                            "long" => TypeEnum::Primitive(PrimitiveType::Long),
+                            "boolean" => TypeEnum::Primitive(PrimitiveType::Boolean),
+                            "byte" => TypeEnum::Primitive(PrimitiveType::Byte),
+                            "short" => TypeEnum::Primitive(PrimitiveType::Short),
+                            "char" => TypeEnum::Primitive(PrimitiveType::Char),
+                            "float" => TypeEnum::Primitive(PrimitiveType::Float),
+                            "double" => TypeEnum::Primitive(PrimitiveType::Double),
+                            "String" | "java.lang.String" => TypeEnum::Reference(ReferenceType::Class("java/lang/String".to_string())),
+                            _ => TypeEnum::Reference(ReferenceType::Class(new_component_ref.name.clone()))
+                        }
+                    }
                 } else {
-                    // For other types, use the original conversion
-                    TypeEnum::from(component_ref.as_ref().clone())
+                    // Single-dimensional array: return base type
+                    match component_ref.name.as_str() {
+                        "int" => TypeEnum::Primitive(PrimitiveType::Int),
+                        "long" => TypeEnum::Primitive(PrimitiveType::Long),
+                        "boolean" => TypeEnum::Primitive(PrimitiveType::Boolean),
+                        "byte" => TypeEnum::Primitive(PrimitiveType::Byte),
+                        "short" => TypeEnum::Primitive(PrimitiveType::Short),
+                        "char" => TypeEnum::Primitive(PrimitiveType::Char),
+                        "float" => TypeEnum::Primitive(PrimitiveType::Float),
+                        "double" => TypeEnum::Primitive(PrimitiveType::Double),
+                        "String" | "java.lang.String" => TypeEnum::Reference(ReferenceType::Class("java/lang/String".to_string())),
+                        _ => TypeEnum::Reference(ReferenceType::Class(component_ref.name.clone()))
+                    }
                 };
+                
                 eprintln!("🔍 ARRAY COMP: Component type resolved to: {}", self.type_to_string(&component_type));
                 Ok(component_type)
             }
@@ -2982,7 +3085,7 @@ impl Gen {
                             crate::codegen::enter::SymbolKind::Variable,
                         _ => crate::codegen::enter::SymbolKind::Field
                     },
-                    owner: "current".to_string(),
+                    owner: format!("class:{}", class_context),
                     local_slot: Some(resolution.scope_depth as usize), // Use scope depth as slot approximation
                     is_static: false,
                     is_parameter: matches!(resolution.resolution_context, crate::codegen::gen::ResolutionContext::Parameter),
@@ -3017,9 +3120,9 @@ impl Gen {
                     let slot = var_symbol.local_slot.unwrap_or(1) as u16;
                     let var_type = var_symbol.var_type.clone();
                     eprintln!("📍 GEN: Loading local variable '{}' from slot {}", tree.name, slot);
+                    // Parse var_type to create correct ResolvedType (handles primitives, arrays, and references)
+                    let resolved_type = self.parse_descriptor_to_resolved_type(&var_type)?;
                     self.with_items(|items| {
-                        // Create type-aware local item using resolved type
-                        let resolved_type = crate::codegen::attr::ResolvedType::Reference(var_type);
                         let local_item = items.make_local_item_for_resolved_type(&resolved_type, slot);
                         items.load_item(&local_item)
                     })
@@ -3035,8 +3138,8 @@ impl Gen {
                     if is_static {
                         eprintln!("📍 GEN: Loading static field '{}'", field_name);
                         // Static field (like JavaC: (sym.flags() & STATIC) != 0)
+                        let resolved_type = self.parse_descriptor_to_resolved_type(&var_type)?;
                         self.with_items(|items| {
-                            let resolved_type = crate::codegen::attr::ResolvedType::Reference(var_type);
                             let static_item = items.make_static_item_for_resolved_type(
                                 &field_name, 
                                 &owner_class,
@@ -3047,10 +3150,11 @@ impl Gen {
                     } else {
                         eprintln!("📍 GEN: Loading instance field '{}'", field_name);
                         // Instance field (like JavaC: load this, then member)
+                        // Parse var_type to create correct ResolvedType (handles arrays, primitives, and references)
+                        let resolved_type = self.parse_descriptor_to_resolved_type(&var_type)?;
                         self.with_items(|items| {
                             let this_item = items.make_this_item();
                             items.load_item(&this_item)?; // Load 'this' first
-                            let resolved_type = crate::codegen::attr::ResolvedType::Reference(var_type);
                             let member_item = items.make_member_item_for_resolved_type(
                                 &field_name,
                                 &owner_class,
@@ -3150,7 +3254,25 @@ impl Gen {
                 eprintln!("DEBUG: Found wash field type for '{}': {:?}", tree.name, resolved_type);
                 
                 // Extract class name and field descriptor before borrowing
-                let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
+                // CRITICAL FIX: Determine owner class from target expression type, not current class
+                let owner_class = if let Some(target_type) = self.infer_expression_type(target).ok() {
+                    match target_type {
+                        TypeEnum::Reference(ReferenceType::Class(class_name)) => {
+                            // Convert from java.util.LinkedListCell to java/util/LinkedListCell
+                            class_name.replace('.', "/")
+                        },
+                        TypeEnum::Reference(ReferenceType::Interface(interface_name)) => {
+                            interface_name.replace('.', "/")
+                        },
+                        _ => {
+                            // Fallback to current class if target type can't be determined
+                            env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string())
+                        }
+                    }
+                } else {
+                    // Fallback to current class if target type can't be determined
+                    env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string())
+                };
                 let field_name = tree.name.clone();
                 let field_descriptor = self.get_field_descriptor_from_resolved_type(&resolved_type);
                 
@@ -3186,13 +3308,27 @@ impl Gen {
             if tree.name == "value" {
                 eprintln!("WARNING: Using fallback field access for 'value' - should use wash type info");
                 
+                // CRITICAL FIX: Determine owner class from target expression type OUTSIDE closure
+                let owner_class = if let Some(target_type) = self.infer_expression_type(target).ok() {
+                    match target_type {
+                        TypeEnum::Reference(ReferenceType::Class(class_name)) => {
+                            // Convert from java.util.LinkedListCell to java/util/LinkedListCell
+                            class_name.replace('.', "/")
+                        },
+                        TypeEnum::Reference(ReferenceType::Interface(interface_name)) => {
+                            interface_name.replace('.', "/")
+                        },
+                        _ => "java/lang/Object".to_string()
+                    }
+                } else {
+                    "java/lang/Object".to_string()
+                };
+                
                 return self.with_items(|items| {
-                    // Create a field item for the 'value' field
-                    let current_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("java/lang/Object".to_string());
                     let field_item = BytecodeItem::Member {
                         typecode: typecodes::OBJECT,
                         member_name: "value".to_string(),
-                        class_name: current_class,
+                        class_name: owner_class,
                         descriptor: "Ljava/lang/Object;".to_string(),
                         is_static: false,
                         nonvirtual: false,
@@ -3384,6 +3520,57 @@ impl Gen {
         }
     }
     
+    /// Parse a JVM descriptor string or type name into a ResolvedType
+    /// Handles both JVM descriptors (I, [Ljava/lang/Object;) and type names (int, java.lang.Object)
+    fn parse_descriptor_to_resolved_type(&self, input: &str) -> Result<crate::codegen::attr::ResolvedType> {
+        use crate::codegen::attr::{ResolvedType, PrimitiveType};
+        
+        if input.is_empty() {
+            return Err(crate::common::error::Error::codegen_error("Empty input".to_string()));
+        }
+        
+        // First check if this looks like a JVM descriptor (starts with [ or L or is a single primitive char)
+        let first_char = input.chars().next().unwrap();
+        match first_char {
+            // Array types (JVM descriptor format)
+            '[' => {
+                let element_descriptor = &input[1..];
+                let element_type = Box::new(self.parse_descriptor_to_resolved_type(element_descriptor)?);
+                Ok(ResolvedType::Array(element_type))
+            }
+            // Primitive types (JVM descriptor format)
+            'Z' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Boolean)),
+            'B' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Byte)),
+            'C' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Char)),
+            'S' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Short)),
+            'I' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Int)),
+            'J' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Long)),
+            'F' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Float)),
+            'D' if input.len() == 1 => Ok(ResolvedType::Primitive(PrimitiveType::Double)),
+            // Reference types (JVM descriptor format)
+            'L' if input.ends_with(';') => {
+                let class_name = &input[1..input.len()-1].replace('/', ".");
+                Ok(ResolvedType::Reference(class_name.to_string()))
+            }
+            // Type names (not JVM descriptors)
+            _ => {
+                match input {
+                    // Primitive type names
+                    "boolean" => Ok(ResolvedType::Primitive(PrimitiveType::Boolean)),
+                    "byte" => Ok(ResolvedType::Primitive(PrimitiveType::Byte)),
+                    "char" => Ok(ResolvedType::Primitive(PrimitiveType::Char)),
+                    "short" => Ok(ResolvedType::Primitive(PrimitiveType::Short)),
+                    "int" => Ok(ResolvedType::Primitive(PrimitiveType::Int)),
+                    "long" => Ok(ResolvedType::Primitive(PrimitiveType::Long)),
+                    "float" => Ok(ResolvedType::Primitive(PrimitiveType::Float)),
+                    "double" => Ok(ResolvedType::Primitive(PrimitiveType::Double)),
+                    // Everything else is a reference type
+                    _ => Ok(ResolvedType::Reference(input.to_string()))
+                }
+            }
+        }
+    }
+
     /// Convert ResolvedType to JVM descriptor for method signatures
     fn resolved_type_to_descriptor(&self, resolved_type: &crate::codegen::attr::ResolvedType) -> Result<String> {
         use crate::codegen::attr::{ResolvedType, PrimitiveType};
@@ -3617,38 +3804,73 @@ impl Gen {
     
     /// Check if this is a static method call
     fn is_static_method_call(&self, tree: &MethodCallExpr) -> bool {
-        // Heuristics for static method detection
-        // In a complete implementation, this would use symbol table information
+        // Enhanced static method detection using rt.rs and classpath
         if let Some(ref target) = tree.target {
-            if let Expr::Identifier(ident) = target.as_ref() {
-                // Check for known static method patterns
-                match ident.name.as_str() {
-                    "System" | "Math" | "String" | "Integer" | "Double" | "Float" | "Long" | "Object" => true,
-                    _ => false, // Unknown class - assume instance method for safety
+            // Check for fully qualified static method calls like java.base.Data.toString
+            if let Some(qualified_class) = self.extract_qualified_class_name(target) {
+                eprintln!("🔍 QUALIFIED CALL: Checking static method '{}' on class '{}'", tree.name, qualified_class);
+                
+                // First, check rt.rs for method information
+                if let Some(is_static) = self.lookup_method_in_rt(&qualified_class, &tree.name) {
+                    eprintln!("✅ RT LOOKUP: Found method '{}::{}' in rt.rs, is_static={}", qualified_class, tree.name, is_static);
+                    return is_static;
                 }
+                
+                // Then check dynamic class loader / classpath
+                if let Some(is_static) = self.lookup_method_in_classpath(&qualified_class, &tree.name) {
+                    eprintln!("✅ CLASSPATH LOOKUP: Found method '{}::{}' in classpath, is_static={}", qualified_class, tree.name, is_static);
+                    return is_static;
+                }
+                
+                eprintln!("⚠️ QUALIFIED CALL: Method '{}::{}' not found in rt.rs or classpath", qualified_class, tree.name);
+                return false;
+            }
+            
+            if let Expr::Identifier(ident) = target.as_ref() {
+                // Simple class name - try to resolve fully and check
+                let qualified_class = self.resolve_simple_class_name(&ident.name);
+                if let Some(is_static) = self.lookup_method_in_rt(&qualified_class, &tree.name) {
+                    return is_static;
+                }
+                if let Some(is_static) = self.lookup_method_in_classpath(&qualified_class, &tree.name) {
+                    return is_static;
+                }
+                return false;
             } else {
                 false // Complex target expression - likely instance method
             }
         } else {
             // No target - could be current class static method or instance method with implicit 'this'
-            // Check if this is a known static method in the current class
+            // Use wash symbol environment to check actual method modifiers
             self.is_current_class_static_method(&tree.name)
         }
     }
     
     /// Check if a method is static in the current class
     fn is_current_class_static_method(&self, method_name: &str) -> bool {
-        // Check wash type information for method modifiers
-        if let Some(wash_types) = self.get_wash_type_info() {
-            let method_key = format!("{}()", method_name);
-            if let Some(_resolved_type) = wash_types.get(&method_key) {
-                // For now, use heuristics based on common static method names
-                // In future, this could check actual method modifiers from wash
-                return self.is_static_method_by_name(method_name);
+        // First, check wash symbol environment for actual method modifiers
+        if let Some(ref symbol_env) = self.wash_symbol_env {
+            // Get current class context
+            if let Some(current_class) = self.get_current_class_context() {
+                let method_key = format!("{}:{}", current_class, method_name);
+                eprintln!("🔍 STATIC CHECK: Looking for method key '{}'", method_key);
+                
+                if let Some(method_symbol) = symbol_env.methods.get(&method_key) {
+                    eprintln!("✅ STATIC CHECK: Found method '{}', is_static={}", method_name, method_symbol.is_static);
+                    return method_symbol.is_static;
+                } else {
+                    eprintln!("⚠️ STATIC CHECK: Method '{}' not found in symbol env, available methods: {:?}", 
+                             method_key, symbol_env.methods.keys().collect::<Vec<_>>());
+                }
+            } else {
+                eprintln!("⚠️ STATIC CHECK: No current class context available");
             }
+        } else {
+            eprintln!("⚠️ STATIC CHECK: No wash symbol environment available");
         }
         
-        // Fallback to heuristics based on method name patterns
+        // Fallback to heuristics only when symbol information is not available
+        eprintln!("🔄 STATIC CHECK: Falling back to heuristics for method '{}'", method_name);
         self.is_static_method_by_name(method_name)
     }
     
@@ -3667,6 +3889,125 @@ impl Gen {
                 // For unknown methods, check if they follow static naming conventions
                 // Static methods often have no receiver and are utility functions
                 method_name.chars().next().map_or(false, |c| c.is_lowercase())
+            }
+        }
+    }
+    
+    /// Extract qualified class name from field access expression like java.base.Data
+    fn extract_qualified_class_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Identifier(ident) => Some(ident.name.clone()),
+            Expr::FieldAccess(field_access) => {
+                if let Some(ref target) = field_access.target {
+                    if let Some(prefix) = self.extract_qualified_class_name(target) {
+                        Some(format!("{}.{}", prefix, field_access.name))
+                    } else {
+                        Some(field_access.name.clone())
+                    }
+                } else {
+                    Some(field_access.name.clone())
+                }
+            }
+            _ => None
+        }
+    }
+    
+    /// Extract qualified class name for class evaluation (specialized version)
+    fn extract_qualified_class_name_for_evaluation(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Identifier(ident) => {
+                // Only return known class names, not variable names
+                match ident.name.as_str() {
+                    // Known static utility classes
+                    "System" | "Math" | "String" | "Integer" | "Double" | "Float" | 
+                    "Long" | "Boolean" | "Character" | "Object" | "Class" | "Thread" | 
+                    "Runtime" | "Data" => Some(ident.name.clone()),
+                    _ => None
+                }
+            },
+            Expr::FieldAccess(field_access) => {
+                if let Some(ref target) = field_access.target {
+                    if let Some(prefix) = self.extract_qualified_class_name_for_evaluation(target) {
+                        Some(format!("{}.{}", prefix, field_access.name))
+                    } else {
+                        // Check if this could be a qualified class name starting with known packages
+                        if let Expr::Identifier(ident) = target.as_ref() {
+                            match ident.name.as_str() {
+                                // Java standard packages
+                                "java" | "javax" | "sun" | "com" | "org" => {
+                                    Some(format!("{}.{}", ident.name, field_access.name))
+                                }
+                                _ => None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                } else {
+                    Some(field_access.name.clone())
+                }
+            }
+            _ => None
+        }
+    }
+    
+    /// Lookup method in rt.rs metadata
+    fn lookup_method_in_rt(&self, qualified_class: &str, method_name: &str) -> Option<bool> {
+        use crate::common::rt::*;
+        
+        // Convert qualified class name to internal format (java.base.Data -> java/base/Data)
+        let internal_name = qualified_class.replace('.', "/");
+        
+        eprintln!("🔍 RT LOOKUP: Searching for class '{}' (internal: '{}')", qualified_class, internal_name);
+        
+        // Look up class in rt.rs CLASSES array
+        for class_meta in CLASSES.iter() {
+            if class_meta.internal == internal_name {
+                eprintln!("✅ RT LOOKUP: Found class '{}' in rt.rs", internal_name);
+                
+                // Search for the method in this class
+                for method_meta in class_meta.methods.iter() {
+                    if method_meta.name == method_name {
+                        // Check if method has STATIC flag (0x08 = ACC_STATIC)
+                        let is_static = (method_meta.flags & 0x08) != 0;
+                        eprintln!("✅ RT LOOKUP: Found method '{}' in class '{}', flags=0x{:x}, is_static={}", 
+                                method_name, internal_name, method_meta.flags, is_static);
+                        return Some(is_static);
+                    }
+                }
+                eprintln!("⚠️ RT LOOKUP: Class '{}' found but method '{}' not found", internal_name, method_name);
+                return None;
+            }
+        }
+        
+        eprintln!("⚠️ RT LOOKUP: Class '{}' not found in rt.rs", internal_name);
+        None
+    }
+    
+    /// Lookup method in classpath using dynamic class loader
+    fn lookup_method_in_classpath(&self, qualified_class: &str, method_name: &str) -> Option<bool> {
+        // TODO: Implement classpath lookup using dynamic_class_loader
+        // For now, return None to indicate not found
+        eprintln!("🔍 CLASSPATH LOOKUP: Would search for '{}::{}' in classpath", qualified_class, method_name);
+        None
+    }
+    
+    /// Resolve simple class name to fully qualified name
+    fn resolve_simple_class_name(&self, simple_name: &str) -> String {
+        // Common Java class mappings
+        match simple_name {
+            "System" => "java.lang.System".to_string(),
+            "Math" => "java.lang.Math".to_string(),
+            "String" => "java.lang.String".to_string(),
+            "Integer" => "java.lang.Integer".to_string(),
+            "Double" => "java.lang.Double".to_string(),
+            "Float" => "java.lang.Float".to_string(),
+            "Long" => "java.lang.Long".to_string(),
+            "Object" => "java.lang.Object".to_string(),
+            "Data" => "java.base.Data".to_string(), // Special case for tolc runtime
+            _ => {
+                // For unknown simple names, try current package or assume java.lang
+                format!("java.lang.{}", simple_name)
             }
         }
     }
@@ -4811,15 +5152,37 @@ impl Gen {
             eprintln!("DEBUG: Assignment value expression: {:?}", tree.value);
             let _value_item = self.visit_expr(&tree.value, env)?;
             
+            // CRITICAL FIX: Determine owner class from target expression type OUTSIDE closure
+            let owner_class_for_resolved = if let Some(resolved_type) = &resolved_type {
+                if let Some(ref target) = field_access.target {
+                    if let Some(target_type) = self.infer_expression_type(target).ok() {
+                        match target_type {
+                            TypeEnum::Reference(ReferenceType::Class(class_name)) => {
+                                class_name.replace('.', "/")
+                            },
+                            TypeEnum::Reference(ReferenceType::Interface(interface_name)) => {
+                                interface_name.replace('.', "/")
+                            },
+                            _ => env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string())
+                        }
+                    } else {
+                        env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string())
+                    }
+                } else {
+                    env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string())
+                }
+            } else {
+                "UnknownClass".to_string()
+            };
+            
             // Now store to field with proper stack order: [this] [value] -> putfield
             return self.with_items(|items| {
                 // Create field item for assignment
                 let field_item = if let Some(resolved_type) = &resolved_type {
                     eprintln!("DEBUG: Using wash type info for field '{}': {:?}", field_name, resolved_type);
-                    let owner_class = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
                     items.make_field_item_for_resolved_type(
                         field_name.clone(),
-                        owner_class,
+                        owner_class_for_resolved.clone(),
                         resolved_type,
                         false // Non-static field
                     )
@@ -7213,7 +7576,7 @@ impl Gen {
     }
     
     /// Resolve static method class and descriptor (aligned with javac symbol resolution)
-    fn resolve_static_method_info(&self, tree: &MethodCallExpr) -> Result<(String, String)> {
+    fn resolve_static_method_info(&mut self, tree: &MethodCallExpr) -> Result<(String, String)> {
         // Legacy method for backward compatibility - use empty arg types and minimal context
         let arg_types = vec![];
         let dummy_env = GenContext::default();
@@ -7221,7 +7584,7 @@ impl Gen {
     }
     
     /// Resolve static method with actual argument types (JavaC aligned)
-    fn resolve_static_method_info_with_types(&self, tree: &MethodCallExpr, arg_types: &[TypeEnum], env: &GenContext) -> Result<(String, String)> {
+    fn resolve_static_method_info_with_types(&mut self, tree: &MethodCallExpr, arg_types: &[TypeEnum], env: &GenContext) -> Result<(String, String)> {
         // Determine target class
         let class_name = if let Some(ref target) = tree.target {
             // Use enhanced expression evaluation to determine class name
@@ -7248,7 +7611,7 @@ impl Gen {
     }
     
     /// Resolve instance method information with types (for non-static method calls)
-    fn resolve_instance_method_info_with_types(&self, tree: &MethodCallExpr, arg_types: &[TypeEnum], env: &GenContext) -> Result<(String, String)> {
+    fn resolve_instance_method_info_with_types(&mut self, tree: &MethodCallExpr, arg_types: &[TypeEnum], env: &GenContext) -> Result<(String, String)> {
         // For instance methods, we need to determine the class from the target expression
         let class_name = if let Some(ref target) = tree.target {
             // Use enhanced expression evaluation to get accurate class name from target
@@ -8289,6 +8652,55 @@ impl Gen {
             items.code.emit2(tostring_ref);
             Ok(())
         })
+    }
+    
+    /// Try to resolve identifier type using unified resolver
+    fn try_resolve_identifier_type(&mut self, identifier: &str) -> Option<TypeEnum> {
+        // Get mutable reference to unified resolver through Gen
+        // Get context first, before borrowing unified_resolver mutably
+        let method_context = None; // TODO: Add method context tracking
+        let class_context = self.get_current_class_context();
+        let class_context_str = class_context.as_ref().map(|s| s.as_str());
+        
+        if let Some(unified_resolver) = self.get_unified_resolver() {
+            
+            // Use unified resolver to get type resolution
+            if let Some(resolution) = unified_resolver.resolve_identifier(identifier, class_context_str, method_context) {
+                // Convert resolved type to TypeEnum
+                match resolution.resolved_type.as_str() {
+                    s if s.starts_with("java/util/Collection") => {
+                        Some(TypeEnum::Reference(ReferenceType::Interface("java/util/Collection".to_string())))
+                    },
+                    s if s.starts_with("java/util/List") => {
+                        Some(TypeEnum::Reference(ReferenceType::Interface("java/util/List".to_string())))
+                    },
+                    s if s.starts_with("java/util/Set") => {
+                        Some(TypeEnum::Reference(ReferenceType::Interface("java/util/Set".to_string())))
+                    },
+                    s if s.starts_with("java/util/Map") => {
+                        Some(TypeEnum::Reference(ReferenceType::Interface("java/util/Map".to_string())))
+                    },
+                    s if s.starts_with("java/lang/") => {
+                        Some(TypeEnum::Reference(ReferenceType::Class(s.to_string())))
+                    },
+                    s if s.starts_with("java/util/") => {
+                        Some(TypeEnum::Reference(ReferenceType::Class(s.to_string())))
+                    },
+                    // Handle descriptor format like "Ljava/util/Collection;"
+                    s if s.starts_with('L') && s.ends_with(';') => {
+                        let class_name = &s[1..s.len()-1];
+                        Some(TypeEnum::Reference(ReferenceType::Class(class_name.to_string())))
+                    },
+                    s => {
+                        Some(TypeEnum::Reference(ReferenceType::Class(s.to_string())))
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 

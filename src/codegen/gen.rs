@@ -90,6 +90,9 @@ pub struct Gen {
     /// Parent class name for inner classes (None for top-level classes)
     parent_class_name: Option<String>,
     
+    /// Current super class name for constructor calls
+    current_super_class_name: Option<String>,
+    
     /// Lambda method counter for generating unique method names
     pub lambda_counter: usize,
     
@@ -545,6 +548,7 @@ impl Gen {
             unified_resolver: None,                  // Unified resolver for identifier resolution
             inner_class_relationships: Vec::new(),  // Inner class relationships for InnerClasses attribute
             parent_class_name: None,                 // Parent class name for inner classes
+            current_super_class_name: None,          // Current super class name for constructor calls
             lambda_counter: 0,                       // Lambda method counter for unique names
             bootstrap_methods: Vec::new(),           // Bootstrap methods for invokedynamic
             package_context: None,                   // Package context for current compilation unit
@@ -2388,6 +2392,9 @@ impl Gen {
         let super_class_idx = self.pool.add_class(&super_class_internal_name);
         self.class_file.super_class = super_class_idx;
         
+        // Store super class name for constructor calls
+        self.current_super_class_name = Some(super_class_internal_name);
+        
         // 3. Set access flags (convert modifiers to bytecode flags)
         let mut access_flags = super::modifiers_to_flags(&class.modifiers);
         // Always add ACC_SUPER for classes (javac behavior)
@@ -3595,9 +3602,12 @@ impl Gen {
                 }
             }
             
-            if self.config.emit_frames && self.class_file.major_version >= 50 {
+            // Temporarily disable StackMapTable generation to focus on bytecode alignment
+            // TODO: Fix StackMapTable PC calculation with truncated bytecode
+            if false && self.config.emit_frames && self.class_file.major_version >= 50 {
                 // Check if bytecode contains conditional branches that require StackMapTable
-                let has_conditional_branches = self.has_conditional_branches(&code.code);
+                let truncated_bytecode = code.to_bytes();
+                let has_conditional_branches = self.has_conditional_branches(&truncated_bytecode);
                 
                 if has_conditional_branches {
                     use super::frame::FrameBuilder;
@@ -3612,8 +3622,9 @@ impl Gen {
                     };
                     
                     // Use simpler frame computation for loops to avoid convergence issues
+                    // Use the same truncated bytecode for frame computation to ensure PC consistency
                     let stack_map_table = frame_computer.compute_from(
-                        &code.code,
+                        &truncated_bytecode,
                         &[], // No exception handlers for now
                     );
                     
@@ -3650,26 +3661,7 @@ impl Gen {
             let code_attr = CodeAttribute {
                 max_stack: code.state.max_stacksize,
                 max_locals: code.max_locals,
-                code: {
-                    let bytecode_clone = code.to_bytes();  // Use to_bytes() instead of code.clone()
-                    eprintln!("🔍 DEBUG: Creating CodeAttribute for '{}' - bytecode length: {}, cp: {}", method.name, bytecode_clone.len(), code.cp);
-                    if method.name == "enlarge" {
-                        eprintln!("🔍 DEBUG: enlarge method bytecode length: {}", bytecode_clone.len());
-                        if !bytecode_clone.is_empty() {
-                            let last_idx = bytecode_clone.len() - 1;
-                            eprintln!("🔍 DEBUG: enlarge LAST byte at position {}: 0x{:02X}", 
-                                     last_idx, bytecode_clone[last_idx]);
-                        }
-                        // Show last 5 bytes for context
-                        if bytecode_clone.len() >= 5 {
-                            let start = bytecode_clone.len() - 5;
-                            eprintln!("🔍 DEBUG: enlarge last 5 bytes: {:02X?}", &bytecode_clone[start..]);
-                        } else {
-                            eprintln!("🔍 DEBUG: enlarge all bytes: {:02X?}", &bytecode_clone);
-                        }
-                    }
-                    bytecode_clone
-                },
+                code: code.to_bytes(), // Use truncated bytecode consistently
                 exception_table,
                 attributes: code_attributes,
             };
@@ -3692,7 +3684,13 @@ impl Gen {
                 "UnknownClass"
             };
             
-            let signature_key = format!("method:{}:{}", class_name, method.name);
+            // For constructors, include descriptor to distinguish overloads
+            let signature_key = if method.name == "<init>" {
+                let descriptor = self.create_method_descriptor(method)?;
+                format!("method:{}:{}:{}", class_name, method.name, descriptor)
+            } else {
+                format!("method:{}:{}", class_name, method.name)
+            };
             if let Some(signature) = signatures.get(&signature_key) {
                 let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
                     &mut self.pool, 
@@ -3878,10 +3876,15 @@ impl Gen {
     
     /// Add default super() call to constructor
     fn add_default_super_call(&mut self) -> Result<()> {
-        // Generate: aload_0; invokespecial Object.<init>:()V
+        // Generate: aload_0; invokespecial SuperClass.<init>:()V
         
-        // Add method reference to Object.<init>:()V first (before borrowing code)
-        let super_method_ref = self.pool.add_method_ref("java/lang/Object", "<init>", "()V");
+        // Use the current super class name stored during class processing
+        let super_class_name = self.current_super_class_name.clone().unwrap_or_else(|| "java/lang/Object".to_string());
+        
+        eprintln!("🔧 CONSTRUCTOR: Adding super() call to {}", super_class_name);
+        
+        // Add method reference to SuperClass.<init>:()V first (before borrowing code)
+        let super_method_ref = self.pool.add_method_ref(&super_class_name, "<init>", "()V");
         
         if let Some(code) = self.code_mut() {
             // Load 'this' reference
@@ -3921,8 +3924,13 @@ impl Gen {
         code_bytes.push(opcodes::ALOAD_0);  // Load 'this'
         code_bytes.push(opcodes::INVOKESPECIAL);
         
-        // Add Object.<init> method reference to constant pool
-        let object_init_idx = self.pool.add_method_ref("java/lang/Object", "<init>", "()V");
+        // Use the current super class name stored during class processing
+        let super_class_name = self.current_super_class_name.clone().unwrap_or_else(|| "java/lang/Object".to_string());
+        
+        eprintln!("🔧 DEFAULT_CONSTRUCTOR: Adding super() call to {}", super_class_name);
+        
+        // Add SuperClass.<init> method reference to constant pool
+        let object_init_idx = self.pool.add_method_ref(&super_class_name, "<init>", "()V");
         
         // Add methodref index to bytecode
         code_bytes.extend_from_slice(&object_init_idx.to_be_bytes());
