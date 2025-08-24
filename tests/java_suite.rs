@@ -8,7 +8,6 @@ fn java_root() -> PathBuf {
 }
 
 #[test]
-#[ignore]
 /// Test TOLC's bytecode generation alignment with javac
 /// 
 /// This test does NOT verify compilation success (TOLC already compiles successfully).

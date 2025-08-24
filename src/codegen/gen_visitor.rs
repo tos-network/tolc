@@ -3825,6 +3825,12 @@ impl Gen {
                     "long" => Ok(ResolvedType::Primitive(PrimitiveType::Long)),
                     "float" => Ok(ResolvedType::Primitive(PrimitiveType::Float)),
                     "double" => Ok(ResolvedType::Primitive(PrimitiveType::Double)),
+                    // Check for Java source format array types (e.g., "java.lang.Object[]", "int[]")
+                    desc if desc.ends_with("[]") => {
+                        let element_type_name = desc.strip_suffix("[]").unwrap();
+                        let element_type = Box::new(self.parse_descriptor_to_resolved_type(element_type_name)?);
+                        Ok(ResolvedType::Array(element_type))
+                    }
                     // Everything else is a reference type
                     _ => Ok(ResolvedType::Reference(input.to_string()))
                 }
@@ -5656,10 +5662,23 @@ impl Gen {
     }
     
     /// Infer the element type of an array from its expression
-    fn infer_array_element_type(&self, array_expr: &Expr) -> Result<TypeEnum> {
+    fn infer_array_element_type(&mut self, array_expr: &Expr) -> Result<TypeEnum> {
         match array_expr {
             Expr::Identifier(ident) => {
-                // Enhanced heuristic based on variable name
+                // First try to get actual type information from wash or symbol table
+                if let Ok(array_type) = self.infer_expression_type(array_expr) {
+                    match array_type {
+                        TypeEnum::Reference(ReferenceType::Array(element_type)) => {
+                            // Convert TypeRef to TypeEnum
+                            return self.type_ref_to_type_enum(&element_type);
+                        }
+                        _ => {
+                            // Not an array type, continue with fallback heuristics
+                        }
+                    }
+                }
+                
+                // Fallback to enhanced heuristic based on variable name
                 let name = &ident.name;
                 if name.contains("numbers") || name.contains("ints") || name.contains("values") {
                     Ok(TypeEnum::Primitive(PrimitiveType::Int))
@@ -5680,8 +5699,8 @@ impl Gen {
                 } else if name.contains("doubles") {
                     Ok(TypeEnum::Primitive(PrimitiveType::Double))
                 } else {
-                    // Default to int array for unknown identifiers
-                    Ok(TypeEnum::Primitive(PrimitiveType::Int))
+                    // Default to Object array for unknown identifiers (safer than int)
+                    Ok(TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string())))
                 }
             }
             Expr::New(new_expr) => {
@@ -8440,9 +8459,10 @@ impl Gen {
                     crate::codegen::attr::PrimitiveType::Double => "D".to_string(),
                 }
             },
-            crate::codegen::attr::ResolvedType::Generic(name, _) => {
-                // For generics, use Object descriptor (type erasure)
-                format!("L{};", name.replace('.', "/"))
+            crate::codegen::attr::ResolvedType::Generic(_name, _bounds) => {
+                // For generics, apply type erasure to Object 
+                // In Java bytecode, all generic type parameters are erased to their bounds (default: Object)
+                "Ljava/lang/Object;".to_string()
             },
             crate::codegen::attr::ResolvedType::Reference(class_name) => {
                 format!("L{};", class_name.replace('.', "/"))

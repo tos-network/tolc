@@ -1855,7 +1855,9 @@ impl Gen {
     fn create_field_info(&mut self, field: &FieldDecl) -> Result<()> {
         // Add field name and descriptor to constant pool
         let name_idx = self.pool.add_utf8(&field.name);
+        eprintln!("🔧 FIELD DEBUG: Creating descriptor for field '{}' with type '{}'", field.name, field.type_ref.name);
         let descriptor = self.type_ref_to_descriptor(&field.type_ref)?;
+        eprintln!("🔧 FIELD DEBUG: Generated descriptor for field '{}': '{}'", field.name, descriptor);
         let descriptor_idx = self.pool.add_utf8(&descriptor);
         
         // Convert modifiers to access flags
@@ -3783,6 +3785,14 @@ impl Gen {
     /// Prioritize wash phase symbol resolution, fallback to builtin types
     pub fn resolve_type_name(&self, simple_name: &str) -> String {
         eprintln!("🔍 GEN: resolve_type_name called with '{}'", simple_name);
+        
+        // 0. Check for generic type parameters that need type erasure
+        // Generic type variables (T, E, K, V, etc.) should be erased to Object
+        if simple_name.len() == 1 && simple_name.chars().next().unwrap().is_uppercase() {
+            eprintln!("🔧 TYPE ERASURE: Converting generic type parameter '{}' to java.lang.Object", simple_name);
+            return "java.lang.Object".to_string();
+        }
+        
         // 1. First try to use wash/SymbolEnvironment resolution
         if let Some(ref symbol_env) = self.wash_symbol_env {
             if let Some(qualified_name) = symbol_env.resolve_type(simple_name) {

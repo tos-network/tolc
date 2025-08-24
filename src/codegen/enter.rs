@@ -302,7 +302,7 @@ impl EnhancedEnter {
                         name: field_decl.name.clone(),
                         kind: SymbolKind::Field,
                         owner: class_owner.clone(),
-                        var_type: field_decl.type_ref.name.clone(), // Now contains resolved type
+                        var_type: self.build_full_type_name(&field_decl.type_ref), // Include array dimensions
                         is_static,
                         is_parameter: false,
                         local_slot: None,
@@ -526,7 +526,7 @@ impl EnhancedEnter {
                         name: field_decl.name.clone(),
                         kind: SymbolKind::Field,
                         owner: class_owner.clone(),
-                        var_type: field_decl.type_ref.name.clone(), // Now contains resolved type
+                        var_type: self.build_full_type_name(&field_decl.type_ref), // Include array dimensions
                         is_static,
                         is_parameter: false,
                         local_slot: None,
@@ -698,9 +698,16 @@ impl EnhancedEnter {
         }
     }
     
-    /// Build full type name including array dimensions
+    /// Build full type name including array dimensions and type erasure
     fn build_full_type_name(&self, type_ref: &crate::ast::TypeRef) -> String {
-        let mut type_name = type_ref.name.clone();
+        // Apply type erasure for generic type parameters (T, E, K, V, etc.)
+        let base_type = if type_ref.name.len() == 1 && type_ref.name.chars().next().unwrap().is_uppercase() {
+            "java.lang.Object".to_string()
+        } else {
+            type_ref.name.clone()
+        };
+        
+        let mut type_name = base_type;
         
         // Add array dimensions
         for _ in 0..type_ref.array_dims {

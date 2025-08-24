@@ -296,6 +296,11 @@ impl<'a> Items<'a> {
                 }
             }
             ResolvedType::Reference(class_name) => {
+                // Check for generic type parameters that need type erasure (T, E, K, V, etc.)
+                if class_name.len() == 1 && class_name.chars().next().unwrap().is_uppercase() {
+                    return "Ljava/lang/Object;".to_string();
+                }
+                
                 // Handle common unqualified types like "String" -> "java.lang.String"
                 match class_name.as_str() {
                     "String" => "Ljava/lang/String;".to_string(),
@@ -980,6 +985,11 @@ fn resolved_type_to_descriptor(resolved_type: &crate::codegen::attr::ResolvedTyp
             crate::codegen::attr::PrimitiveType::Double => "D".to_string(),
         },
         crate::codegen::attr::ResolvedType::Reference(class_name) => {
+            // Check for generic type parameters that need type erasure (T, E, K, V, etc.)
+            if class_name.len() == 1 && class_name.chars().next().unwrap().is_uppercase() {
+                return "Ljava/lang/Object;".to_string();
+            }
+            
             let internal_name = class_name.replace('.', "/");
             format!("L{};", internal_name)
         },
