@@ -5058,16 +5058,31 @@ impl Gen {
                 }
                 UnaryOp::PreInc => {
                     // Pre-increment: increment first, then return the incremented value
-                    // For variables, we need to store back and return the new value
+                    // For int variables, use iinc instruction (JavaC Gen.visitUnary pattern)
                     if let Expr::Identifier(_) = tree.operand.as_ref() {
-                        // Load variable, increment, duplicate for return value, store back
-                        items.code.emitop(opcodes::ICONST_1);
-                        items.code.emitop(opcodes::IADD);
-                        items.code.emitop(opcodes::DUP); // Duplicate for return value
-                        
-                        // Store back to variable using pre-calculated slot
                         if let Some(var_slot) = preinc_var_slot {
-                            items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                            // Check if we can use iinc (int variable only)
+                            match &result_type {
+                                TypeEnum::Primitive(PrimitiveType::Int) => {
+                                    // Use iinc for efficient increment
+                                    items.code.emitop(opcodes::IINC);
+                                    items.code.emit1(var_slot as u8); // local variable index
+                                    items.code.emit1(1i8 as u8); // increment value
+                                    // Load the incremented value for return
+                                    if var_slot <= 3 {
+                                        items.code.emitop(opcodes::ILOAD_0 + var_slot as u8);
+                                    } else {
+                                        items.code.emitop1(opcodes::ILOAD, var_slot as u8);
+                                    }
+                                }
+                                _ => {
+                                    // Fall back to load+add+store for non-int types
+                                    items.code.emitop(opcodes::ICONST_1);
+                                    items.code.emitop(opcodes::IADD);
+                                    items.code.emitop(opcodes::DUP); // Duplicate for return value
+                                    items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                                }
+                            }
                         } else if let Some(var_name) = &preinc_var_name {
                             eprintln!("⚠️  WARNING: Cannot find variable slot for '{}'", var_name);
                         }
@@ -5080,16 +5095,31 @@ impl Gen {
                 }
                 UnaryOp::PreDec => {
                     // Pre-decrement: decrement first, then return the decremented value
-                    // For variables, we need to store back and return the new value
+                    // For int variables, use iinc instruction (JavaC Gen.visitUnary pattern)
                     if let Expr::Identifier(_) = tree.operand.as_ref() {
-                        // Load variable, decrement, duplicate for return value, store back
-                        items.code.emitop(opcodes::ICONST_1);
-                        items.code.emitop(opcodes::ISUB);
-                        items.code.emitop(opcodes::DUP); // Duplicate for return value
-                        
-                        // Store back to variable using pre-calculated slot
                         if let Some(var_slot) = predec_var_slot {
-                            items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                            // Check if we can use iinc (int variable only)
+                            match &result_type {
+                                TypeEnum::Primitive(PrimitiveType::Int) => {
+                                    // Use iinc for efficient decrement
+                                    items.code.emitop(opcodes::IINC);
+                                    items.code.emit1(var_slot as u8); // local variable index
+                                    items.code.emit1((-1i8) as u8); // decrement value
+                                    // Load the decremented value for return
+                                    if var_slot <= 3 {
+                                        items.code.emitop(opcodes::ILOAD_0 + var_slot as u8);
+                                    } else {
+                                        items.code.emitop1(opcodes::ILOAD, var_slot as u8);
+                                    }
+                                }
+                                _ => {
+                                    // Fall back to load+sub+store for non-int types
+                                    items.code.emitop(opcodes::ICONST_1);
+                                    items.code.emitop(opcodes::ISUB);
+                                    items.code.emitop(opcodes::DUP); // Duplicate for return value
+                                    items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                                }
+                            }
                         } else if let Some(var_name) = &predec_var_name {
                             eprintln!("⚠️  WARNING: Cannot find variable slot for '{}'", var_name);
                         }
