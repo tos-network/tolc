@@ -56,6 +56,9 @@ pub struct Gen {
     /// Optimization manager - coordinates all optimization passes
     optimizer: OptimizationManager,
     
+    /// Register allocation manager for local variables (JavaC alignment)
+    pub register_alloc: crate::codegen::register_alloc::RegisterAllocator,
+    
     /// Dynamic class loader for dependency resolution (JavaC Enter.complete pattern)
     pub dynamic_class_loader: Option<crate::common::classloader::StandaloneClassLoader>,
     
@@ -538,6 +541,7 @@ impl Gen {
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
             optimizer: OptimizationManager::new(),   // Optimization coordinator
+            register_alloc: crate::codegen::register_alloc::RegisterAllocator::new(), // Register allocation manager
             dynamic_class_loader: None,              // Dynamic class loader (initialized on demand)
             current_break_chain: None,               // Phase 2.3: break statement chain
             current_continue_chain: None,            // Phase 2.3: continue statement chain
@@ -4279,5 +4283,79 @@ impl Gen {
             }
         }
         false
+    }
+    
+    // ========== REGISTER ALLOCATION METHODS - JavaC alignment ==========
+    
+    /// Create temporary variable (JavaC makeTemp equivalent)
+    /// 
+    /// JavaC Pattern:
+    /// ```java
+    /// LocalItem makeTemp(Type type) {
+    ///     VarSymbol v = new VarSymbol(Flags.SYNTHETIC,
+    ///                                 names.empty,
+    ///                                 type,
+    ///                                 env.enclMethod.sym);
+    ///     code.newLocal(v);
+    ///     return items.makeLocalItem(v);
+    /// }
+    /// ```
+    pub fn make_temp(&mut self, typ: &crate::ast::TypeEnum) -> Result<crate::codegen::items::Item> {
+        if let Some(code) = &mut self.code {
+            let mut items = crate::codegen::items::Items::new(&mut self.pool, code);
+            Ok(self.register_alloc.make_temp(typ, &mut items))
+        } else {
+            Err(crate::common::error::Error::CodeGen { message: "Code not initialized - call init_code first".to_string() })
+        }
+    }
+    
+    /// Allocate new local variable slot by type (JavaC Code.newLocal)
+    pub fn new_local_by_type(&mut self, typ: &crate::ast::TypeEnum) -> Result<u16> {
+        if let Some(code) = &mut self.code {
+            Ok(self.register_alloc.new_local_by_type(typ, code))
+        } else {
+            Err(crate::common::error::Error::CodeGen { message: "Code not initialized - call init_code first".to_string() })
+        }
+    }
+    
+    /// Create named local variable with automatic slot allocation
+    pub fn make_local_named(&mut self, name: String, typ: &crate::ast::TypeEnum) -> Result<crate::codegen::items::Item> {
+        if let Some(code) = &mut self.code {
+            let mut items = crate::codegen::items::Items::new(&mut self.pool, code);
+            Ok(self.register_alloc.make_temp(typ, &mut items)) // Use temp for now, can be optimized for reuse
+        } else {
+            Err(crate::common::error::Error::CodeGen { message: "Code not initialized - call init_code first".to_string() })
+        }
+    }
+    
+    /// Start fresh register segment (JavaC Code.newRegSegment)
+    /// 
+    /// JavaC Pattern:
+    /// ```java
+    /// public void newRegSegment() {
+    ///     nextreg = max_locals;
+    /// }
+    /// ```
+    pub fn new_reg_segment(&mut self) -> Result<()> {
+        if let Some(code) = &self.code {
+            self.register_alloc.new_reg_segment(code.max_locals());
+            Ok(())
+        } else {
+            Err(crate::common::error::Error::CodeGen { message: "Code not initialized - call init_code first".to_string() })
+        }
+    }
+    
+    /// Get current nextreg value (JavaC Code.nextreg)
+    pub fn current_nextreg(&self) -> u16 {
+        self.register_alloc.current_nextreg()
+    }
+    
+    /// Reserve local variable slots manually 
+    pub fn reserve_slots(&mut self, count: u16) -> Result<u16> {
+        if let Some(code) = &mut self.code {
+            Ok(self.register_alloc.reserve_slots(count, code))
+        } else {
+            Err(crate::common::error::Error::CodeGen { message: "Code not initialized - call init_code first".to_string() })
+        }
     }
 }

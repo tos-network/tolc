@@ -97,6 +97,7 @@ pub mod pending_jumps; // Needed by JavaC code.rs
 pub mod loop_optimizer;
 pub mod method;
 pub mod method_invocation_optimizer;
+pub mod register_alloc; // Register allocation for local variables (JavaC alignment)
 // Backed up: pub mod method_writer;
 // Backed up: pub mod object_optimizer;
 pub mod opcodes;
@@ -722,6 +723,7 @@ pub struct SemanticAnalyzer {
     pub flow: flow::Flow,
     pub trans_types: trans_types::TransTypes,
     pub lower: lower::Lower,
+    pub register_alloc: register_alloc::RegisterAllocator, // Register allocation for local variables
 }
 
 impl SemanticAnalyzer {
@@ -732,6 +734,7 @@ impl SemanticAnalyzer {
             flow: flow::Flow::new(),
             trans_types: trans_types::TransTypes::new(),
             lower: lower::Lower::new(),
+            register_alloc: register_alloc::RegisterAllocator::new(),
         }
     }
 
@@ -751,6 +754,7 @@ impl SemanticAnalyzer {
             flow: flow::Flow::new(),
             trans_types: trans_types::TransTypes::new(),
             lower: lower::Lower::new(),
+            register_alloc: register_alloc::RegisterAllocator::new(),
         })
     }
     
