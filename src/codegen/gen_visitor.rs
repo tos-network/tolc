@@ -3068,8 +3068,40 @@ impl Gen {
     
     // ========== END TYPE CHECKING INFRASTRUCTURE ==========
     
-    /// Visit literal expression
+    // ============================================================================  
+    // JavaC CONSTANT FOLDING HELPER METHODS
+    // ============================================================================
+    
+    /// Return true iff float number is positive zero (JavaC ImmediateItem.isPosZero)
+    fn is_pos_zero_f32(&self, x: f32) -> bool {
+        Self::is_pos_zero_f32_static(x)
+    }
+    
+    /// Return true iff double number is positive zero (JavaC ImmediateItem.isPosZero)
+    fn is_pos_zero_f64(&self, x: f64) -> bool {
+        Self::is_pos_zero_f64_static(x)
+    }
+    
+    /// Static version of is_pos_zero_f32 for use in borrowing contexts
+    fn is_pos_zero_f32_static(x: f32) -> bool {
+        x == 0.0f32 && 1.0f32 / x > 0.0f32
+    }
+    
+    /// Static version of is_pos_zero_f64 for use in borrowing contexts
+    fn is_pos_zero_f64_static(x: f64) -> bool {
+        x == 0.0f64 && 1.0f64 / x > 0.0f64
+    }
+    
+    // ============================================================================
+    // JavaC CONSTANT FOLDING OPTIMIZER  
+    // ============================================================================
+    
+    /// Visit literal expression - JavaC-aligned constant folding optimizer
+    /// Based on JavaC Items.ImmediateItem.load() - com.sun.tools.javac.jvm.Items
     pub fn visit_literal(&mut self, tree: &LiteralExpr, _env: &GenContext) -> Result<BytecodeItem> {
+        // JavaC Optimizer #1: Constant Folding - matches Items.ImmediateItem.load()
+        // This implements the exact same constant loading optimizations as JavaC
+        
         // Handle constants that need constant pool first (to avoid borrowing conflicts)
         let pool_data = match &tree.value {
             Literal::String(s) => {
@@ -3077,7 +3109,8 @@ impl Gen {
             }
             Literal::Char(c) => {
                 let char_val = *c as u32 as i32;
-                if char_val > 32767 || char_val < -32768 {
+                // JavaC pattern: chars outside BIPUSH range need LDC
+                if char_val > 127 || char_val < -128 {
                     Some((self.get_pool_mut().add_integer(char_val), "char"))
                 } else {
                     None
@@ -3087,20 +3120,26 @@ impl Gen {
                 Some((self.get_pool_mut().add_long(*val), "long"))
             }
             Literal::Float(val) => {
-                let epsilon_check = (*val - 0.0).abs() > f64::EPSILON && 
-                                   (*val - 1.0).abs() > f64::EPSILON && 
-                                   (*val - 2.0).abs() > f64::EPSILON;
-                if epsilon_check {
-                    Some((self.get_pool_mut().add_float(*val as f32), "float"))
+                // JavaC pattern: only fconst_0, fconst_1, fconst_2 are optimized
+                let fval = *val as f32;
+                if !Self::is_pos_zero_f32_static(fval) && fval != 1.0 && fval != 2.0 {
+                    Some((self.get_pool_mut().add_float(fval), "float"))
                 } else {
                     None
                 }
             }
             Literal::Double(val) => {
-                let epsilon_check = (*val - 0.0).abs() > f64::EPSILON && 
-                                   (*val - 1.0).abs() > f64::EPSILON;
-                if epsilon_check {
+                // JavaC pattern: only dconst_0, dconst_1 are optimized
+                if !Self::is_pos_zero_f64_static(*val) && *val != 1.0 {
                     Some((self.get_pool_mut().add_double(*val), "double"))
+                } else {
+                    None
+                }
+            }
+            Literal::Integer(val) => {
+                // JavaC pattern: large integers outside SIPUSH range need LDC
+                if *val < i16::MIN as i64 || *val > i16::MAX as i64 {
+                    Some((self.get_pool_mut().add_integer(*val as i32), "integer"))
                 } else {
                     None
                 }
@@ -3112,138 +3151,118 @@ impl Gen {
             match &tree.value {
                 Literal::Null => {
                     code.emitop(super::opcodes::ACONST_NULL);
-                    code.state.push(super::code::Type::Null); // Push null reference on stack
+                    code.state.push(super::code::Type::Null);
                 }
+                
+                // JavaC constant folding for integers - matches ImmediateItem.load() INT case
                 Literal::Integer(val) => {
-                    // Generate appropriate constant instruction
-                    match *val {
-                        -1 => {
-                            code.emitop(super::opcodes::ICONST_M1);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        0 => {
-                            code.emitop(super::opcodes::ICONST_0);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        1 => {
-                            code.emitop(super::opcodes::ICONST_1);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        2 => {
-                            code.emitop(super::opcodes::ICONST_2);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        3 => {
-                            code.emitop(super::opcodes::ICONST_3);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        4 => {
-                            code.emitop(super::opcodes::ICONST_4);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        5 => {
-                            code.emitop(super::opcodes::ICONST_5);
-                            code.state.push(crate::codegen::code::Type::Int);
-                        }
-                        -128..=127 => {
-                            code.emitop(super::opcodes::BIPUSH);
-                            code.emit1(*val as u8);
-                        }
-                        -32768..=32767 => {
-                            code.emitop(super::opcodes::SIPUSH);
-                            code.emit2(*val as u16);
-                        }
-                        _ => {
-                            // For larger constants, use SIPUSH or BIPUSH
-                            if *val >= i16::MIN as i64 && *val <= i16::MAX as i64 {
-                                code.emitop(super::opcodes::SIPUSH);
-                                code.emit2(*val as u16);
-                            } else {
-                                // For very large constants, would need LDC but that requires constant pool access
-                                // For now, just emit ICONST_0 as placeholder
-                                eprintln!("⚠️  WARNING: Large integer constant {} truncated to 0", val);
-                                code.emitop(super::opcodes::ICONST_0);
-                            }
+                    let ival = *val as i32;
+                    if ival >= -1 && ival <= 5 {
+                        // Use iconst_m1 through iconst_5 (JavaC optimization)
+                        code.emitop(super::opcodes::ICONST_0 + (ival + 1) as u8);
+                    } else if ival >= i8::MIN as i32 && ival <= i8::MAX as i32 {
+                        // Use bipush for byte range (JavaC optimization)
+                        code.emitop(super::opcodes::BIPUSH);
+                        code.emit1(ival as u8);
+                    } else if ival >= i16::MIN as i32 && ival <= i16::MAX as i32 {
+                        // Use sipush for short range (JavaC optimization)  
+                        code.emitop(super::opcodes::SIPUSH);
+                        code.emit2(ival as u16);
+                    } else {
+                        // Use ldc for large constants (JavaC pattern)
+                        if let Some((pool_idx, _)) = pool_data {
+                            code.emitop(super::opcodes::LDC);
+                            code.emit2(pool_idx);
                         }
                     }
-                    code.state.push(super::code::Type::Int); // Push int on stack
+                    code.state.push(super::code::Type::Int);
                 }
+                
+                // JavaC constant folding for booleans - treated as integers
                 Literal::Boolean(val) => {
                     if *val {
                         code.emitop(super::opcodes::ICONST_1);
                     } else {
                         code.emitop(super::opcodes::ICONST_0);
                     }
-                    code.state.push(super::code::Type::Int); // Push int on stack
+                    code.state.push(super::code::Type::Int);
                 }
+                
+                // JavaC constant folding for strings - always use LDC
                 Literal::String(_) => {
                     if let Some((string_idx, _)) = pool_data {
                         code.emitop(super::opcodes::LDC);
-                        code.emit1(string_idx as u8);
+                        code.emit2(string_idx);
                         code.state.push(super::code::Type::Object("java/lang/String".to_string()));
                     }
                 }
+                
+                // JavaC constant folding for chars - same as integers (CHARcode case)
                 Literal::Char(c) => {
                     let char_val = *c as u32 as i32;
-                    if char_val >= 0 && char_val <= 5 {
-                        match char_val {
-                            0 => code.emitop(super::opcodes::ICONST_0),
-                            1 => code.emitop(super::opcodes::ICONST_1),
-                            2 => code.emitop(super::opcodes::ICONST_2),
-                            3 => code.emitop(super::opcodes::ICONST_3),
-                            4 => code.emitop(super::opcodes::ICONST_4),
-                            5 => code.emitop(super::opcodes::ICONST_5),
-                            _ => unreachable!(),
-                        }
-                    } else if char_val >= -128 && char_val <= 127 {
+                    if char_val >= -1 && char_val <= 5 {
+                        // Use iconst_m1 through iconst_5 (JavaC optimization)
+                        code.emitop(super::opcodes::ICONST_0 + (char_val + 1) as u8);
+                    } else if char_val >= i8::MIN as i32 && char_val <= i8::MAX as i32 {
+                        // Use bipush for byte range (JavaC optimization)
                         code.emitop(super::opcodes::BIPUSH);
                         code.emit1(char_val as u8);
-                    } else if char_val >= -32768 && char_val <= 32767 {
+                    } else if char_val >= i16::MIN as i32 && char_val <= i16::MAX as i32 {
+                        // Use sipush for short range (JavaC optimization)  
                         code.emitop(super::opcodes::SIPUSH);
                         code.emit2(char_val as u16);
                     } else if let Some((int_idx, _)) = pool_data {
+                        // Use ldc for large constants (JavaC pattern)
                         code.emitop(super::opcodes::LDC);
-                        code.emit1(int_idx as u8);
+                        code.emit2(int_idx);
                     }
                     code.state.push(super::code::Type::Int);
                 }
+                
+                // JavaC constant folding for longs - matches ImmediateItem.load() LONG case
                 Literal::Long(val) => {
-                    match *val {
-                        0 => code.emitop(super::opcodes::LCONST_0),
-                        1 => code.emitop(super::opcodes::LCONST_1),
-                        _ => {
-                            if let Some((long_idx, _)) = pool_data {
-                                code.emitop(super::opcodes::LDC2_W);
-                                code.emit2(long_idx);
-                            }
-                        }
+                    let lval = *val;
+                    if lval == 0 || lval == 1 {
+                        // Use lconst_0 or lconst_1 (JavaC optimization)
+                        code.emitop(super::opcodes::LCONST_0 + lval as u8);
+                    } else if let Some((long_idx, _)) = pool_data {
+                        // Use ldc2_w for other long constants (JavaC pattern)
+                        code.emitop(super::opcodes::LDC2_W);
+                        code.emit2(long_idx);
                     }
                     code.state.push(super::code::Type::Long);
                 }
+                
+                // JavaC constant folding for floats - matches ImmediateItem.load() FLOAT case
                 Literal::Float(val) => {
-                    match val {
-                        v if (*v - 0.0).abs() < f64::EPSILON => code.emitop(super::opcodes::FCONST_0),
-                        v if (*v - 1.0).abs() < f64::EPSILON => code.emitop(super::opcodes::FCONST_1),
-                        v if (*v - 2.0).abs() < f64::EPSILON => code.emitop(super::opcodes::FCONST_2),
-                        _ => {
-                            if let Some((float_idx, _)) = pool_data {
-                                code.emitop(super::opcodes::LDC);
-                                code.emit1(float_idx as u8);
-                            }
-                        }
+                    let fval = *val as f32;
+                    let is_pos_zero = Self::is_pos_zero_f32_static(fval);
+                    if is_pos_zero {
+                        code.emitop(super::opcodes::FCONST_0);
+                    } else if fval == 1.0 {
+                        code.emitop(super::opcodes::FCONST_1);
+                    } else if fval == 2.0 {
+                        code.emitop(super::opcodes::FCONST_2);
+                    } else if let Some((float_idx, _)) = pool_data {
+                        // Use ldc for other float constants (JavaC pattern)
+                        code.emitop(super::opcodes::LDC);
+                        code.emit2(float_idx);
                     }
                     code.state.push(super::code::Type::Float);
                 }
+                
+                // JavaC constant folding for doubles - matches ImmediateItem.load() DOUBLE case
                 Literal::Double(val) => {
-                    match val {
-                        v if (*v - 0.0).abs() < f64::EPSILON => code.emitop(super::opcodes::DCONST_0),
-                        v if (*v - 1.0).abs() < f64::EPSILON => code.emitop(super::opcodes::DCONST_1),
-                        _ => {
-                            if let Some((double_idx, _)) = pool_data {
-                                code.emitop(super::opcodes::LDC2_W);
-                                code.emit2(double_idx);
-                            }
-                        }
+                    let dval = *val;
+                    let is_pos_zero = Self::is_pos_zero_f64_static(dval);
+                    if is_pos_zero {
+                        code.emitop(super::opcodes::DCONST_0);
+                    } else if dval == 1.0 {
+                        code.emitop(super::opcodes::DCONST_1);
+                    } else if let Some((double_idx, _)) = pool_data {
+                        // Use ldc2_w for other double constants (JavaC pattern)
+                        code.emitop(super::opcodes::LDC2_W);
+                        code.emit2(double_idx);
                     }
                     code.state.push(super::code::Type::Double);
                 }

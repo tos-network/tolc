@@ -2482,7 +2482,39 @@ impl Parser {
         if self.check(&Token::CharLiteral) {
             let token = self.advance();
             let lex = token.lexeme();
-            let ch = if lex.len() >= 3 { lex.chars().nth(1).unwrap_or('\0') } else { '\0' };
+            
+            // Parse character literal, handling escape sequences
+            let ch = if lex.len() >= 3 {
+                let inner = &lex[1..lex.len()-1]; // Remove surrounding quotes
+                if inner.starts_with('\\') && inner.len() > 1 {
+                    // Handle escape sequences
+                    match inner.chars().nth(1).unwrap() {
+                        '0' => '\0',     // \0 -> null character
+                        'n' => '\n',     // \n -> newline
+                        'r' => '\r',     // \r -> carriage return
+                        't' => '\t',     // \t -> tab
+                        '\\' => '\\',    // \\ -> backslash
+                        '\'' => '\'',    // \' -> single quote
+                        '\"' => '\"',    // \" -> double quote
+                        'u' if inner.len() >= 6 => {
+                            // Unicode escape: \uXXXX
+                            let hex_str = &inner[2..6];
+                            if let Ok(code_point) = u32::from_str_radix(hex_str, 16) {
+                                char::from_u32(code_point).unwrap_or('\0')
+                            } else {
+                                '\0'
+                            }
+                        }
+                        _ => inner.chars().nth(1).unwrap_or('\0'),
+                    }
+                } else {
+                    // Regular character
+                    inner.chars().next().unwrap_or('\0')
+                }
+            } else {
+                '\0'
+            };
+            
             let location = token.location();
             let span = Span::new(location.clone(), location);
             return Ok(Expr::Literal(LiteralExpr { value: Literal::Char(ch), span }));

@@ -741,7 +741,17 @@ impl AstVisitor for AstPrinter {
     fn visit_literal_expr(&mut self, literal: &LiteralExpr) {
         match &literal.value {
             Literal::Integer(i) => self.output.push_str(&i.to_string()),
-            Literal::Float(f) => self.output.push_str(&f.to_string()),
+            Literal::Float(f) => {
+                // Ensure float literals always show at least one decimal place and f suffix
+                let s = f.to_string();
+                if s.contains('.') {
+                    self.output.push_str(&s);
+                } else {
+                    self.output.push_str(&s);
+                    self.output.push_str(".0");
+                }
+                self.output.push('f');
+            },
             Literal::Boolean(b) => self.output.push_str(&b.to_string()),
             Literal::String(s) => {
                 self.output.push('"');
@@ -750,7 +760,19 @@ impl AstVisitor for AstPrinter {
             }
             Literal::Char(c) => {
                 self.output.push('\'');
-                self.output.push(*c);
+                match *c {
+                    '\0' => self.output.push_str("\\0"),
+                    '\n' => self.output.push_str("\\n"),
+                    '\r' => self.output.push_str("\\r"),
+                    '\t' => self.output.push_str("\\t"),
+                    '\\' => self.output.push_str("\\\\"),
+                    '\'' => self.output.push_str("\\'"),
+                    '\"' => self.output.push_str("\\\""),
+                    c if c.is_control() || (c as u32) > 127 => {
+                        self.output.push_str(&format!("\\u{:04x}", c as u32));
+                    },
+                    _ => self.output.push(*c),
+                }
                 self.output.push('\'');
             }
             Literal::Long(l) => {
@@ -806,13 +828,37 @@ impl AstVisitor for AstPrinter {
     
     fn visit_unary_expr(&mut self, unary: &UnaryExpr) {
         match unary.operator {
-            UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Not | UnaryOp::BitNot => {
-                self.output.push_str(&format!("{:?}", unary.operator).to_lowercase());
+            UnaryOp::PreInc => {
+                self.output.push_str("++");
                 self.visit_expr(&unary.operand);
             }
-            UnaryOp::PostInc | UnaryOp::PostDec => {
+            UnaryOp::PreDec => {
+                self.output.push_str("--");
                 self.visit_expr(&unary.operand);
-                self.output.push_str(&format!("{:?}", unary.operator).to_lowercase());
+            }
+            UnaryOp::Plus => {
+                self.output.push('+');
+                self.visit_expr(&unary.operand);
+            }
+            UnaryOp::Minus => {
+                self.output.push('-');
+                self.visit_expr(&unary.operand);
+            }
+            UnaryOp::Not => {
+                self.output.push('!');
+                self.visit_expr(&unary.operand);
+            }
+            UnaryOp::BitNot => {
+                self.output.push('~');
+                self.visit_expr(&unary.operand);
+            }
+            UnaryOp::PostInc => {
+                self.visit_expr(&unary.operand);
+                self.output.push_str("++");
+            }
+            UnaryOp::PostDec => {
+                self.visit_expr(&unary.operand);
+                self.output.push_str("--");
             }
         }
     }
