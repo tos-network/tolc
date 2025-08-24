@@ -13,7 +13,7 @@ use crate::Config;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
-use super::items::{Items, Item as BytecodeItem, CondItem};
+use super::items::{Items, Item as BytecodeItem};
 use super::method_context::MethodContext;
 use super::symtab::Symtab;
 use super::type_inference::{TypeInference, ConstantValue};
@@ -681,19 +681,45 @@ impl Gen {
         self.parent_class_name = parent_name;
     }
     
+    /// Calculate total slot width for method parameters (JavaC alignment)
+    fn calculate_parameter_slots(&self, method: &MethodDecl) -> u16 {
+        let mut slots = 0u16;
+        
+        // Non-static methods start with 'this' at slot 0
+        if !method.modifiers.iter().any(|m| matches!(m, Modifier::Static)) {
+            slots = 1;
+        }
+        
+        // Add slots for each parameter based on type width
+        for param in &method.parameters {
+            match param.type_ref.name.as_str() {
+                "long" | "double" if param.type_ref.array_dims == 0 => slots += 2,
+                _ => slots += 1, // int, float, boolean, char, byte, short, and all reference types
+            }
+        }
+        
+        slots
+    }
+
     /// Initialize code buffer for method - 100% JavaC initCode equivalent
     /// MethodSymbol meth = tree.sym;
     /// meth.code = code = new Code(meth, fatcode, lineMap, varDebugInfo, stackMap, debugCode, types, pool);
     /// items = new Items(pool, code, syms, types);
     pub fn init_code(&mut self, method: &MethodDecl, env: &GenContext, _fatcode: bool) -> Result<u16> {
+        // Calculate correct parameter slot allocation (JavaC alignment)
+        let parameter_slots = self.calculate_parameter_slots(method);
+        
         // JavaC equivalent: Create a new code structure
         // meth.code = code = new Code(...)
         self.code = Some(Code::new(
-            method.parameters.len() as u16 + if method.modifiers.iter().any(|m| matches!(m, Modifier::Static)) { 0 } else { 1 },
+            parameter_slots,
             true,  // stackMap equivalent
             env.debug_code  // debugCode equivalent
             // TODO: Add lineMap, varDebugInfo, CRTable, syms, types when available
         ));
+        
+        // Initialize RegisterAllocator with correct starting slot (JavaC alignment)
+        self.register_alloc = crate::codegen::register_alloc::RegisterAllocator::new_with_offset(parameter_slots);
         
         // Store generation environment (JavaC env parameter)
         eprintln!("DEBUG: init_code: Method '{}', Setting self.env with clazz = {:?}", method.name, env.clazz.as_ref().map(|c| &c.name));
@@ -2331,7 +2357,7 @@ impl Gen {
     // ========== Legacy Support Methods ==========
     
     /// Legacy statement generation methods (transitional)
-    pub fn gen_conditional_jump(&mut self, _cond: &CondItem, _label: u16) -> Result<()> { Ok(()) }
+    pub fn gen_conditional_jump(&mut self, _cond: &BytecodeItem, _label: u16) -> Result<()> { Ok(()) }
     /// Ensure method has proper return statement (JavaC pattern)
     fn ensure_method_return(&mut self, _return_type: &Option<Type>) -> Result<()> { 
         // This is now handled in gen_method following JavaC pattern
@@ -4321,8 +4347,11 @@ impl Gen {
     /// Create named local variable with automatic slot allocation
     pub fn make_local_named(&mut self, name: String, typ: &crate::ast::TypeEnum) -> Result<crate::codegen::items::Item> {
         if let Some(code) = &mut self.code {
+            // First allocate the register slot
+            let reg = self.register_alloc.new_local_named(name, typ, code);
+            // Then create Items and make the local item
             let mut items = crate::codegen::items::Items::new(&mut self.pool, code);
-            Ok(self.register_alloc.make_temp(typ, &mut items)) // Use temp for now, can be optimized for reuse
+            Ok(items.make_local_item(typ, reg))
         } else {
             Err(crate::common::error::Error::CodeGen { message: "Code not initialized - call init_code first".to_string() })
         }

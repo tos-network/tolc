@@ -352,7 +352,7 @@ impl EnhancedEnter {
                         
                         self.symbol_env.variables.insert(param_key, param_symbol); // Store in variables table
                         eprintln!("📝 ENHANCED_ENTER: Added parameter '{}' with slot {} for method '{}'", param.name, param_slot, method_decl.name);
-                        param_slot += 1; // Increment for next parameter
+                        param_slot += self.get_type_width(&param.type_ref); // Increment by type width (JavaC alignment)
                     }
                     
                     // Process method body for local variable declarations
@@ -395,7 +395,7 @@ impl EnhancedEnter {
                         
                         self.symbol_env.variables.insert(param_key, param_symbol);
                         eprintln!("📝 ENHANCED_ENTER: Added constructor parameter '{}' with slot {} for class '{}'", param.name, param_slot, class_decl.name);
-                        param_slot += 1; // Increment for next parameter
+                        param_slot += self.get_type_width(&param.type_ref); // Increment by type width (JavaC alignment)
                     }
                     
                     // Process constructor body for local variable declarations
@@ -717,6 +717,21 @@ impl EnhancedEnter {
         type_name
     }
     
+    /// Calculate type width for proper slot allocation (JavaC alignment)
+    /// long and double types take 2 slots, all others take 1 slot
+    fn get_type_width(&self, type_ref: &crate::ast::TypeRef) -> usize {
+        // Array references always take 1 slot
+        if type_ref.array_dims > 0 {
+            return 1;
+        }
+        
+        // Check primitive types that take 2 slots
+        match type_ref.name.as_str() {
+            "long" | "double" => 2,
+            _ => 1, // int, float, boolean, char, byte, short, and all reference types
+        }
+    }
+    
     /// Count method parameters to calculate starting local slot
     fn count_method_parameters(&self, class_name: &str, method_name: &str) -> usize {
         let method_pattern = format!("method:{}#{}::", class_name, method_name);
@@ -757,7 +772,7 @@ impl EnhancedEnter {
                     eprintln!("📝 ENHANCED_ENTER: Added local variable '{}' with slot {} in method '{}::{}'", 
                              variable.name, next_local_slot, class_name, method_name);
                     
-                    next_local_slot += 1; // Increment for next variable
+                    next_local_slot += self.get_type_width(&var_decl_stmt.type_ref); // Use type width (JavaC alignment)
                 }
             }
             Stmt::Block(block) => {
@@ -813,7 +828,7 @@ impl EnhancedEnter {
                     eprintln!("📝 ENHANCED_ENTER: Added catch parameter '{}' with slot {} in method '{}::{}'", 
                              catch.parameter.name, next_local_slot, class_name, method_name);
                     
-                    next_local_slot += 1;
+                    next_local_slot += self.get_type_width(&catch.parameter.type_ref); // Use type width (JavaC alignment)
                     
                     // Process catch body
                     for stmt in &catch.block.statements {

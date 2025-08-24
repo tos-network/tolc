@@ -28,7 +28,7 @@
 use crate::ast::*;
 use crate::common::error::{Result, Error};
 use super::gen::{Gen, GenContext};
-use super::items::{Item as BytecodeItem, CondItem, Items, typecodes};
+use super::items::{Item as BytecodeItem, Items, typecodes};
 use super::opcodes;
 use crate::codegen::attr::ResolvedType;
 use crate::common::classloader::{ClassLoader, DynamicLoadable};
@@ -5944,19 +5944,33 @@ impl Gen {
         let cond = self.gen_cond(&tree.condition, env)?;
         
         // Get false jump chain from condition
-        let else_chain = self.with_items(|items| {
-            cond.jump_false(&mut items.code)
-        })?;
+        let else_chain = match &cond {
+            BytecodeItem::Cond { opcode, false_jumps, .. } => {
+                let negated_opcode = BytecodeItem::negate_cond_opcode(*opcode);
+                self.with_items(|items| {
+                    let jump_chain = items.code.branch(negated_opcode);
+                    Ok(BytecodeItem::merge_chains(false_jumps.clone(), jump_chain))
+                })?
+            },
+            _ => None,
+        };
         
         // Generate then branch if condition is not always false
         if !self.is_cond_false(&cond) {
             // Resolve true jumps to current position
-            self.with_items(|items| {
-                if let Some(true_chain) = &cond.true_jumps {
-                    items.code.resolve(Some(true_chain.clone()));
+            match &cond {
+                BytecodeItem::Cond { true_jumps, .. } => {
+                    if let Some(true_chain) = true_jumps.as_ref() {
+                        self.with_items(|items| {
+                            items.code.resolve(Some(true_chain.clone()));
+                            Ok(())
+                        })?;
+                    }
+                },
+                _ => {
+                    // For non-conditional items, do nothing
                 }
-                Ok(())
-            })?;
+            }
             
             // Generate then statement
             self.visit_stmt(&tree.then_branch, env)?;
@@ -6016,9 +6030,8 @@ impl Gen {
     }
     
     /// Generate condition item from expression (JavaC: genCond)
-    fn gen_cond(&mut self, expr: &Expr, env: &GenContext) -> Result<CondItem> {
+    fn gen_cond(&mut self, expr: &Expr, env: &GenContext) -> Result<BytecodeItem> {
         use crate::ast::Expr;
-        use super::items::CondItem;
         
         match expr {
             // Binary operations - direct conditional generation
@@ -6039,12 +6052,12 @@ impl Gen {
                                 &bin_expr.left
                             };
                             self.visit_expr(non_null_expr, env)?;
-                            Ok(CondItem::new(opcodes::IFNULL))
+                            self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNULL)))
                         } else {
                             // Regular comparison for non-null values
                             self.visit_expr(&bin_expr.left, env)?;
                             self.visit_expr(&bin_expr.right, env)?;
-                            Ok(CondItem::new(opcodes::IF_ICMPEQ))
+                            self.with_items(|items| Ok(items.make_cond_item(opcodes::IF_ICMPEQ)))
                         }
                     }
                     BinaryOp::Ne => {
@@ -6060,46 +6073,46 @@ impl Gen {
                                 &bin_expr.left
                             };
                             self.visit_expr(non_null_expr, env)?;
-                            Ok(CondItem::new(opcodes::IFNONNULL))
+                            self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNONNULL)))
                         } else {
                             // Regular comparison for non-null values
                             self.visit_expr(&bin_expr.left, env)?;
                             self.visit_expr(&bin_expr.right, env)?;
-                            Ok(CondItem::new(opcodes::IF_ICMPNE))
+                            self.with_items(|items| Ok(items.make_cond_item(opcodes::IF_ICMPNE)))
                         }
                     }
                     BinaryOp::Lt => {
                         self.visit_expr(&bin_expr.left, env)?;
                         self.visit_expr(&bin_expr.right, env)?;
-                        Ok(CondItem::new(opcodes::IF_ICMPLT))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IF_ICMPLT)))
                     }
                     BinaryOp::Le => {
                         self.visit_expr(&bin_expr.left, env)?;
                         self.visit_expr(&bin_expr.right, env)?;
-                        Ok(CondItem::new(opcodes::IF_ICMPLE))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IF_ICMPLE)))
                     }
                     BinaryOp::Gt => {
                         self.visit_expr(&bin_expr.left, env)?;
                         self.visit_expr(&bin_expr.right, env)?;
-                        Ok(CondItem::new(opcodes::IF_ICMPGT))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IF_ICMPGT)))
                     }
                     BinaryOp::Ge => {
                         self.visit_expr(&bin_expr.left, env)?;
                         self.visit_expr(&bin_expr.right, env)?;
-                        Ok(CondItem::new(opcodes::IF_ICMPGE))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IF_ICMPGE)))
                     }
                     
                     // Bitwise logical operators (non-short-circuit)
                     BinaryOp::And => {
                         // Generate as regular expression and test != 0
                         self.visit_expr(expr, env)?;
-                        Ok(CondItem::new(opcodes::IFNE))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
                     }
                     
                     BinaryOp::Or => {
                         // Generate as regular expression and test != 0  
                         self.visit_expr(expr, env)?;
-                        Ok(CondItem::new(opcodes::IFNE))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
                     }
                     
                     // Short-circuit logical operators - JavaC aligned implementation
@@ -6109,35 +6122,57 @@ impl Gen {
                         let left_cond = self.gen_cond(&bin_expr.left, env)?;
                         
                         // Get false jumps from left operand - if left is false, entire expression is false
-                        let false_jumps = self.with_items(|items| {
-                            left_cond.jump_false(&mut items.code)
-                        })?;
+                        let false_jumps = match &left_cond {
+                            BytecodeItem::Cond { opcode, false_jumps, .. } => {
+                                let negated_opcode = BytecodeItem::negate_cond_opcode(*opcode);
+                                self.with_items(|items| {
+                                    let jump_chain = items.code.branch(negated_opcode);
+                                    Ok(BytecodeItem::merge_chains(false_jumps.clone(), jump_chain))
+                                })?
+                            },
+                            _ => None,
+                        };
                         
                         // If left is true, evaluate right operand
-                        self.with_items(|items| {
-                            left_cond.resolve_true(&mut items.code);
-                            Ok(())
-                        })?;
+                        match &left_cond {
+                            BytecodeItem::Cond { true_jumps, .. } => {
+                                if let Some(true_chain) = true_jumps.as_ref() {
+                                    self.with_items(|items| {
+                                        items.code.resolve(Some(true_chain.clone()));
+                                        Ok(())
+                                    })?;
+                                }
+                            },
+                            _ => {
+                                // For non-conditional items, do nothing
+                            }
+                        }
                         
                         // Right operand condition
                         let right_cond = self.gen_cond(&bin_expr.right, env)?;
                         
                         // Combine conditions: true only if both are true
-                        Ok(CondItem {
-                            opcode: right_cond.opcode,
-                            true_jumps: right_cond.true_jumps,
-                            false_jumps: {
-                                // Chain false jumps from left and right
-                                match (false_jumps.as_ref(), right_cond.false_jumps.as_ref()) {
-                                    (Some(left_false), Some(right_false)) => {
-                                        super::code::Code::merge_chains(Some(left_false.clone()), Some(right_false.clone()))
-                                    }
-                                    (Some(left_false), None) => Some(left_false.clone()),
-                                    (None, Some(right_false)) => Some(right_false.clone()),
-                                    (None, None) => None,
-                                }
+                        match right_cond {
+                            BytecodeItem::Cond { opcode, true_jumps, false_jumps, tree } => {
+                                Ok(BytecodeItem::Cond {
+                                    opcode,
+                                    true_jumps,
+                                    false_jumps: {
+                                        // Chain false jumps from left and right
+                                        match (false_jumps.as_ref(), false_jumps.as_ref()) {
+                                            (Some(left_false), Some(right_false)) => {
+                                                BytecodeItem::merge_chains(Some(left_false.clone()), Some(right_false.clone()))
+                                            }
+                                            (Some(left_false), None) => Some(left_false.clone()),
+                                            (None, Some(right_false)) => Some(right_false.clone()),
+                                            (None, None) => None,
+                                        }
+                                    },
+                                    tree,
+                                })
                             },
-                        })
+                            _ => Ok(right_cond), // For non-conditional items, return as-is
+                        }
                     }
                     
                     BinaryOp::LogicalOr => {
@@ -6146,41 +6181,62 @@ impl Gen {
                         let left_cond = self.gen_cond(&bin_expr.left, env)?;
                         
                         // Get true jumps from left operand - if left is true, entire expression is true
-                        let true_jumps = self.with_items(|items| {
-                            left_cond.jump_true(&mut items.code)
-                        })?;
+                        let true_jumps = match &left_cond {
+                            BytecodeItem::Cond { opcode, true_jumps, .. } => {
+                                self.with_items(|items| {
+                                    let jump_chain = items.code.branch(*opcode);
+                                    Ok(BytecodeItem::merge_chains(true_jumps.clone(), jump_chain))
+                                })?
+                            },
+                            _ => None,
+                        };
                         
                         // If left is false, evaluate right operand
-                        self.with_items(|items| {
-                            left_cond.resolve_false(&mut items.code);
-                            Ok(())
-                        })?;
+                        match &left_cond {
+                            BytecodeItem::Cond { false_jumps, .. } => {
+                                if let Some(false_chain) = false_jumps.as_ref() {
+                                    self.with_items(|items| {
+                                        items.code.resolve(Some(false_chain.clone()));
+                                        Ok(())
+                                    })?;
+                                }
+                            },
+                            _ => {
+                                // For non-conditional items, do nothing
+                            }
+                        }
                         
                         // Right operand condition
                         let right_cond = self.gen_cond(&bin_expr.right, env)?;
                         
                         // Combine conditions: false only if both are false
-                        Ok(CondItem {
-                            opcode: right_cond.opcode,
-                            true_jumps: {
-                                // Chain true jumps from left and right
-                                match (true_jumps.as_ref(), right_cond.true_jumps.as_ref()) {
-                                    (Some(left_true), Some(right_true)) => {
-                                        super::code::Code::merge_chains(Some(left_true.clone()), Some(right_true.clone()))
-                                    }
-                                    (Some(left_true), None) => Some(left_true.clone()),
-                                    (None, Some(right_true)) => Some(right_true.clone()),
-                                    (None, None) => None,
-                                }
+                        match right_cond {
+                            BytecodeItem::Cond { opcode, true_jumps: right_true_jumps, false_jumps, tree } => {
+                                Ok(BytecodeItem::Cond {
+                                    opcode,
+                                    true_jumps: {
+                                        // Chain true jumps from left and right
+                                        match (true_jumps.as_ref(), right_true_jumps.as_ref()) {
+                                            (Some(left_true), Some(right_true)) => {
+                                                BytecodeItem::merge_chains(Some(left_true.clone()), Some(right_true.clone()))
+                                            }
+                                            (Some(left_true), None) => Some(left_true.clone()),
+                                            (None, Some(right_true)) => Some(right_true.clone()),
+                                            (None, None) => None,
+                                        }
+                                    },
+                                    false_jumps,
+                                    tree,
+                                })
                             },
-                            false_jumps: right_cond.false_jumps,
-                        })
+                            _ => Ok(right_cond), // For non-conditional items, return as-is
+                        }
                     }
                     
                     // For other binary ops, evaluate and test != 0
                     _ => {
                         self.visit_expr(expr, env)?;
-                        Ok(CondItem::new(opcodes::IFNE))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
                     }
                 }
             }
@@ -6190,15 +6246,15 @@ impl Gen {
                 if let Literal::Boolean(value) = &lit_expr.value {
                     if *value {
                         // Always true - no jumps needed, fall through to then
-                        Ok(CondItem::always_true())
+                        self.with_items(|items| Ok(items.make_always_true_cond()))
                     } else {
                         // Always false - immediate jump to else
-                        Ok(CondItem::always_false())
+                        self.with_items(|items| Ok(items.make_always_false_cond()))
                     }
                 } else {
                     // Non-boolean literal - generate and test != 0
                     self.visit_expr(expr, env)?;
-                    Ok(CondItem::new(opcodes::IFNE))
+                    self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
                 }
             }
             
@@ -6209,12 +6265,12 @@ impl Gen {
                     UnaryOp::Not => {
                         // Generate condition for operand and negate
                         let inner_cond = self.gen_cond(&unary_expr.operand, env)?;
-                        Ok(CondItem::negate(inner_cond))
+                        self.with_items(|items| Ok(items.negate_cond_item(inner_cond)))
                     }
                     _ => {
                         // For other unary ops, evaluate and test != 0
                         self.visit_expr(expr, env)?;
-                        Ok(CondItem::new(opcodes::IFNE))
+                        self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
                     }
                 }
             }
@@ -6233,38 +6289,76 @@ impl Gen {
                     Ok(())
                 })?;
                 
-                Ok(CondItem::new(opcodes::IFNE))
+                self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
             }
             
             // For all other expressions, evaluate and test != 0
             _ => {
                 self.visit_expr(expr, env)?;
-                Ok(CondItem::new(opcodes::IFNE))
+                self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
             }
         }
     }
     
     /// Check if condition is always false (JavaC: isFalse)
-    fn is_cond_false(&self, cond: &CondItem) -> bool {
-        cond.is_false()
+    fn is_cond_false(&self, cond: &BytecodeItem) -> bool {
+        match cond {
+            BytecodeItem::Cond { opcode, true_jumps, .. } => {
+                true_jumps.is_none() && *opcode == opcodes::DONTGOTO
+            },
+            _ => false,
+        }
     }
     
     /// Generate jump when condition is false (JavaC: jumpFalse)
-    fn cond_jump_false(&self, cond: &CondItem, items: &mut Items) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
-        cond.jump_false(&mut items.code)
+    fn cond_jump_false(&self, cond: &BytecodeItem, items: &mut Items) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
+        match cond {
+            BytecodeItem::Cond { opcode, false_jumps, .. } => {
+                let negated_opcode = BytecodeItem::negate_cond_opcode(*opcode);
+                let jump_chain = items.code.branch(negated_opcode);
+                Ok(BytecodeItem::merge_chains(false_jumps.clone(), jump_chain))
+            },
+            _ => Ok(None),
+        }
     }
     
     /// Generate jump when condition is true (JavaC: jumpTrue)
-    fn cond_jump_true(&self, cond: &CondItem, items: &mut Items) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
-        cond.jump_true(&mut items.code)
+    fn cond_jump_true(&self, cond: &BytecodeItem, items: &mut Items) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
+        match cond {
+            BytecodeItem::Cond { opcode, true_jumps, .. } => {
+                let jump_chain = items.code.branch(*opcode);
+                Ok(BytecodeItem::merge_chains(true_jumps.clone(), jump_chain))
+            },
+            _ => Ok(None),
+        }
     }
     
     /// Resolve true jumps to current position (JavaC: resolve trueJumps)
-    fn cond_resolve_true(&self, cond: &CondItem, items: &mut Items) {
-        if let Some(true_chain) = cond.true_jumps.as_ref() {
-            items.code.resolve(Some(true_chain.clone()));
+    fn cond_resolve_true(&self, cond: &BytecodeItem, items: &mut Items) {
+        match cond {
+            BytecodeItem::Cond { true_jumps, .. } => {
+                if let Some(true_chain) = true_jumps.as_ref() {
+                    items.code.resolve(Some(true_chain.clone()));
+                }
+            },
+            _ => {
+                // For non-conditional items, do nothing
+            }
         }
-        // For simple conditions without explicit true jumps, fall through naturally
+    }
+    
+    /// Resolve false jumps to current position (JavaC: resolve falseJumps)
+    fn cond_resolve_false(&self, cond: &BytecodeItem, items: &mut Items) {
+        match cond {
+            BytecodeItem::Cond { false_jumps, .. } => {
+                if let Some(false_chain) = false_jumps.as_ref() {
+                    items.code.resolve(Some(false_chain.clone()));
+                }
+            },
+            _ => {
+                // For non-conditional items, do nothing
+            }
+        }
     }
     
     /// Negate a conditional opcode (JavaC: negate)
@@ -6351,9 +6445,10 @@ impl Gen {
     fn visit_array_enhanced_for(&mut self, tree: &EnhancedForStmt, env: &GenContext) -> Result<()> {
         let limit = self.with_items(|items| Ok(items.code.max_locals))?;
         
-        // Generate array cache variable: arraytype #arr = arrayexpr;
-        let array_slot = self.with_items(|items| Ok(items.code.max_locals()))?; // Get next available slot
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
+        // Generate array cache variable: arraytype #arr = arrayexpr; (JavaC alignment)
+        let element_type = tree.variable_type.as_type_enum();
+        let array_type = TypeEnum::Reference(crate::ast::ReferenceType::Array(Box::new(tree.variable_type.clone())));
+        let array_slot = self.new_local_by_type(&array_type)?;
         
         // Evaluate the array expression and store in local variable
         let _array_result = self.visit_expr(&tree.iterable, env)?;
@@ -6362,9 +6457,8 @@ impl Gen {
             Ok(())
         })?;
         
-        // Generate length cache variable: int #len = #arr.length;
-        let len_slot = self.with_items(|items| Ok(items.code.max_locals()))?; 
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
+        // Generate length cache variable: int #len = #arr.length; (JavaC alignment)
+        let len_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
         
         // Load array and get length
         self.with_items(|items| {
@@ -6374,9 +6468,8 @@ impl Gen {
             Ok(())
         })?;
         
-        // Generate index variable: int #i = 0;
-        let index_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
+        // Generate index variable: int #i = 0; (JavaC alignment)
+        let index_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
         
         // Initialize index to 0
         self.with_items(|items| {
@@ -6402,9 +6495,8 @@ impl Gen {
             message: "Failed to create loop exit branch".to_string() 
         })?;
         
-        // Generate loop variable: T v = #arr[#i];
-        let var_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
+        // Generate loop variable: T v = #arr[#i]; (JavaC alignment)
+        let var_slot = self.new_local_by_type(&tree.variable_type.as_type_enum())?;
         
         // Determine element type for correct array access instruction
         let element_type = self.infer_array_element_type(&tree.iterable)?;
@@ -6511,9 +6603,8 @@ impl Gen {
     fn visit_iterable_enhanced_for(&mut self, tree: &EnhancedForStmt, env: &GenContext) -> Result<()> {
         let limit = self.with_items(|items| Ok(items.code.max_locals))?;
         
-        // Generate iterator variable: Iterator<T> #i = coll.iterator();
-        let iterator_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
+        // Generate iterator variable: Iterator<T> #i = coll.iterator(); (JavaC alignment)
+        let iterator_slot = self.new_local_by_type(&TypeEnum::Reference(crate::ast::ReferenceType::Class("java.util.Iterator".to_string())))?;
         
         // Call iterator() method on the iterable
         let _iterable_result = self.visit_expr(&tree.iterable, env)?;
@@ -6560,9 +6651,8 @@ impl Gen {
             message: "Failed to create loop exit branch".to_string() 
         })?;
         
-        // Generate loop variable: T v = (T) #i.next();
-        let var_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?; // Reserve slot
+        // Generate loop variable: T v = (T) #i.next(); (JavaC alignment)
+        let var_slot = self.new_local_by_type(&tree.variable_type.as_type_enum())?;
         
         // Call next() method
         let next_method_ref = self.get_pool_mut().add_interface_method_ref(
@@ -6787,18 +6877,16 @@ impl Gen {
     fn generate_indexed_list_loop(&mut self, tree: &EnhancedForStmt, env: &GenContext) -> Result<()> {
         let limit = self.with_items(|items| Ok(items.code.max_locals))?;
         
-        // Generate index variable: int i = 0;
-        let index_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
+        // Generate index variable: int i = 0; (JavaC alignment)
+        let index_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
         self.with_items(|items| { 
-            items.code.max_locals += 1; 
             items.code.emitop(opcodes::ICONST_0);
             items.code.emitop1(opcodes::ISTORE, index_slot as u8);
             Ok(()) 
         })?;
         
-        // Generate list reference variable
-        let list_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?;
+        // Generate list reference variable (JavaC alignment)
+        let list_slot = self.new_local_by_type(&TypeEnum::Reference(crate::ast::ReferenceType::Class("java.util.List".to_string())))?;
         
         // Evaluate list expression and store
         let _list_result = self.visit_expr(&tree.iterable, env)?;
@@ -6807,9 +6895,8 @@ impl Gen {
             Ok(())
         })?;
         
-        // Get list size: int size = list.size();
-        let size_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?;
+        // Get list size: int size = list.size(); (JavaC alignment)
+        let size_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
         
         let size_method_ref = self.get_pool_mut().add_method_ref(
             "java/util/List", 
@@ -6838,9 +6925,8 @@ impl Gen {
             message: "Failed to create loop exit branch".to_string() 
         })?;
         
-        // Get loop variable: T item = list.get(i);
-        let var_slot = self.with_items(|items| Ok(items.code.max_locals()))?;
-        self.with_items(|items| { items.code.max_locals += 1; Ok(()) })?;
+        // Get loop variable: T item = list.get(i); (JavaC alignment)
+        let var_slot = self.new_local_by_type(&tree.variable_type.as_type_enum())?;
         
         let get_method_ref = self.get_pool_mut().add_method_ref(
             "java/util/List", 
@@ -6935,25 +7021,35 @@ impl Gen {
                 self.gen_cond(condition, env)?
             } else {
                 // JavaC: c = items.makeCondItem(goto_);
-                CondItem {
-                    opcode: opcodes::GOTO,
-                    true_jumps: None,
-                    false_jumps: None,
-                }
+                self.with_items(|items| Ok(items.make_cond_item(opcodes::GOTO)))?
             };
             
             // JavaC: Chain loopDone = c.jumpFalse();
-            let loop_done = self.with_items(|items| {
-                cond.jump_false(&mut items.code)
-            })?;
+            let loop_done = match &cond {
+                BytecodeItem::Cond { opcode, false_jumps, .. } => {
+                    let negated_opcode = BytecodeItem::negate_cond_opcode(*opcode);
+                    self.with_items(|items| {
+                        let jump_chain = items.code.branch(negated_opcode);
+                        Ok(BytecodeItem::merge_chains(false_jumps.clone(), jump_chain))
+                    })?
+                },
+                _ => None,
+            };
             
             // JavaC: code.resolve(c.trueJumps);
-            self.with_items(|items| {
-                if let Some(true_jumps) = cond.true_jumps.as_ref() {
-                    items.code.resolve(Some(true_jumps.clone()));
+            match &cond {
+                BytecodeItem::Cond { true_jumps, .. } => {
+                    if let Some(true_chain) = true_jumps.as_ref() {
+                        self.with_items(|items| {
+                            items.code.resolve(Some(true_chain.clone()));
+                            Ok(())
+                        })?;
+                    }
+                },
+                _ => {
+                    // For non-conditional items, do nothing
                 }
-                Ok(())
-            })?;
+            }
             
             // Push optimized loop context instead of clearing global chains
             let loop_type = if condition.is_some() { 
@@ -7038,17 +7134,19 @@ impl Gen {
                 self.gen_cond(condition, env)?
             } else {
                 // JavaC: c = items.makeCondItem(goto_);
-                CondItem {
-                    opcode: opcodes::GOTO,
-                    true_jumps: None,
-                    false_jumps: None,
-                }
+                self.with_items(|items| Ok(items.make_cond_item(opcodes::GOTO)))?
             };
             
             // JavaC: code.resolve(c.jumpTrue(), startpc);
-            let true_jump = self.with_items(|items| {
-                cond.jump_true(&mut items.code)
-            })?;
+            let true_jump = match &cond {
+                BytecodeItem::Cond { opcode, true_jumps, .. } => {
+                    self.with_items(|items| {
+                        let jump_chain = items.code.branch(*opcode);
+                        Ok(BytecodeItem::merge_chains(true_jumps.clone(), jump_chain))
+                    })?
+                },
+                _ => None,
+            };
             if let Some(true_jump) = true_jump {
                 self.with_items(|items| {
                     items.code.resolve_chain(true_jump, start_pc);
@@ -7057,12 +7155,19 @@ impl Gen {
             }
             
             // JavaC: code.resolve(c.falseJumps);
-            self.with_items(|items| {
-                if let Some(false_jumps) = cond.false_jumps.as_ref() {
-                    items.code.resolve(Some(false_jumps.clone()));
+            match &cond {
+                BytecodeItem::Cond { false_jumps, .. } => {
+                    if let Some(false_chain) = false_jumps.as_ref() {
+                        self.with_items(|items| {
+                            items.code.resolve(Some(false_chain.clone()));
+                            Ok(())
+                        })?;
+                    }
+                },
+                _ => {
+                    // For non-conditional items, no false jumps to resolve
                 }
-                Ok(())
-            })?;
+            }
         }
         
         // Enhanced scope management: pop loop scope and finalize variables
@@ -7184,12 +7289,20 @@ impl Gen {
         Ok(())
     }
     
-    /// Visit variable declaration - simplified version
+    /// Visit variable declaration - using RegisterAllocator (JavaC alignment)
     pub fn visit_var_def(&mut self, tree: &VarDeclStmt, env: &GenContext) -> Result<()> {
         for var in &tree.variables {
             // Add variable to current scope first
             let current_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
-            let next_slot = self.with_items(|items| Ok(items.code.max_locals))?;
+            
+            // Convert TypeRef to TypeEnum for RegisterAllocator
+            let type_enum = self.convert_type_ref_to_type_enum(&tree.type_ref);
+            
+            // Use RegisterAllocator to allocate slot (JavaC alignment)
+            let var_slot = self.new_local_by_type(&type_enum)?;
+            
+            eprintln!("🔍 VAR DECL: Variable '{}' allocated to slot {} with TypeRef: {:?} -> TypeEnum: {}", 
+                var.name, var_slot, tree.type_ref, self.type_to_string(&type_enum));
             
             // Generate initializer if present and store in variable
             if let Some(ref init) = var.initializer {
@@ -7212,17 +7325,17 @@ impl Gen {
                             (opcodes::DSTORE_0, opcodes::DSTORE)
                         }
                         _ => {
-                            // Object references (including our SimpleConstructorTest)
+                            // Object references
                             (opcodes::ASTORE_0, opcodes::ASTORE)
                         }
                     };
                     
                     // Use appropriate store instruction based on slot number and type
-                    if next_slot <= 3 {
-                        items.code.emitop(optimized_base + next_slot as u8);
+                    if var_slot <= 3 {
+                        items.code.emitop(optimized_base + var_slot as u8);
                         items.code.state.pop(1); // Pop the value from stack
                     } else {
-                        items.code.emitop1(general_op, next_slot as u8);
+                        items.code.emitop1(general_op, var_slot as u8);
                         // emitop1 already handles stack tracking via update_stack_for_op1
                     }
                     Ok(())
@@ -7232,16 +7345,11 @@ impl Gen {
             // Get type descriptor from VarDeclStmt's type_ref
             let type_desc = format!("{:?}", tree.type_ref); // Simplified for now
             
-            // Convert TypeRef to TypeEnum for symbol table - with multi-dimensional array fix
-            let type_enum = self.convert_type_ref_to_type_enum(&tree.type_ref);
-            eprintln!("🔍 VAR DECL: Variable '{}' declared with TypeRef: {:?} -> TypeEnum: {}", 
-                var.name, tree.type_ref, self.type_to_string(&type_enum));
-            
             // Add to scope manager
             if let Err(e) = self.scope_manager.add_local_var(
                 var.name.clone(),
                 type_desc,
-                next_slot,
+                var_slot,
                 current_pc as usize
             ) {
                 eprintln!("⚠️  WARNING: Failed to add local variable '{}' to scope: {}", var.name, e);
@@ -7277,24 +7385,18 @@ impl Gen {
             }
             
             if let Some(ref mut symbol_env) = self.wash_symbol_env {
-                eprintln!("🔧 WASH REG: Registering variable '{}' to wash environment in method '{}'", 
-                    var.name, method_context);
+                eprintln!("🔧 WASH REG: Registering variable '{}' to wash environment in method '{}' at slot {}", 
+                    var.name, method_context, var_slot);
                 symbol_env.add_variable(
                     var.name.clone(),
                     var_type_str.clone(),
                     method_context.clone(),
                     false, // is_parameter = false for local variables
-                    Some(next_slot as usize)
+                    Some(var_slot as usize)
                 );
             } else {
                 eprintln!("⚠️ WARNING: wash_symbol_env is None, cannot register variable '{}'", var.name);
             }
-            
-            // Update max_locals (allocate one slot for simplicity)
-            self.with_items(|items| {
-                items.code.max_locals += 1;
-                Ok(())
-            })?;
         }
         Ok(())
     }

@@ -205,11 +205,47 @@ impl<'a> Items<'a> {
     }
     
     /// Make conditional item (JavaC makeCondItem)
-    pub fn make_cond_item(&self, opcode: u8) -> CondItem {
-        CondItem {
+    pub fn make_cond_item(&self, opcode: u8) -> Item {
+        Item::Cond {
             opcode,
             true_jumps: None,
             false_jumps: None,
+            tree: None,
+        }
+    }
+    
+    /// Make always-true conditional item (JavaC CondItem.always_true)
+    pub fn make_always_true_cond(&self) -> Item {
+        Item::Cond {
+            opcode: opcodes::GOTO,
+            true_jumps: None,
+            false_jumps: None,
+            tree: None,
+        }
+    }
+    
+    /// Make always-false conditional item (JavaC CondItem.always_false)
+    pub fn make_always_false_cond(&self) -> Item {
+        Item::Cond {
+            opcode: opcodes::DONTGOTO,
+            true_jumps: None,
+            false_jumps: None,
+            tree: None,
+        }
+    }
+    
+    /// Negate a conditional item (JavaC CondItem.negate)
+    pub fn negate_cond_item(&self, item: Item) -> Item {
+        match item {
+            Item::Cond { opcode, true_jumps, false_jumps, tree } => {
+                Item::Cond {
+                    opcode: Item::negate_cond_opcode(opcode),
+                    true_jumps: false_jumps, // Swap true and false jumps
+                    false_jumps: true_jumps,
+                    tree,
+                }
+            },
+            _ => item, // Non-conditional items can't be negated
         }
     }
     
@@ -433,6 +469,11 @@ impl<'a> Items<'a> {
             Item::Assign { .. } => {
                 // Assignment items should be handled by their own load method
                 todo!("Assignment items should use item.load(items) instead of load_item")
+            },
+            
+            Item::Cond { .. } => {
+                // Conditional items should be loaded using the load() method which converts to boolean
+                todo!("Conditional items should use item.load(items) instead of load_item")
             },
         }
     }
@@ -1122,6 +1163,18 @@ pub enum Item {
         lhs: Box<Item>,  // Left-hand side item
         typecode: u8,    // Result typecode
     },
+    
+    /// Conditional item (JavaC CondItem equivalent) - 100% JavaC aligned
+    Cond {
+        /// Comparison opcode (ifne, ifeq, etc.)
+        opcode: u8,
+        /// Chain of jumps that should execute when condition is true
+        true_jumps: Option<Box<crate::codegen::chain::Chain>>,
+        /// Chain of jumps that should execute when condition is false  
+        false_jumps: Option<Box<crate::codegen::chain::Chain>>,
+        /// The abstract syntax tree of this item (for debugging and optimization)
+        tree: Option<crate::ast::Expr>,
+    },
 }
 
 impl Item {
@@ -1137,6 +1190,7 @@ impl Item {
             Item::This | Item::Super => typecodes::OBJECT,
             Item::Void => typecodes::VOID,
             Item::Assign { typecode, .. } => *typecode,
+            Item::Cond { .. } => typecodes::BYTE, // CondItems are always byte type
         }
     }
     
@@ -1163,11 +1217,12 @@ impl Item {
     }
     
     /// Generate condition item (JavaC mkCond)
-    pub fn make_cond(&self) -> CondItem {
-        CondItem {
+    pub fn make_cond(&self) -> Item {
+        Item::Cond {
             opcode: opcodes::IFNE, // Default to ifne
             true_jumps: None,
             false_jumps: None,
+            tree: None,
         }
     }
     
@@ -1369,6 +1424,44 @@ impl Item {
                 // Void items don't load anything
                 Ok(Item::Void)
             },
+            
+            Item::Cond { mut opcode, mut true_jumps, mut false_jumps, tree } => {
+                // JavaC CondItem.load() - convert conditional to boolean value (0 or 1)
+                // Generate the false branch first
+                let negated_opcode = Self::negate_cond_opcode(opcode);
+                let false_chain = items.code.branch(negated_opcode);
+                let merged_false = Self::merge_chains(false_jumps, false_chain);
+                
+                // If not always false, generate true branch
+                if !Self::is_cond_false(opcode, &true_jumps, &merged_false) {
+                    // Resolve true jumps to current position
+                    if let Some(true_chain) = true_jumps {
+                        items.code.resolve(Some(true_chain));
+                    }
+                    // Push true value (1) onto stack
+                    items.code.emitop(opcodes::ICONST_1);
+                    // Jump over false branch
+                    let end_chain = items.code.branch(opcodes::GOTO);
+                    
+                    // Generate false branch
+                    if let Some(false_chain) = merged_false {
+                        items.code.resolve(Some(false_chain));
+                        // Push false value (0) onto stack
+                        items.code.emitop(opcodes::ICONST_0);
+                    }
+                    
+                    // Resolve end of true branch
+                    if let Some(end_chain) = end_chain {
+                        items.code.resolve(Some(end_chain));
+                    }
+                } else if let Some(false_chain) = merged_false {
+                    // Only false branch exists
+                    items.code.resolve(Some(false_chain));
+                    items.code.emitop(opcodes::ICONST_0);
+                }
+                
+                Ok(Item::Stack { typecode: typecodes::INT }) // Boolean result as int
+            },
         }
     }
     
@@ -1438,6 +1531,11 @@ impl Item {
                 // JavaC AssignItem inherits base Item.store() which should error
                 // AssignItems are not directly storable - they represent assignment expressions
                 Err(crate::common::error::Error::codegen_error("AssignItem cannot be stored to".to_string()))
+            },
+            
+            Item::Cond { .. } => {
+                // JavaC CondItem cannot be stored to directly - they represent conditionals
+                Err(crate::common::error::Error::codegen_error("CondItem cannot be stored to".to_string()))
             },
             
             _ => {
@@ -1512,6 +1610,11 @@ impl Item {
             Item::Assign { .. } => {
                 // JavaC AssignItem.stash() - throws Assert.error()
                 Err(crate::common::error::Error::codegen_error("AssignItem cannot be stashed".to_string()))
+            },
+            
+            Item::Cond { .. } => {
+                // JavaC CondItem cannot be stashed - they represent conditionals  
+                Err(crate::common::error::Error::codegen_error("CondItem cannot be stashed".to_string()))
             },
             
             _ => {
@@ -1643,6 +1746,11 @@ impl Item {
                 let loaded = self.load(items)?;
                 items.duplicate_item(&loaded)
             },
+            Item::Cond { .. } => {
+                // JavaC CondItem.duplicate(): load().duplicate()
+                let loaded = self.load(items)?;
+                items.duplicate_item(&loaded)
+            },
             _ => {
                 // For other items, use the standard duplicate
                 items.duplicate_item(&self)
@@ -1679,6 +1787,68 @@ impl Item {
             }
         }
     }
+    
+    // CondItem helper methods (JavaC CondItem alignment)
+    
+    /// Negate a conditional jump opcode (JavaC Code.negate equivalent)
+    pub fn negate_cond_opcode(opcode: u8) -> u8 {
+        match opcode {
+            opcodes::IFEQ => opcodes::IFNE,
+            opcodes::IFNE => opcodes::IFEQ,
+            opcodes::IFLT => opcodes::IFGE,
+            opcodes::IFGE => opcodes::IFLT,
+            opcodes::IFGT => opcodes::IFLE,
+            opcodes::IFLE => opcodes::IFGT,
+            opcodes::IF_ICMPEQ => opcodes::IF_ICMPNE,
+            opcodes::IF_ICMPNE => opcodes::IF_ICMPEQ,
+            opcodes::IF_ICMPLT => opcodes::IF_ICMPGE,
+            opcodes::IF_ICMPGE => opcodes::IF_ICMPLT,
+            opcodes::IF_ICMPGT => opcodes::IF_ICMPLE,
+            opcodes::IF_ICMPLE => opcodes::IF_ICMPGT,
+            opcodes::IF_ACMPEQ => opcodes::IF_ACMPNE,
+            opcodes::IF_ACMPNE => opcodes::IF_ACMPEQ,
+            opcodes::IFNULL => opcodes::IFNONNULL,
+            opcodes::IFNONNULL => opcodes::IFNULL,
+            opcodes::GOTO => opcodes::DONTGOTO,
+            opcodes::DONTGOTO => opcodes::GOTO,
+            _ => opcode, // Return same opcode if not conditional
+        }
+    }
+    
+    /// Merge two chain options (JavaC Chain.merge equivalent)
+    pub fn merge_chains(first: Option<Box<crate::codegen::chain::Chain>>, second: Option<Box<crate::codegen::chain::Chain>>) -> Option<Box<crate::codegen::chain::Chain>> {
+        crate::codegen::chain::ChainOps::merge(first, second)
+    }
+    
+    /// Check if this condition is always false (JavaC CondItem.isFalse equivalent)
+    pub fn is_cond_false(opcode: u8, true_jumps: &Option<Box<crate::codegen::chain::Chain>>, false_jumps: &Option<Box<crate::codegen::chain::Chain>>) -> bool {
+        true_jumps.is_none() && opcode == opcodes::DONTGOTO
+    }
+    
+    /// Get mnemonic name for debugging (JavaC Code.mnem equivalent)
+    pub fn opcode_mnemonic(opcode: u8) -> &'static str {
+        match opcode {
+            opcodes::IFEQ => "ifeq",
+            opcodes::IFNE => "ifne", 
+            opcodes::IFLT => "iflt",
+            opcodes::IFGE => "ifge",
+            opcodes::IFGT => "ifgt",
+            opcodes::IFLE => "ifle",
+            opcodes::IF_ICMPEQ => "if_icmpeq",
+            opcodes::IF_ICMPNE => "if_icmpne",
+            opcodes::IF_ICMPLT => "if_icmplt",
+            opcodes::IF_ICMPGE => "if_icmpge",
+            opcodes::IF_ICMPGT => "if_icmpgt",
+            opcodes::IF_ICMPLE => "if_icmple",
+            opcodes::IF_ACMPEQ => "if_acmpeq",
+            opcodes::IF_ACMPNE => "if_acmpne",
+            opcodes::IFNULL => "ifnull",
+            opcodes::IFNONNULL => "ifnonnull",
+            opcodes::GOTO => "goto",
+            opcodes::DONTGOTO => "dontgoto",
+            _ => "unknown",
+        }
+    }
 }
 
 impl std::fmt::Display for Item {
@@ -1697,146 +1867,8 @@ impl std::fmt::Display for Item {
             Item::This => write!(f, "this"),
             Item::Super => write!(f, "super"),
             Item::Void => write!(f, "void"),
+            Item::Cond { opcode, .. } => write!(f, "cond({})", Item::opcode_mnemonic(*opcode)),
         }
     }
 }
 
-/// Conditional item for jump generation (JavaC CondItem equivalent)
-#[derive(Debug, Clone)]
-pub struct CondItem {
-    /// Comparison opcode (ifne, ifeq, etc.)
-    pub opcode: u8,
-    
-    /// Chain of jumps that should execute when condition is true
-    pub true_jumps: Option<Box<crate::codegen::chain::Chain>>,
-    
-    /// Chain of jumps that should execute when condition is false  
-    pub false_jumps: Option<Box<crate::codegen::chain::Chain>>,
-}
-
-impl CondItem {
-    /// Create new conditional item
-    pub fn new(opcode: u8) -> Self {
-        Self {
-            opcode,
-            true_jumps: None,
-            false_jumps: None,
-        }
-    }
-    
-    /// Create conditional item with specific jump chains
-    pub fn with_chains(opcode: u8, true_jumps: Option<Box<crate::codegen::chain::Chain>>, false_jumps: Option<Box<crate::codegen::chain::Chain>>) -> Self {
-        Self {
-            opcode,
-            true_jumps,
-            false_jumps,
-        }
-    }
-    
-    /// Create always-true condition (no jumps needed)
-    pub fn always_true() -> Self {
-        Self {
-            opcode: opcodes::IFNE, // Placeholder
-            true_jumps: None,
-            false_jumps: None,
-        }
-    }
-    
-    /// Create always-false condition (immediate jump to false)
-    pub fn always_false() -> Self {
-        Self {
-            opcode: opcodes::IFEQ, // Placeholder
-            true_jumps: None,
-            false_jumps: None,
-        }
-    }
-    
-    /// Create negated condition (swap true/false jumps)
-    pub fn negate(cond: CondItem) -> Self {
-        Self {
-            opcode: Self::negate_opcode(cond.opcode),
-            true_jumps: cond.false_jumps,
-            false_jumps: cond.true_jumps,
-        }
-    }
-    
-    /// Check if condition is always false
-    pub fn is_false(&self) -> bool {
-        // For now, no constant folding - never consider always false
-        false
-    }
-    
-    /// Resolve true jumps to current position (JavaC: resolve trueJumps)
-    pub fn resolve_true(&self, code: &mut Code) {
-        if let Some(ref true_jumps) = self.true_jumps {
-            code.resolve(Some(true_jumps.clone()));
-        }
-    }
-    
-    /// Resolve false jumps to current position (JavaC: resolve falseJumps)
-    pub fn resolve_false(&self, code: &mut Code) {
-        if let Some(ref false_jumps) = self.false_jumps {
-            code.resolve(Some(false_jumps.clone()));
-        }
-    }
-    
-    /// Generate jump when condition is false (JavaC: jumpFalse)
-    pub fn jump_false(&self, code: &mut Code) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
-        if !code.is_alive() {
-            return Ok(None);
-        }
-        
-        // For simple conditions, emit the negated jump
-        let negated_opcode = Self::negate_opcode(self.opcode);
-        let jump_chain = code.branch(negated_opcode);
-        
-        // Merge with existing false jumps if any
-        if let Some(existing_false) = &self.false_jumps {
-            use crate::codegen::chain::ChainOps;
-            Ok(ChainOps::merge(Some(existing_false.clone()), jump_chain))
-        } else {
-            Ok(jump_chain)
-        }
-    }
-    
-    /// Generate jump when condition is true (JavaC: jumpTrue)
-    pub fn jump_true(&self, code: &mut Code) -> Result<Option<Box<crate::codegen::chain::Chain>>> {
-        if !code.is_alive() {
-            return Ok(None);
-        }
-        
-        // For simple conditions, emit the direct jump
-        let jump_chain = code.branch(self.opcode);
-        
-        // Merge with existing true jumps if any
-        if let Some(existing_true) = &self.true_jumps {
-            use crate::codegen::chain::ChainOps;
-            Ok(ChainOps::merge(Some(existing_true.clone()), jump_chain))
-        } else {
-            Ok(jump_chain)
-        }
-    }
-    
-    /// Negate a conditional opcode
-    fn negate_opcode(opcode: u8) -> u8 {
-        match opcode {
-            opcodes::IFEQ => opcodes::IFNE,
-            opcodes::IFNE => opcodes::IFEQ,
-            opcodes::IFLT => opcodes::IFGE,
-            opcodes::IFGE => opcodes::IFLT,
-            opcodes::IFGT => opcodes::IFLE,
-            opcodes::IFLE => opcodes::IFGT,
-            opcodes::IF_ICMPEQ => opcodes::IF_ICMPNE,
-            opcodes::IF_ICMPNE => opcodes::IF_ICMPEQ,
-            opcodes::IF_ICMPLT => opcodes::IF_ICMPGE,
-            opcodes::IF_ICMPGE => opcodes::IF_ICMPLT,
-            opcodes::IF_ICMPGT => opcodes::IF_ICMPLE,
-            opcodes::IF_ICMPLE => opcodes::IF_ICMPGT,
-            opcodes::IF_ACMPEQ => opcodes::IF_ACMPNE,
-            opcodes::IF_ACMPNE => opcodes::IF_ACMPEQ,
-            opcodes::IFNULL => opcodes::IFNONNULL,
-            opcodes::IFNONNULL => opcodes::IFNULL,
-            _ => opcode, // Fallback for unknown opcodes
-        }
-    }
-}
