@@ -3160,7 +3160,12 @@ impl Gen {
                     let ival = *val as i32;
                     if ival >= -1 && ival <= 5 {
                         // Use iconst_m1 through iconst_5 (JavaC optimization)
-                        code.emitop(super::opcodes::ICONST_0 + (ival + 1) as u8);
+                        let opcode = if ival == -1 {
+                            super::opcodes::ICONST_M1
+                        } else {
+                            super::opcodes::ICONST_0 + ival as u8
+                        };
+                        code.emitop(opcode);
                     } else if ival >= i8::MIN as i32 && ival <= i8::MAX as i32 {
                         // Use bipush for byte range (JavaC optimization)
                         code.emitop(super::opcodes::BIPUSH);
@@ -3172,8 +3177,13 @@ impl Gen {
                     } else {
                         // Use ldc for large constants (JavaC pattern)
                         if let Some((pool_idx, _)) = pool_data {
-                            code.emitop(super::opcodes::LDC);
-                            code.emit2(pool_idx);
+                            if pool_idx <= 255 {
+                                code.emitop(super::opcodes::LDC);
+                                code.emit1(pool_idx as u8);
+                            } else {
+                                code.emitop(super::opcodes::LDC_W);
+                                code.emit2(pool_idx);
+                            }
                         }
                     }
                     code.state.push(super::code::Type::Int);
@@ -3189,11 +3199,18 @@ impl Gen {
                     code.state.push(super::code::Type::Int);
                 }
                 
-                // JavaC constant folding for strings - always use LDC
+                // JavaC constant folding for strings - use LDC or LDC_W
                 Literal::String(_) => {
                     if let Some((string_idx, _)) = pool_data {
-                        code.emitop(super::opcodes::LDC);
-                        code.emit2(string_idx);
+                        if string_idx <= 255 {
+                            // Use LDC for indices 1-255 (single byte)
+                            code.emitop(super::opcodes::LDC);
+                            code.emit1(string_idx as u8);
+                        } else {
+                            // Use LDC_W for indices > 255 (two bytes)
+                            code.emitop(super::opcodes::LDC_W);
+                            code.emit2(string_idx);
+                        }
                         code.state.push(super::code::Type::Object("java/lang/String".to_string()));
                     }
                 }
@@ -3214,8 +3231,13 @@ impl Gen {
                         code.emit2(char_val as u16);
                     } else if let Some((int_idx, _)) = pool_data {
                         // Use ldc for large constants (JavaC pattern)
-                        code.emitop(super::opcodes::LDC);
-                        code.emit2(int_idx);
+                        if int_idx <= 255 {
+                            code.emitop(super::opcodes::LDC);
+                            code.emit1(int_idx as u8);
+                        } else {
+                            code.emitop(super::opcodes::LDC_W);
+                            code.emit2(int_idx);
+                        }
                     }
                     code.state.push(super::code::Type::Int);
                 }
@@ -3246,8 +3268,13 @@ impl Gen {
                         code.emitop(super::opcodes::FCONST_2);
                     } else if let Some((float_idx, _)) = pool_data {
                         // Use ldc for other float constants (JavaC pattern)
-                        code.emitop(super::opcodes::LDC);
-                        code.emit2(float_idx);
+                        if float_idx <= 255 {
+                            code.emitop(super::opcodes::LDC);
+                            code.emit1(float_idx as u8);
+                        } else {
+                            code.emitop(super::opcodes::LDC_W);
+                            code.emit2(float_idx);
+                        }
                     }
                     code.state.push(super::code::Type::Float);
                 }
@@ -4962,17 +4989,16 @@ impl Gen {
         let left_type = left_item.typecode();
         let right_type = right_item.typecode();
         
-        // Comparison and logical operators always return boolean
+        // Logical operators always return boolean
         match operator {
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | 
-            BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or |
             BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
                 return TypeEnum::Primitive(PrimitiveType::Boolean);
             }
             _ => {}
         }
         
-        // Type promotion rules (follow Java's rules)
+        // For comparison and arithmetic operators, determine operand type
+        // This is used to decide which instruction to use (e.g., if_icmpgt vs fcmpl + ifgt)
         match (left_type, right_type) {
             // Double takes precedence
             (typecodes::DOUBLE, _) | (_, typecodes::DOUBLE) => TypeEnum::Primitive(PrimitiveType::Double),
@@ -9038,8 +9064,13 @@ impl Gen {
                 items.code.emit2(capacity);
             } else if let Some(const_ref) = capacity_const_ref {
                 // Use LDC for larger values
-                items.code.emitop(opcodes::LDC);
-                items.code.emit2(const_ref);
+                if const_ref <= 255 {
+                    items.code.emitop(opcodes::LDC);
+                    items.code.emit1(const_ref as u8);
+                } else {
+                    items.code.emitop(opcodes::LDC_W);
+                    items.code.emit2(const_ref);
+                }
             } else {
                 // Use SIPUSH for values up to 32767
                 items.code.emitop(opcodes::SIPUSH);

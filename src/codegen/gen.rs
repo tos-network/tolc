@@ -20,6 +20,7 @@ use super::type_inference::{TypeInference, ConstantValue};
 use super::class::ClassFile;
 use super::optimization_manager::OptimizationManager;
 use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
+use super::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
 use super::flag::access_flags;
 use super::attribute;
 use super::field;
@@ -59,6 +60,9 @@ pub struct Gen {
     
     /// Branch optimizer for conditional jump optimization (JavaC alignment)
     pub branch_optimizer: BranchOptimizer,
+    
+    /// StackMapTable optimizer for frame compression (JavaC alignment)  
+    pub stack_map_optimizer: StackMapOptimizer,
     
     /// Register allocation manager for local variables (JavaC alignment)
     pub register_alloc: crate::codegen::register_alloc::RegisterAllocator,
@@ -546,6 +550,7 @@ impl Gen {
             type_inference,                          // JavaC Types equivalent
             optimizer: OptimizationManager::new(),   // Optimization coordinator
             branch_optimizer: BranchOptimizer::new(), // Branch optimization for conditional jumps
+            stack_map_optimizer: StackMapOptimizer::new(), // StackMapTable optimization for frame compression
             register_alloc: crate::codegen::register_alloc::RegisterAllocator::new(), // Register allocation manager
             dynamic_class_loader: None,              // Dynamic class loader (initialized on demand)
             current_break_chain: None,               // Phase 2.3: break statement chain
@@ -3641,47 +3646,76 @@ impl Gen {
                 }
             }
             
-            // Enable StackMapTable generation for Java 8+ (fixed StackMapTable PC calculation)
+            // Enable StackMapTable generation for Java 8+ with JavaC-aligned optimization
             if self.config.emit_frames && self.class_file.major_version >= 50 {
                 // Check if bytecode contains conditional branches that require StackMapTable
                 let truncated_bytecode = code.to_bytes();
                 let has_conditional_branches = self.has_conditional_branches(&truncated_bytecode);
                 
                 if has_conditional_branches {
-                    use super::frame::FrameBuilder;
+                    // Extract frame information from bytecode (simplified approach)
+                    let frames = self.extract_frame_information(&truncated_bytecode)?;
                     
-                    let frame_computer = FrameBuilder::new();
-                    let _class_name = if self.class_file.this_class == 0 {
-                        "java/lang/Object".to_string()
-                    } else {
-                        // For now, use a placeholder since we don't have a way to retrieve class name
-                        // This would need proper constant pool lookup implementation
-                        "java/lang/Object".to_string()
-                    };
-                    
-                    // Use simpler frame computation for loops to avoid convergence issues
-                    // Use the same truncated bytecode for frame computation to ensure PC consistency
-                    let stack_map_table = frame_computer.compute_from(
-                        &truncated_bytecode,
-                        &[], // No exception handlers for now
-                    );
-                    
-                    if !stack_map_table.frames.is_empty() {
-                        use super::attribute::{NamedAttribute, AttributeInfo};
-                        use super::frame::make_stack_map_attribute;
+                    if !frames.is_empty() {
+                        // Use JavaC-aligned StackMapTable optimization when we have frames
+                        let mut compressor = StackMapTableCompressor::new();
+                        let optimized_stack_map_table = compressor.compress_stack_map_table(frames);
                         
-                        let _stack_map_attr_info = make_stack_map_attribute(&mut self.pool, &stack_map_table);
-                        let stack_map_attr_name_idx = self.pool.add_utf8("StackMapTable");
-                        let stack_map_named_attr = NamedAttribute::new(
-                            super::typed_index::ConstPoolIndex::from(stack_map_attr_name_idx),
-                            AttributeInfo::StackMapTable(super::attribute::StackMapTableAttribute {
-                                stack_map_frames: super::vec::JvmVecU2::from_vec_checked(stack_map_table.frames)
-                                    .map_err(|e| crate::common::error::Error::CodeGen { 
-                                        message: format!("StackMapTable frame count overflow: {}", e) 
-                                    })?
-                            })
+                        if !optimized_stack_map_table.frames.is_empty() {
+                            use super::attribute::{NamedAttribute, AttributeInfo};
+                            
+                            // Convert optimized frames to the format expected by attribute layer
+                            let attribute_frames: Vec<super::frame::StackMapFrame> = optimized_stack_map_table.frames
+                                .into_iter()
+                                .map(|opt_frame| opt_frame) // Direct conversion since they use same enum
+                                .collect();
+                            
+                            let stack_map_attr_name_idx = self.pool.add_utf8("StackMapTable");
+                            let stack_map_named_attr = NamedAttribute::new(
+                                super::typed_index::ConstPoolIndex::from(stack_map_attr_name_idx),
+                                AttributeInfo::StackMapTable(super::attribute::StackMapTableAttribute {
+                                    stack_map_frames: super::vec::JvmVecU2::from_vec_checked(attribute_frames)
+                                        .map_err(|e| crate::common::error::Error::CodeGen { 
+                                            message: format!("StackMapTable frame count overflow: {}", e) 
+                                        })?
+                                })
+                            );
+                            code_attributes.push(stack_map_named_attr);
+                            
+                            // Log optimization statistics
+                            let stats = compressor.get_stats();
+                            if self.config.debug {
+                                eprintln!("StackMapTable optimization stats: {} bytes saved, {} compressed frames", 
+                                         stats.bytes_saved, stats.same_frames + stats.same_locals_1_stack_item + stats.chop_frames + stats.append_frames);
+                            }
+                        }
+                    } else {
+                        // Fall back to original FrameBuilder when we don't have proper frame info
+                        use super::frame::FrameBuilder;
+                        
+                        let frame_computer = FrameBuilder::new();
+                        let stack_map_table = frame_computer.compute_from(
+                            &truncated_bytecode,
+                            &[], // No exception handlers for now
                         );
-                        code_attributes.push(stack_map_named_attr);
+                        
+                        if !stack_map_table.frames.is_empty() {
+                            use super::attribute::{NamedAttribute, AttributeInfo};
+                            use super::frame::make_stack_map_attribute;
+                            
+                            let _stack_map_attr_info = make_stack_map_attribute(&mut self.pool, &stack_map_table);
+                            let stack_map_attr_name_idx = self.pool.add_utf8("StackMapTable");
+                            let stack_map_named_attr = NamedAttribute::new(
+                                super::typed_index::ConstPoolIndex::from(stack_map_attr_name_idx),
+                                AttributeInfo::StackMapTable(super::attribute::StackMapTableAttribute {
+                                    stack_map_frames: super::vec::JvmVecU2::from_vec_checked(stack_map_table.frames)
+                                        .map_err(|e| crate::common::error::Error::CodeGen { 
+                                            message: format!("StackMapTable frame count overflow: {}", e) 
+                                        })?
+                                })
+                            );
+                            code_attributes.push(stack_map_named_attr);
+                        }
                     }
                 }
             }
@@ -4293,6 +4327,57 @@ impl LoopScopeManager {
 }
 
 impl Gen {
+    /// Extract frame information from bytecode using proper FrameBuilder
+    fn extract_frame_information(&self, bytecode: &[u8]) -> Result<Vec<(u16, Vec<super::frame::VerificationType>, Vec<super::frame::VerificationType>)>> {
+        use super::frame::{FrameBuilder, StackMapFrame, VerificationType};
+        
+        // Use proper FrameBuilder to compute StackMapTable frames
+        let frame_builder = FrameBuilder::new();
+        
+        // Generate minimal frames using basic block leaders
+        let exception_handlers = Vec::new(); // No exception handlers for now
+        let stack_map_table = frame_builder.compute_from(bytecode, &exception_handlers);
+        
+        // Convert StackMapTable to the expected format
+        let mut frames = Vec::new();
+        let mut accumulated_offset = 0u16;
+        
+        for frame in &stack_map_table.frames {
+            match frame {
+                StackMapFrame::Same { offset_delta } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    // Don't add frames for Same - they don't change locals/stack
+                }
+                StackMapFrame::SameExtended { offset_delta } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    // Don't add frames for SameExtended - they don't change locals/stack
+                }
+                StackMapFrame::SameLocals1StackItem { offset_delta, stack } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    frames.push((accumulated_offset, Vec::new(), vec![stack.clone()]));
+                }
+                StackMapFrame::SameLocals1StackItemExtended { offset_delta, stack } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    frames.push((accumulated_offset, Vec::new(), vec![stack.clone()]));
+                }
+                StackMapFrame::Chop { offset_delta, .. } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    // Chop frames don't provide explicit locals/stack info
+                }
+                StackMapFrame::Append { offset_delta, locals, .. } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    frames.push((accumulated_offset, locals.clone(), Vec::new()));
+                }
+                StackMapFrame::Full { offset_delta, locals, stack } => {
+                    accumulated_offset = accumulated_offset.saturating_add(*offset_delta + 1);
+                    frames.push((accumulated_offset, locals.clone(), stack.clone()));
+                }
+            }
+        }
+        
+        Ok(frames)
+    }
+
     /// Check if bytecode contains conditional branch instructions that require StackMapTable
     fn has_conditional_branches(&self, bytecode: &[u8]) -> bool {
         use super::opcodes;
