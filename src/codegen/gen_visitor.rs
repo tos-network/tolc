@@ -3916,25 +3916,22 @@ impl Gen {
         // Determine target class and method descriptor (aligned with javac)
         let (class_name, method_descriptor) = self.resolve_static_method_info_with_types(tree, &arg_types, env)?;
         
-        // Add method reference to constant pool and emit invokestatic
-        let method_ref_idx = self.get_pool_mut().add_method_ref(&class_name, &tree.name, &method_descriptor);
-        
         eprintln!("🔧 DEBUG: Generating invokestatic {}#{}", class_name, tree.name);
         
+        // Determine return type from descriptor
+        let return_type = Self::parse_return_type_from_descriptor(&method_descriptor);
+        
         self.with_items(|items| {
-            // Emit invokestatic with proper constant pool reference
-            items.code.emitop(super::opcodes::INVOKESTATIC);
-            items.code.emit2(method_ref_idx);
+            // JavaC Optimizer #4: StaticItem.invoke() - use efficient static method invocation (100% aligned)
+            let static_item = items.make_static_item(
+                tree.name.clone(),
+                class_name.clone(),
+                method_descriptor.clone(),
+                &return_type
+            );
             
-            // Determine return type from descriptor
-            let return_type = Self::parse_return_type_from_descriptor(&method_descriptor);
-            
-            // Return appropriate item for the result type
-            Ok(if matches!(return_type, TypeEnum::Void) {
-                items.make_stack_item_for_type(&TypeEnum::Void)
-            } else {
-                items.make_stack_item_for_type(&return_type)
-            })
+            // Use JavaC StaticItem.invoke() method for optimal static method call
+            items.invoke_item(&static_item)
         })
     }
     
@@ -4070,40 +4067,21 @@ impl Gen {
         // Determine return type from actual method descriptor
         let return_type = Self::parse_return_type_from_descriptor(&method_descriptor);
         
+        // Use MemberItem.invoke() optimization (JavaC alignment)
         self.with_items(|items| {
-            if is_interface {
-                eprintln!("🔧 DEBUG: Generating invokeinterface for: {} -> #{}", tree.name, method_ref_idx);
-                items.code.emitop(super::opcodes::INVOKEINTERFACE);
-                items.code.emit2(method_ref_idx); // Correct interface method reference
-                items.code.emit1(tree.arguments.len() as u8 + 1); // Argument count + receiver
-                items.code.emit1(0); // Reserved byte
-            } else {
-                eprintln!("🔧 DEBUG: Generating invokevirtual for: {} -> #{}", tree.name, method_ref_idx);
-                items.code.emitop(super::opcodes::INVOKEVIRTUAL);
-                items.code.emit2(method_ref_idx); // Correct method reference index
-                
-                // Pop arguments and receiver from stack
-                let stack_consume = tree.arguments.len() as u16 + 1; // arguments + receiver
-                items.code.state.pop(stack_consume);
-                
-                // Push return value if non-void
-                if !matches!(return_type, TypeEnum::Void) {
-                    match &return_type {
-                        TypeEnum::Primitive(crate::ast::PrimitiveType::Long) | 
-                        TypeEnum::Primitive(crate::ast::PrimitiveType::Double) => {
-                            items.code.state.push(super::code::Type::Long); // 2 slots
-                        }
-                        TypeEnum::Reference(_) => {
-                            items.code.state.push(super::code::Type::Object("java/lang/Object".to_string()));
-                        }
-                        _ => {
-                            items.code.state.push(super::code::Type::Int); // 1 slot
-                        }
-                    }
-                }
-            }
+            eprintln!("🔧 DEBUG: Using MemberItem.invoke() optimizer for: {} -> #{}", tree.name, method_ref_idx);
             
-            Ok(items.make_stack_item_for_type(&return_type))
+            // Create MemberItem and use invoke() method (JavaC pattern)
+            let member_item = items.make_member_item(
+                tree.name.clone(),
+                class_name.clone(), 
+                method_descriptor.clone(),
+                false, // is_static = false for instance methods
+                &return_type
+            );
+            
+            // Invoke using MemberItem optimization
+            items.invoke_item(&member_item)
         })
     }
     

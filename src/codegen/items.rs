@@ -803,27 +803,38 @@ impl<'a> Items<'a> {
         Ok(())
     }
     
-    /// Emit method invocation (JavaC invoke pattern)
+    /// Emit method invocation - JavaC MemberItem.invoke() pattern
     fn emit_invoke_member(&mut self, _typecode: u8, member_name: &str, class_name: &str, method_descriptor: &str, is_static: bool, nonvirtual: bool) -> Result<()> {
         // Add method reference to constant pool
         let method_ref_idx = self.pool.add_method_ref(class_name, member_name, method_descriptor);
         
-        eprintln!("🔧 DEBUG: emit_invoke_member - class: {}, method: {}, descriptor: {}, idx: {}", class_name, member_name, method_descriptor, method_ref_idx);
+        eprintln!("🔧 DEBUG: MemberItem.invoke() - class: {}, method: {}, descriptor: {}, static: {}, nonvirtual: {}", 
+                 class_name, member_name, method_descriptor, is_static, nonvirtual);
+        
+        // JavaC MemberItem.invoke() pattern:
+        // if ((member.owner.flags() & Flags.INTERFACE) != 0 && !nonvirtual) {
+        //     code.emitInvokeinterface(pool.put(member), mtype);
+        // } else if (nonvirtual) {
+        //     code.emitInvokespecial(pool.put(member), mtype);
+        // } else {
+        //     code.emitInvokevirtual(pool.put(member), mtype);
+        // }
         
         if is_static {
+            // Static methods should be handled by StaticItem.invoke(), not MemberItem.invoke()
             self.code.emitop(opcodes::INVOKESTATIC);
             self.code.emit2(method_ref_idx);
+        } else if self.is_interface_method(class_name, member_name) && !nonvirtual {
+            // Interface method call - invokeinterface (JavaC MemberItem pattern)
+            self.emit_invoke_interface(method_ref_idx, method_descriptor)?;
         } else if nonvirtual {
+            // Non-virtual method call - invokespecial (super calls, constructors, private methods)
             self.code.emitop(opcodes::INVOKESPECIAL);
             self.code.emit2(method_ref_idx);
         } else {
-            // Check if target class is an interface (JavaC pattern)
-            if self.is_interface_method(class_name, member_name) {
-                self.emit_invoke_interface(method_ref_idx, method_descriptor)?;
-            } else {
-                self.code.emitop(opcodes::INVOKEVIRTUAL);
-                self.code.emit2(method_ref_idx);
-            }
+            // Virtual method call - invokevirtual (regular instance methods)
+            self.code.emitop(opcodes::INVOKEVIRTUAL);
+            self.code.emit2(method_ref_idx);
         }
         Ok(())
     }
