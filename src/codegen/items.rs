@@ -1449,6 +1449,22 @@ impl Item {
     /// Prepare for assignment by stashing value (JavaC stash() equivalent)
     pub fn stash(self, value_typecode: u8, items: &mut Items) -> Result<Item> {
         match self {
+            Item::Stack { .. } => {
+                // JavaC StackItem.stash(): code.emitop0((width() == 2 ? dup_x2 : dup_x1) + 3 * (Code.width(toscode) - 1))
+                let stack_width = self.width();
+                let value_width = match value_typecode {
+                    typecodes::LONG | typecodes::DOUBLE => 2,
+                    typecodes::VOID => 0, 
+                    _ => 1,
+                };
+                
+                // Calculate JavaC's stash opcode formula
+                let base_opcode = if stack_width == 2 { opcodes::DUP_X2 } else { opcodes::DUP_X1 };
+                let opcode = base_opcode + 3 * (value_width - 1);
+                
+                items.code.emitop(opcode);
+                Ok(self)
+            },
             Item::Member { is_static, .. } => {
                 if !is_static {
                     // For instance fields, we need to duplicate the value for putfield
@@ -1612,6 +1628,16 @@ impl Item {
     /// Duplicate item on stack (JavaC duplicate() equivalent)
     pub fn duplicate(self, items: &mut Items) -> Result<()> {
         match &self {
+            Item::Stack { .. } => {
+                // JavaC StackItem.duplicate(): code.emitop0(width() == 2 ? dup2 : dup)
+                let width = self.width();
+                if width == 2 {
+                    items.code.emitop(crate::codegen::opcodes::DUP2);
+                } else {
+                    items.code.emitop(crate::codegen::opcodes::DUP);
+                }
+                Ok(())
+            },
             Item::Assign { .. } => {
                 // JavaC AssignItem.duplicate(): load().duplicate()
                 let loaded = self.load(items)?;
@@ -1627,6 +1653,16 @@ impl Item {
     /// Drop item from stack (JavaC drop() equivalent) 
     pub fn drop(self, items: &mut Items) -> Result<()> {
         match self {
+            Item::Stack { .. } => {
+                // JavaC StackItem.drop(): code.emitop0(width() == 2 ? pop2 : pop)
+                let width = self.width();
+                if width == 2 {
+                    items.code.emitop(crate::codegen::opcodes::POP2);
+                } else {
+                    items.code.emitop(crate::codegen::opcodes::POP);
+                }
+                Ok(())
+            },
             Item::Assign { lhs, .. } => {
                 // JavaC AssignItem.drop(): lhs.store()
                 lhs.store(items)
