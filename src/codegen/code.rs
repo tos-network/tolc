@@ -332,11 +332,8 @@ impl Code {
                 opcodes::RETURN => {
                     // No stack change for void return
                 }
-                // Load instructions that push values onto stack
-                opcodes::ALOAD_0..=opcodes::ALOAD_3 => {
-                    self.state.push(Type::Object("java/lang/Object".to_string()));
-                }
-                // Note: ILOAD instructions are handled automatically by emitop0 method
+                // Note: ALOAD instructions are handled automatically by update_stack_for_op2/op0 methods
+                // Note: ILOAD instructions are handled automatically by emitop0 method  
                 // Note: Method invocation instructions (INVOKEVIRTUAL, etc.) are handled
                 // manually after emitop() with proper signature information
                 _ => {}

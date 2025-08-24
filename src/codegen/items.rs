@@ -387,7 +387,7 @@ impl<'a> Items<'a> {
             }
             
             Item::This | Item::Super => {
-                self.code.emitop(opcodes::ALOAD_0);
+                self.code.emitop0(opcodes::ALOAD_0);
                 Ok(Item::Stack { typecode: typecodes::OBJECT })
             }
             
