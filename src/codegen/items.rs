@@ -944,6 +944,7 @@ impl<'a> Items<'a> {
                 crate::codegen::attr::PrimitiveType::Float => typecodes::FLOAT,
                 crate::codegen::attr::PrimitiveType::Double => typecodes::DOUBLE,
             },
+            crate::codegen::attr::ResolvedType::Array(_) => typecodes::ARRAY,
             _ => typecodes::OBJECT,
         };
         
