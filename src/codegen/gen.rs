@@ -21,6 +21,7 @@ use super::class::ClassFile;
 use super::optimization_manager::OptimizationManager;
 use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
 use super::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
+use super::line_number_optimizer::{LineNumberOptimizer, LineNumberContext};
 use super::flag::access_flags;
 use super::attribute;
 use super::field;
@@ -96,6 +97,9 @@ pub struct Gen {
     
     /// Unified resolver for JavaC-aligned identifier resolution
     pub unified_resolver: Option<crate::codegen::unified_resolver::UnifiedResolver>,
+    
+    /// Line number optimizer for debug information (JavaC-aligned)
+    pub line_number_optimizer: LineNumberOptimizer,
     
     /// Inner class relationships for InnerClasses attribute generation
     inner_class_relationships: Vec<crate::codegen::InnerClassInfo>,
@@ -562,6 +566,7 @@ impl Gen {
             wash_type_info: None,                    // Type information from wash/attr phase
             wash_symbol_env: None,                   // Symbol environment from wash/enter phase
             unified_resolver: None,                  // Unified resolver for identifier resolution
+            line_number_optimizer: LineNumberOptimizer::new(true), // Line number debug info optimizer (enabled by default)
             inner_class_relationships: Vec::new(),  // Inner class relationships for InnerClasses attribute
             parent_class_name: None,                 // Parent class name for inner classes
             current_super_class_name: None,          // Current super class name for constructor calls
@@ -3629,22 +3634,44 @@ impl Gen {
             // Generate StackMapTable if enabled and for Java 6+ (version 50+)
             let mut code_attributes = Vec::new();
             
-            // Generate LineNumberTable if debug is enabled
-            if self.config.debug {
+            // Generate LineNumberTable using JavaC-aligned optimizer if debug is enabled
+            if self.config.debug && self.line_number_optimizer.is_enabled() {
                 use super::attribute::{LineNumberTableAttribute, LineNumberEntry};
                 
-                let mut line_number_table = LineNumberTableAttribute::new();
+                // Get optimized line number entries from the line number optimizer
+                let line_entries = self.line_number_optimizer.get_line_numbers();
                 
-                // Add line number mapping for method start (simplified - maps PC 0 to line 1)
-                if let Err(_) = line_number_table.add_line_number(0, 1) {
-                    // Handle error if needed, for now just skip
-                }
-                
-                // Create LineNumberTable attribute
-                if let Ok(line_attr) = super::attribute::make_line_number_table_attribute(&mut self.pool, &line_number_table) {
-                    code_attributes.push(line_attr);
+                if !line_entries.is_empty() {
+                    let mut line_number_table = LineNumberTableAttribute::new();
+                    
+                    // Add all optimized line number entries (JavaC pattern)
+                    for entry in line_entries {
+                        if let Err(_) = line_number_table.add_line_number(entry.start_pc, entry.line_number) {
+                            // Handle error if needed, for now just skip invalid entries
+                            eprintln!("⚠️  Warning: Failed to add line number entry PC:{}, Line:{}", entry.start_pc, entry.line_number);
+                        }
+                    }
+                    
+                    // Create LineNumberTable attribute
+                    if let Ok(line_attr) = super::attribute::make_line_number_table_attribute(&mut self.pool, &line_number_table) {
+                        code_attributes.push(line_attr);
+                        eprintln!("✅ Generated LineNumberTable with {} entries (JavaC-aligned)", line_entries.len());
+                    }
+                } else {
+                    // Fallback: add basic method start mapping (JavaC compatibility)
+                    let mut line_number_table = LineNumberTableAttribute::new();
+                    if let Err(_) = line_number_table.add_line_number(0, 1) {
+                        // Handle error if needed
+                    }
+                    if let Ok(line_attr) = super::attribute::make_line_number_table_attribute(&mut self.pool, &line_number_table) {
+                        code_attributes.push(line_attr);
+                        eprintln!("✅ Generated fallback LineNumberTable (method start only)");
+                    }
                 }
             }
+            
+            // Optimize line number table before final generation (JavaC pattern)
+            self.line_number_optimizer.optimize();
             
             // Enable StackMapTable generation for Java 8+ with JavaC-aligned optimization
             if self.config.emit_frames && self.class_file.major_version >= 50 {
@@ -4087,10 +4114,19 @@ impl Gen {
         }
     }
     
-    /// Visit statement - unified entry point for all statements  
-    /// This dispatches to the appropriate visitor method in gen_visitor.rs
+    /// Visit statement - unified entry point for all statements with line number tracking
+    /// This dispatches to the appropriate visitor method in gen_visitor.rs with JavaC-aligned line number optimization
     pub fn visit_stmt(&mut self, stmt: &Stmt, env: &GenContext) -> Result<()> {
-        match stmt {
+        // Get current PC for line number tracking (JavaC Code.statBegin pattern)
+        let current_pc = self.with_items(|items| Ok(items.code.cp as u16))?;
+        
+        // Mark statement begin position (JavaC Code.statBegin)
+        self.line_number_optimizer.update_pc(current_pc);
+        let synthetic_pos = current_pc as i32; // Use PC as synthetic position for now
+        self.line_number_optimizer.stat_begin(synthetic_pos);
+        
+        // Process the statement
+        let result = match stmt {
             Stmt::If(if_stmt) => self.visit_if(if_stmt, env),
             Stmt::While(while_stmt) => self.visit_while(while_stmt, env),
             Stmt::DoWhile(do_while_stmt) => self.visit_do_while(do_while_stmt, env),
@@ -4110,7 +4146,12 @@ impl Gen {
             Stmt::Synchronized(sync_stmt) => self.visit_synchronized(sync_stmt, env),
             Stmt::TypeDecl(type_decl) => self.visit_type_decl(type_decl, env),
             Stmt::Empty => Ok(()), // Empty statement - no bytecode needed
-        }
+        };
+        
+        // Force mark statement begin after processing (JavaC lazy emission trigger)
+        self.line_number_optimizer.mark_stat_begin();
+        
+        result
     }
     
     /// Push a new loop context for optimized jump resolution
