@@ -7,6 +7,8 @@
 use crate::ast::*;
 use crate::ast::{TypeEnum, PrimitiveType, ReferenceType};
 use crate::common::error::{Result, Error};
+use crate::common::type_resolver::TypeResolver;
+use crate::common::import::ImportResolver;
 use crate::Config;
 use super::code::Code;
 use super::constpool::ConstantPool;
@@ -55,7 +57,7 @@ pub struct Gen {
     optimizer: OptimizationManager,
     
     /// Dynamic class loader for dependency resolution (JavaC Enter.complete pattern)
-    pub dynamic_class_loader: Option<crate::codegen::dynamic_class_loader::DynamicClassLoader>,
+    pub dynamic_class_loader: Option<crate::common::classloader::StandaloneClassLoader>,
     
     /// Current break chain for loop break statements (Phase 2.3)
     pub current_break_chain: Option<Box<crate::codegen::chain::Chain>>,
@@ -76,7 +78,7 @@ pub struct Gen {
     generic_signatures: Option<std::collections::HashMap<String, String>>,
     
     /// Wash symbol environment for identifier resolution
-    pub wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>,
+    pub wash_symbol_env: Option<crate::common::env::SymbolEnvironment>,
     
     /// Type information from wash/attr phase for type-aware code generation
     wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
@@ -211,7 +213,7 @@ pub struct GenContext {
     pub cont: Option<Box<crate::codegen::chain::Chain>>,
     
     /// Symbol environment reference for unified identifier resolution
-    pub symbol_env: Option<crate::codegen::enter::SymbolEnvironment>,
+    pub symbol_env: Option<crate::common::env::SymbolEnvironment>,
     
     /// Current scope context for nested scoping
     pub scope_context: ScopeContext,
@@ -256,7 +258,7 @@ impl GenContext {
     pub fn new_with_context(
         method: Option<MethodDecl>,
         clazz: Option<ClassDecl>,
-        symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
+        symbol_env: Option<crate::common::env::SymbolEnvironment>
     ) -> Self {
         let class_context = clazz.as_ref().map(|c| c.name.clone());
         let method_context = method.as_ref().map(|m| {
@@ -579,7 +581,7 @@ impl Gen {
     pub fn set_wash_results(
         &mut self, 
         type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType>,
-        symbol_env: crate::codegen::enter::SymbolEnvironment
+        symbol_env: crate::common::env::SymbolEnvironment
     ) {
         self.wash_type_info = Some(type_info);
         self.wash_symbol_env = Some(symbol_env.clone());
@@ -594,7 +596,7 @@ impl Gen {
     }
     
     /// Get symbol environment from wash/enter phase  
-    pub fn get_wash_symbol_env(&self) -> Option<&crate::codegen::enter::SymbolEnvironment> {
+    pub fn get_wash_symbol_env(&self) -> Option<&crate::common::env::SymbolEnvironment> {
         self.wash_symbol_env.as_ref()
     }
     
@@ -3602,9 +3604,8 @@ impl Gen {
                 }
             }
             
-            // Temporarily disable StackMapTable generation to focus on bytecode alignment
-            // TODO: Fix StackMapTable PC calculation with truncated bytecode
-            if false && self.config.emit_frames && self.class_file.major_version >= 50 {
+            // Enable StackMapTable generation for Java 8+ (fixed StackMapTable PC calculation)
+            if self.config.emit_frames && self.class_file.major_version >= 50 {
                 // Check if bytecode contains conditional branches that require StackMapTable
                 let truncated_bytecode = code.to_bytes();
                 let has_conditional_branches = self.has_conditional_branches(&truncated_bytecode);
@@ -3804,9 +3805,11 @@ impl Gen {
             "UnsupportedOperationException" => "java.lang.UnsupportedOperationException".to_string(),
             "NoSuchElementException" => "java.util.NoSuchElementException".to_string(),
             _ => {
-                // Try to resolve through classpath
-                if let Some(internal_name) = crate::common::classpath::resolve_class_name(simple_name) {
-                    internal_name.replace('/', ".")
+                // Try to resolve through TypeResolver
+                let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                
+                if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(simple_name) {
+                    fully_qualified
                 } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&simple_name) {
                     eprintln!("🔧 GEN: Resolving {} via JAVA_LANG_SIMPLE_TYPES", simple_name);
                     format!("java.lang.{}", simple_name)

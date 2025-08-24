@@ -7,7 +7,8 @@
 
 use crate::ast::*;
 use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
-use crate::common::classpath;
+use crate::common::type_resolver::TypeResolver;
+use crate::common::import::ImportResolver;
 use std::collections::HashMap;
 
 /// Global type name resolver that maps simple type names to their fully qualified names
@@ -260,9 +261,11 @@ fn resolve_internal_name_for_signature(raw: &str, package_name: Option<&str>, cu
         _ => {}
     }
     
-    // First try the classpath mapping for accurate resolution
-    if let Some(internal_name) = classpath::resolve_class_name(raw) {
-        return format!("L{};", internal_name);
+    // First try TypeResolver for accurate resolution
+    let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+    
+    if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(raw) {
+        return format!("L{};", fully_qualified.replace('.', "/"));
     }
     
     // Handle java.lang types (fallback)
@@ -285,8 +288,8 @@ fn resolve_internal_name_for_signature(raw: &str, package_name: Option<&str>, cu
         // Add other specific inner class patterns as needed
     }
     
-    // Try to resolve using the type resolver
-    if let Some(qualified_name) = type_resolver.resolve_type_name(raw) {
+    // Try to resolve using the type resolver again
+    if let Some(qualified_name) = type_resolver.resolve_type_name_simple(raw) {
         return format!("L{};", qualified_name.replace('.', "/"));
     }
     

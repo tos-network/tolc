@@ -156,7 +156,7 @@ impl Flow {
     }
     
     /// Process AST with symbol environment from Enter phase
-    pub fn process_with_symbols(&mut self, ast: Ast, symbol_env: Option<&crate::codegen::enter::SymbolEnvironment>) -> Result<Ast> {
+    pub fn process_with_symbols(&mut self, ast: Ast, symbol_env: Option<&crate::common::env::SymbolEnvironment>) -> Result<Ast> {
         eprintln!("🔍 FLOW: Starting dataflow analysis");
         
         // Start timing

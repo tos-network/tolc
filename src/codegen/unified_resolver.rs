@@ -3,7 +3,7 @@
 //! This module provides a unified interface for identifier resolution that builds
 //! upon the existing SymbolEnvironment system, following JavaC's Resolve patterns.
 
-use crate::codegen::enter::SymbolEnvironment;
+use crate::common::env::SymbolEnvironment;
 use crate::codegen::gen::{IdentifierResolution, ResolutionContext};
 use crate::ast::{TypeRef, MethodDecl, ClassDecl};
 use crate::common::error::Result;
@@ -141,10 +141,10 @@ impl UnifiedResolver {
         None
     }
     
-    /// Resolve type names to descriptors using enhanced type resolution
+    /// Resolve type names to descriptors using integrated type resolution
     /// JavaC equivalent: Types.erasure() + descriptor generation
     pub fn resolve_type_descriptor(&mut self, type_name: &str) -> Option<String> {
-        use crate::codegen::enhanced_type_resolution::EnhancedTypeResolver;
+        use crate::common::type_resolver::TypeResolver;
         use crate::ast::{TypeRef, Span, Location};
         
         // Create a simple TypeRef for the type name
@@ -156,17 +156,18 @@ impl UnifiedResolver {
             span: Span::new(Location::new(0, 0, 0), Location::new(0, 0, 0)),
         };
         
-        // Use enhanced type resolver
-        let mut enhanced_resolver = EnhancedTypeResolver::with_symbol_environment(self.symbol_env.clone());
-        let resolution = enhanced_resolver.resolve_type_ref(&type_ref);
+        // Use integrated type resolver
+        let mut manager = crate::common::manager::ClasspathManager::new("tests/java");
+        let mut type_resolver = crate::common::type_resolver::TypeResolver::with_symbol_environment(&mut manager, self.symbol_env.clone());
         
+        let resolution = type_resolver.resolve_type_ref(&type_ref);
         Some(resolution.get_jvm_descriptor().to_string())
     }
     
     /// Resolve method signatures using enhanced type resolution
     /// JavaC equivalent: Resolve.resolveMethod
     pub fn resolve_method_signature(&mut self, class_name: &str, method_name: &str, param_types: &[TypeRef]) -> Option<String> {
-        use crate::codegen::enhanced_type_resolution::EnhancedTypeResolver;
+        use crate::common::type_resolver::TypeResolver;
         
         let method_key = format!("{}#{}", class_name, method_name);
         
@@ -181,23 +182,24 @@ impl UnifiedResolver {
             return Some(descriptor);
         }
         
-        // Use enhanced type resolver for accurate parameter type resolution
-        let mut enhanced_resolver = EnhancedTypeResolver::with_symbol_environment(self.symbol_env.clone());
+        // Use integrated type resolver for accurate parameter type resolution
+        let mut manager = crate::common::manager::ClasspathManager::new("tests/java");
+        let mut type_resolver = crate::common::type_resolver::TypeResolver::with_symbol_environment(&mut manager, self.symbol_env.clone());
         
         let mut descriptor = String::from("(");
         for param_type in param_types {
-            let resolution = enhanced_resolver.resolve_type_ref(param_type);
+            let resolution = type_resolver.resolve_type_ref(param_type);
             descriptor.push_str(resolution.get_jvm_descriptor());
         }
         descriptor.push_str(")V"); // Default void return
         
         // Cache for future use - create a MethodSymbol
-        let method_symbol = crate::codegen::enter::MethodSymbol {
+        let method_symbol = crate::common::env::MethodSymbol {
             name: method_name.to_string(),
             owner_class: class_name.to_string(),
             type_parameters: vec![],
             parameter_types: param_types.iter()
-                .map(|param| enhanced_resolver.resolve_type_ref(param).get_jvm_descriptor().to_string())
+                .map(|param| type_resolver.resolve_type_ref(param).get_jvm_descriptor().to_string())
                 .collect(),
             return_type: "V".to_string(), // Default void return
             is_static: false,
@@ -246,7 +248,7 @@ impl Default for UnifiedResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::enter::SymbolEnvironment;
+    use crate::common::env::SymbolEnvironment;
     
     #[test]
     fn test_unified_resolver_creation() {

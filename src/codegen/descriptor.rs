@@ -5,7 +5,8 @@
 
 use crate::ast::{TypeRef, TypeEnum, PrimitiveType, ReferenceType, LambdaParameter};
 use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
-use crate::common::classpath;
+use crate::common::type_resolver::TypeResolver;
+use crate::common::import::ImportResolver;
 use crate::common::error::{Result, Error};
 
 pub fn type_to_descriptor(ty: &TypeRef) -> String {
@@ -55,10 +56,13 @@ pub fn type_to_descriptor(ty: &TypeRef) -> String {
             if simple.len() == 1 && simple.chars().next().unwrap().is_ascii_uppercase() {
                 format!("{}Ljava/lang/Object;", desc)
             } else {
-                // Prefer classpath mapping when given a simple name; otherwise use provided fqcn
+                // Use TypeResolver for dynamic resolution instead of hardcoded classpath
                 let internal = if !simple.contains('/') && !simple.contains('.') {
-                    if let Some(mapped) = classpath::resolve_class_name(simple) {
-                        mapped.to_string()
+                    // Create a temporary TypeResolver for resolution
+                    let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                    
+                    if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(simple) {
+                        fully_qualified.replace('.', "/")
                     } else if JAVA_LANG_SIMPLE_TYPES.contains(&simple) {
                         format!("java/lang/{}", simple)
                     } else {

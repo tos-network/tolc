@@ -122,4 +122,36 @@ public class TestClass {
         let ast = parse_tol(source).expect("Failed to parse");
         assert_eq!(ast.imports.len(), 2);
     }
+
+    #[test]
+    fn test_parse_and_compile_integration() {
+        let source = r#"
+package com.example.parser;
+
+public class ParsedClass {
+    private String name;
+    
+    public ParsedClass(String name) {
+        this.name = name;
+    }
+    
+    public String getName() {
+        return name;
+    }
+}
+"#;
+        
+        // First test parsing
+        let ast = parse_java(source).expect("Failed to parse Java source");
+        assert!(ast.type_decls.len() >= 1, "Should have at least one type declaration");
+        
+        // Then test complete compilation pipeline
+        use crate::{compile, Config};
+        let config = Config::default();
+        let result = compile(source, &config);
+        assert!(result.is_ok(), "Complete compilation should succeed after successful parsing: {:?}", result.err());
+        
+        let bytecode = result.unwrap();
+        assert!(!bytecode.is_empty(), "Should generate non-empty bytecode");
+    }
 }

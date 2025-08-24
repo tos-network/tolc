@@ -6,6 +6,8 @@
 use crate::ast::{Literal, TypeEnum, PrimitiveType};
 use crate::common::error::Result;
 use crate::codegen::attr::{ResolvedType, PrimitiveType as WashPrimitiveType};
+use crate::common::type_resolver::TypeResolver;
+use crate::common::import::ImportResolver;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
@@ -299,9 +301,11 @@ impl<'a> Items<'a> {
                     "String" => "Ljava/lang/String;".to_string(),
                     "Object" => "Ljava/lang/Object;".to_string(),
                     _ => {
-                        // Use classpath resolution to find the fully qualified name
-                        if let Some(internal_name) = crate::common::classpath::resolve_class_name(class_name) {
-                            format!("L{};", internal_name)
+                        // Use TypeResolver for dynamic resolution
+                        let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                        
+                        if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(class_name) {
+                            format!("L{};", fully_qualified.replace('.', "/"))
                         } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
                             format!("Ljava/lang/{};", class_name)
                         } else {
@@ -318,9 +322,11 @@ impl<'a> Items<'a> {
                     "String" => "Ljava/lang/String;".to_string(),
                     "Object" => "Ljava/lang/Object;".to_string(),
                     _ => {
-                        // Use classpath resolution to find the fully qualified name
-                        if let Some(internal_name) = crate::common::classpath::resolve_class_name(&class_type.name) {
-                            format!("L{};", internal_name)
+                        // Use TypeResolver for dynamic resolution
+                        let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                        
+                        if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(&class_type.name) {
+                            format!("L{};", fully_qualified.replace('.', "/"))
                         } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_type.name.as_str()) {
                             format!("Ljava/lang/{};", class_type.name)
                         } else {

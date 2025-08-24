@@ -6,6 +6,8 @@ use std::marker::PhantomData;
 use super::opcode_generator::OpcodeGenerator;
 use super::opcodes;
 use std::collections::HashMap;
+use crate::common::type_resolver::TypeResolver;
+use crate::common::import::ImportResolver;
 
 /// Control flow types for enhanced alive state tracking (javac-style)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,11 +313,13 @@ impl LocalType {
             LocalType::Double => "D".to_string(),
             LocalType::Reference(class_name) => {
                 // Produce an internal name (with '/') and wrap as L...; descriptor.
-                // Prefer classpath mappings for simple names (e.g., List -> java/util/List).
+                // Use TypeResolver for dynamic resolution instead of hardcoded classpath.
                 let is_simple = !class_name.contains('/') && !class_name.contains('.') && !class_name.is_empty();
                 let internal = if is_simple {
-                    if let Some(mapped) = crate::common::classpath::resolve_class_name(class_name) {
-                        mapped.to_string()
+                    let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                    
+                    if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(class_name) {
+                        fully_qualified.replace('.', "/")
                     } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&class_name.as_str()) {
                         format!("java/lang/{}", class_name)
                     } else {

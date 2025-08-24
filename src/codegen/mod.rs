@@ -21,11 +21,12 @@
 //! - Lower: Syntactic sugar desugaring (enhanced for loops, string concat, etc.)
 
 // Semantic analysis pipeline modules (migrated from wash)
-pub mod enter;       // Symbol table construction and import resolution
-pub mod attr;        // Type checking and method resolution
-pub mod flow;        // Definite assignment and reachability analysis
-pub mod trans_types; // Generic type erasure and bridge method generation
-pub mod lower;       // Syntactic sugar desugaring
+// pub mod enter_old;      // Old symbol table construction (backed up)
+pub mod enter;          // Enhanced Enter phase with dynamic type resolution (main)
+pub mod attr;           // Type checking and method resolution
+pub mod flow;           // Definite assignment and reachability analysis
+pub mod trans_types;    // Generic type erasure and bridge method generation
+pub mod lower;          // Syntactic sugar desugaring
 
 // New javac-aligned architecture
 pub mod gen;          // Main bytecode generator (corresponds to javac Gen.java)  
@@ -43,8 +44,8 @@ pub mod types;       // JavaC-aligned type system
 pub mod type_inference; // Type inference and checking
 pub mod unified_resolver; // Unified identifier resolution facade
 pub mod array_type_info; // Enhanced array type representation
-pub mod enhanced_type_resolution; // Enhanced type descriptor resolution with strong typing
-pub mod dynamic_class_loader; // JavaC-style dynamic dependency class loading
+// Enhanced type resolution functionality moved to common::type_resolver
+// Dynamic class loader moved to common::classloader
 
 // Optimizer architecture
 pub mod const_fold; // Constant folding operations
@@ -160,7 +161,7 @@ pub fn generate_bytecode_with_wash(
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
     wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
+    wash_symbol_env: Option<crate::common::env::SymbolEnvironment>
 ) -> Result<()> {
     generate_bytecode_impl(ast, output_dir, config, signatures, wash_type_info, wash_symbol_env)
 }
@@ -177,7 +178,7 @@ fn generate_bytecode_impl(
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
     wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
+    wash_symbol_env: Option<crate::common::env::SymbolEnvironment>
 ) -> Result<()> {
     let output_path = Path::new(output_dir);
     
@@ -448,7 +449,7 @@ pub fn generate_bytecode_inmemory_with_wash(
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
     wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
+    wash_symbol_env: Option<crate::common::env::SymbolEnvironment>
 ) -> Result<Vec<u8>> {
     generate_bytecode_inmemory_impl(ast, config, signatures, wash_type_info, wash_symbol_env)
 }
@@ -464,7 +465,7 @@ fn generate_bytecode_inmemory_impl(
     config: &Config, 
     signatures: Option<&std::collections::HashMap<String, String>>,
     wash_type_info: Option<std::collections::HashMap<String, crate::codegen::attr::ResolvedType>>,
-    wash_symbol_env: Option<crate::codegen::enter::SymbolEnvironment>
+    wash_symbol_env: Option<crate::common::env::SymbolEnvironment>
 ) -> Result<Vec<u8>> {
     // Build compilation-unit level annotation retention index
     let cu_retention = build_annotation_retention_index_from_cu(ast);
@@ -714,9 +715,9 @@ fn modifiers_to_flags(modifiers: &[Modifier]) -> u16 {
 }
 
 /// Main semantic analysis pipeline that orchestrates all phases
-/// Follows standard compilation flow: Enter → Attr → Flow → TransTypes → Lower
+/// Follows standard compilation flow: EnhancedEnter → Attr → Flow → TransTypes → Lower
 pub struct SemanticAnalyzer {
-    pub enter: enter::Enter,
+    pub enter: enter::EnhancedEnter,
     pub attr: attr::Attr,
     pub flow: flow::Flow,
     pub trans_types: trans_types::TransTypes,
@@ -726,12 +727,29 @@ pub struct SemanticAnalyzer {
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
-            enter: enter::Enter::new(),
+            enter: enter::EnhancedEnter::new("tests/java"),
             attr: attr::Attr::new(),
             flow: flow::Flow::new(),
             trans_types: trans_types::TransTypes::new(),
             lower: lower::Lower::new(),
         }
+    }
+
+    pub fn new_with_manager(manager: &mut crate::common::manager::ClasspathManager) -> Result<Self> {
+        let classpath_entries = manager.get_classpath_entries();
+        let classpath = if classpath_entries.is_empty() {
+            ".".to_string()
+        } else {
+            classpath_entries[0].to_string_lossy().to_string()
+        };
+
+        Ok(Self {
+            enter: enter::EnhancedEnter::new(&classpath),
+            attr: attr::Attr::new(),
+            flow: flow::Flow::new(),
+            trans_types: trans_types::TransTypes::new(),
+            lower: lower::Lower::new(),
+        })
     }
     
     /// Run complete semantic analysis pipeline on AST

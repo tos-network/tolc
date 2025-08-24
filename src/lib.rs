@@ -34,6 +34,12 @@ pub use common::{Config, Result, Error};
 /// class data as a Vec<u8>. Useful for tests and in-memory compilation.
 /// Java Source → Parser → AST → Wash Pipeline → Bytecode Generation → Vec<u8>
 pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
+    let mut manager = common::manager::ClasspathManager::new(".");
+    compile_with_manager(source, config, &mut manager)
+}
+
+/// Compile Java source to bytecode with custom ClasspathManager
+pub fn compile_with_manager(source: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<Vec<u8>> {
     eprintln!("🔧 TOLC: Starting in-memory Java compilation");
     
     // Phase 1: Lexical Analysis & Parsing
@@ -43,7 +49,7 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
     
     // Phase 2: Semantic Analysis Pipeline (Wash)
     eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
-    let mut semantic_analyzer = codegen::SemanticAnalyzer::new();
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new_with_manager(manager)?;
     ast = semantic_analyzer.analyze(ast)?;
     eprintln!("✅ TOLC: Semantic analysis complete");
     
@@ -71,6 +77,12 @@ pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
 /// This is the main entry point that orchestrates the entire compilation process:
 /// Java Source → Parser → AST → Wash Pipeline → Code Generation → .class files
 pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<()> {
+    let mut manager = common::manager::ClasspathManager::new(".");
+    compile2file_with_manager(source, output_dir, config, &mut manager)
+}
+
+/// Complete Java compilation pipeline with custom ClasspathManager
+pub fn compile2file_with_manager(source: &str, output_dir: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<()> {
     eprintln!("🔧 TOLC: Starting Java compilation pipeline");
     
     // Phase 1: Lexical Analysis & Parsing
@@ -80,7 +92,7 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
     
     // Phase 2: Semantic Analysis Pipeline (Wash)
     eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
-    let mut semantic_analyzer = codegen::SemanticAnalyzer::new();
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new_with_manager(manager)?;
     ast = semantic_analyzer.analyze(ast)?;
     eprintln!("✅ TOLC: Semantic analysis complete");
     
@@ -112,20 +124,32 @@ pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<(
 
 /// Compile a Java source file to bytecode
 pub fn compile_file(input_path: &str, output_dir: &str, config: &Config) -> Result<()> {
+    let mut manager = common::manager::ClasspathManager::new(".");
+    compile_file_with_manager(input_path, output_dir, config, &mut manager)
+}
+
+/// Compile a Java source file to bytecode with custom ClasspathManager
+pub fn compile_file_with_manager(input_path: &str, output_dir: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<()> {
     eprintln!("📂 TOLC: Compiling file: {}", input_path);
     
     let source = std::fs::read_to_string(input_path)?;
     
-    compile2file(&source, output_dir, config)
+    compile2file_with_manager(&source, output_dir, config, manager)
 }
 
 /// Compile multiple Java source files
 pub fn compile_files(input_paths: &[String], output_dir: &str, config: &Config) -> Result<()> {
+    let mut manager = common::manager::ClasspathManager::new(".");
+    compile_files_with_manager(input_paths, output_dir, config, &mut manager)
+}
+
+/// Compile multiple Java source files with custom ClasspathManager
+pub fn compile_files_with_manager(input_paths: &[String], output_dir: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<()> {
     eprintln!("📁 TOLC: Compiling {} files", input_paths.len());
     
     for (index, input_path) in input_paths.iter().enumerate() {
         eprintln!("🔄 TOLC: [{}/{}] Compiling {}", index + 1, input_paths.len(), input_path);
-        compile_file(input_path, output_dir, config)?;
+        compile_file_with_manager(input_path, output_dir, config, manager)?;
     }
     
     eprintln!("🏁 TOLC: All files compiled successfully");
@@ -158,11 +182,81 @@ pub fn compile_tol_files(input_paths: &[String], output_dir: &str, config: &Conf
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
 
     #[test]
     fn test_basic_compilation() {
         // Basic test to ensure the library compiles
         assert!(true);
+    }
+
+    #[test]
+    fn test_complete_compilation_pipeline() {
+        let source = r#"
+package com.example;
+
+public class TestCompilation {
+    private int value;
+    
+    public TestCompilation(int value) {
+        this.value = value;
+    }
+    
+    public int getValue() {
+        return value;
+    }
+    
+    public void setValue(int value) {
+        this.value = value;
+    }
+}
+"#;
+        
+        let config = Config::default();
+        
+        // Test in-memory compilation with complete pipeline
+        let result = compile(source, &config);
+        assert!(result.is_ok(), "Complete pipeline compilation failed: {:?}", result.err());
+        
+        // Test bytecode is generated
+        let bytecode = result.unwrap();
+        assert!(!bytecode.is_empty(), "Generated bytecode should not be empty");
+        assert!(bytecode.len() > 100, "Bytecode should be substantial (>100 bytes)");
+        
+        // Verify bytecode starts with Java class file magic number (0xCAFEBABE)
+        assert_eq!(bytecode[0..4], [0xCA, 0xFE, 0xBA, 0xBE], "Bytecode should start with Java class file magic");
+    }
+
+    #[test]
+    fn test_compile_with_custom_manager() {
+        use tempfile::TempDir;
+        use std::fs;
+        
+        // Create temporary directory with test files
+        let temp_dir = TempDir::new().unwrap();
+        let java_lang = temp_dir.path().join("java/lang");
+        fs::create_dir_all(&java_lang).unwrap();
+        fs::write(java_lang.join("Object.java"), "package java.lang; public class Object {}").unwrap();
+        fs::write(java_lang.join("String.java"), "package java.lang; public class String {}").unwrap();
+        
+        let source = r#"
+public class CustomTest {
+    public static void main(String[] args) {
+        System.out.println("Testing custom classpath");
+    }
+}
+"#;
+
+        let config = Config::default();
+        let mut manager = common::manager::ClasspathManager::new(&temp_dir.path().to_string_lossy());
+        
+        // Test compilation with custom ClasspathManager
+        let result = compile_with_manager(source, &config, &mut manager);
+        assert!(result.is_ok(), "Custom manager compilation failed: {:?}", result.err());
+        
+        let bytecode = result.unwrap();
+        assert!(!bytecode.is_empty(), "Generated bytecode should not be empty");
+        assert_eq!(bytecode[0..4], [0xCA, 0xFE, 0xBA, 0xBE], "Bytecode should start with Java class file magic");
     }
 }

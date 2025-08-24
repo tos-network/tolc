@@ -10,7 +10,7 @@
 use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, FieldDecl, Expr, Stmt, BinaryOp, TypeEnum, ReferenceType, UnaryOp, TypeRef, TypeExt};
 use crate::ast::PrimitiveType as AstPrimitiveType;
 use crate::common::error::{Result, Error};
-use crate::codegen::enter::SymbolEnvironment;
+use crate::common::env::SymbolEnvironment;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -460,7 +460,7 @@ impl Attr {
     }
     
     /// Process AST with symbol environment from Enter phase
-    pub fn process_with_symbols(&mut self, ast: Ast, symbol_env: Option<&crate::codegen::enter::SymbolEnvironment>) -> Result<Ast> {
+    pub fn process_with_symbols(&mut self, ast: Ast, symbol_env: Option<&crate::common::env::SymbolEnvironment>) -> Result<Ast> {
         eprintln!("🔍 ATTR: Starting type attribution");
         
         // Store symbol environment for use in type resolution

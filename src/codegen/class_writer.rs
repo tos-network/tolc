@@ -75,7 +75,7 @@ impl ClassWriter {
     pub fn set_wash_results(
         &mut self, 
         type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType>,
-        symbol_env: crate::codegen::enter::SymbolEnvironment
+        symbol_env: crate::common::env::SymbolEnvironment
     ) {
         self.gen.set_wash_results(type_info, symbol_env);
     }

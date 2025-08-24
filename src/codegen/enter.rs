@@ -1,876 +1,1018 @@
-//! Enter phase - Symbol table construction and import resolution
-//! 
-//! Corresponds to JavaC's `com.sun.tools.javac.comp.Enter` class.
-//! This phase builds symbol tables for all compilation units, establishes
-//! inheritance relationships, and handles import statements.
+//! Enhanced Enter phase - Integrated with dynamic type resolution
+//!
+//! This is an enhanced version of the Enter phase that integrates with
+//! the new ClasspathManager and TypeResolver for dynamic type resolution.
 
-use crate::ast::{Ast, TypeDecl, ClassDecl, InterfaceDecl, EnumDecl, AnnotationDecl, TypeParam, TypeRef};
+use crate::ast::{Ast, TypeDecl, ClassDecl, InterfaceDecl, EnumDecl, AnnotationDecl, TypeRef, ClassMember, InterfaceMember, FieldDecl, MethodDecl, Parameter};
 use crate::common::error::Result;
-use crate::common::classpath;
+use crate::common::type_resolver::TypeResolver;
+use crate::common::import::ImportResolver;
+//use crate::common::manager::ClasspathManager;
+use crate::common::env::{SymbolKind, VariableSymbol, TypeParameterSymbol, MethodSymbol, ClassSymbol, SymbolEnvironment};
 use std::collections::HashMap;
 
-/// Symbol kinds matching JavaC's Kinds.java
-#[derive(Debug, Clone, PartialEq)]
-pub enum SymbolKind {
-    /// Variables (local variables, parameters) - JavaC VAR kind
-    Variable,
-    /// Instance and static fields - JavaC VAR kind with class owner
-    Field,
-    /// Methods and constructors - JavaC MTH kind  
-    Method,
-    /// Types (classes, interfaces, enums) - JavaC TYP kind
-    Type,
+// Symbol table structures moved to common::env
+
+// SymbolEnvironment implementation moved to common::env
+
+pub struct EnhancedEnter {
+    type_resolver: crate::common::type_resolver::StandaloneTypeResolver,
+    import_resolver: Option<crate::common::import::StandaloneImportResolver>,
+    symbol_env: SymbolEnvironment,
+    current_class: Option<String>,
+    resolved_types: HashMap<String, String>, // original_name -> fully_qualified_name
+    classpath: String,
 }
 
-/// Variable symbol following JavaC's VarSymbol pattern
-#[derive(Debug, Clone)]
-pub struct VariableSymbol {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub owner: String,          // Method or class that declares this (e.g., "method:main", "class:MyClass")
-    pub var_type: String,       // Resolved type name
-    pub is_static: bool,        // For fields - whether it's static
-    pub is_parameter: bool,     // For variables - whether it's a method parameter
-    pub local_slot: Option<usize>, // For local variables - JVM local slot number
-    pub modifiers: Vec<String>, // Access modifiers (public, private, etc.)
-}
-
-/// Type parameter symbol for generic types
-#[derive(Debug, Clone)]
-pub struct TypeParameterSymbol {
-    pub name: String,
-    pub bounds: Vec<String>,
-    pub owner: String, // Class or method that declares this type parameter
-    pub index: usize,  // Position in type parameter list
-}
-
-/// Method symbol for generic methods
-#[derive(Debug, Clone)]
-pub struct MethodSymbol {
-    pub name: String,
-    pub owner_class: String,
-    pub type_parameters: Vec<TypeParameterSymbol>,
-    pub parameter_types: Vec<String>,
-    pub return_type: String,
-    pub is_static: bool,
-    pub is_generic: bool,
-}
-
-/// Symbol table entry for a class, interface, enum, or annotation
-#[derive(Debug, Clone)]
-pub struct ClassSymbol {
-    pub name: String,
-    pub fully_qualified_name: String,
-    pub package_name: Option<String>,
-    pub is_interface: bool,
-    pub is_enum: bool,
-    pub is_annotation: bool,
-    pub super_class: Option<String>,
-    pub interfaces: Vec<String>,
-    pub modifiers: Vec<String>,
-    /// Generic type parameters declared on this class
-    pub type_parameters: Vec<TypeParameterSymbol>,
-    /// Whether this class is generic
-    pub is_generic: bool,
-    /// Methods declared in this class (including generic methods)
-    pub methods: HashMap<String, MethodSymbol>,
-    /// Enum constants (only for enums)
-    pub enum_constants: Vec<String>,
-}
-
-/// Global symbol environment containing all symbols
-#[derive(Debug, Clone)]
-pub struct SymbolEnvironment {
-    /// Map from class name to ClassSymbol
-    pub classes: HashMap<String, ClassSymbol>,
-    /// Import statements resolved to fully qualified names (single-type imports)
-    pub imports: HashMap<String, String>,
-    /// Wildcard imports - list of package names for on-demand imports
-    pub wildcard_imports: Vec<String>,
-    /// Static imports - map from simple name to fully qualified name
-    pub static_imports: HashMap<String, String>,
-    /// Static wildcard imports - list of class names for static on-demand imports
-    pub static_wildcard_imports: Vec<String>,
-    /// Current package being processed
-    pub current_package: Option<String>,
-    /// Map from type parameter name to its symbol (scoped by owner)
-    pub type_parameters: HashMap<String, TypeParameterSymbol>,
-    /// Map from method signature to MethodSymbol
-    pub methods: HashMap<String, MethodSymbol>,
-    /// Variable symbols - local variables and parameters (scoped by owner method)
-    /// Key format: "method:owner::varname" (e.g., "method:main::x", "method:foo::args")
-    pub variables: HashMap<String, VariableSymbol>,
-    /// Field symbols - instance and static fields (scoped by owner class)
-    /// Key format: "class:owner::fieldname" (e.g., "class:MyClass::next", "class:System::out")
-    pub fields: HashMap<String, VariableSymbol>,
-    /// Generic instantiation cache (T -> String, T -> Integer, etc.)
-    pub instantiation_cache: HashMap<String, Vec<String>>,
-}
-
-impl SymbolEnvironment {
-    /// Resolve simple type name to fully qualified name
-    /// Follows Java name resolution rules: single import -> current package -> wildcard import -> java.lang
-    pub fn resolve_type(&self, simple_name: &str) -> Option<String> {
-        // 1. Single-type import
-        if let Some(qualified) = self.imports.get(simple_name) {
-            eprintln!("🔍 RESOLVE: {} -> {} (single import)", simple_name, qualified);
-            return Some(qualified.clone());
-        }
+impl EnhancedEnter {
+    pub fn new(classpath: &str) -> Self {
+        eprintln!("🔧 ENHANCED_ENTER: Initializing with classpath: {}", classpath);
         
-        // 2. Current package classes
-        if let Some(ref pkg) = self.current_package {
-            let qualified = format!("{}.{}", pkg, simple_name);
-            if self.classes.contains_key(&qualified) {
-                eprintln!("🔍 RESOLVE: {} -> {} (current package)", simple_name, qualified);
-                return Some(qualified);
-            }
-        }
-        
-        // 3. Type-import-on-demand (wildcard imports)
-        for package in &self.wildcard_imports {
-            let candidate = format!("{}.{}", package, simple_name);
-            // Check if it's a known type or can be resolved through classpath
-            if self.classes.contains_key(&candidate) || classpath::class_exists(&candidate) {
-                eprintln!("🔍 RESOLVE: {} -> {} (wildcard import)", simple_name, candidate);
-                return Some(candidate);
-            }
-        }
-        
-        // 4. java.lang package (implicit import)
-        let java_lang_candidate = format!("java.lang.{}", simple_name);
-        if classpath::class_exists(&java_lang_candidate) {
-            eprintln!("🔍 RESOLVE: {} -> {} (java.lang)", simple_name, java_lang_candidate);
-            return Some(java_lang_candidate);
-        }
-        
-        eprintln!("⚠️ RESOLVE: Cannot resolve type: {}", simple_name);
-        None
-    }
-    
-    /// Check if a type is known (exists in symbol table)
-    pub fn is_known_type(&self, fully_qualified_name: &str) -> bool {
-        self.classes.contains_key(fully_qualified_name)
-    }
-    
-    /// Get class symbol by fully qualified name
-    pub fn get_class_symbol(&self, fully_qualified_name: &str) -> Option<&ClassSymbol> {
-        self.classes.get(fully_qualified_name)
-    }
-    
-    /// Resolve type to internal name format (java.lang.String -> java/lang/String)
-    pub fn resolve_to_internal_name(&self, simple_name: &str) -> String {
-        self.resolve_type(simple_name)
-            .unwrap_or_else(|| simple_name.to_string())
-            .replace('.', "/")
-    }
-    
-    /// Add a variable symbol (local variable or parameter) - follows JavaC's VarSymbol creation
-    pub fn add_variable(&mut self, name: &str, owner_method: &str, var_type: &str, 
-                       is_parameter: bool, local_slot: Option<usize>) {
-        let key = format!("method:{}::{}", owner_method, name);
-        let symbol = VariableSymbol {
-            name: name.to_string(),
-            kind: SymbolKind::Variable,
-            owner: format!("method:{}", owner_method),
-            var_type: var_type.to_string(),
-            is_static: false,
-            is_parameter,
-            local_slot,
-            modifiers: Vec::new(),
-        };
-        self.variables.insert(key.clone(), symbol);
-        eprintln!("📝 ENTER: Added variable symbol '{}' in method '{}' (slot: {:?})", name, owner_method, local_slot);
-    }
-    
-    /// Add a field symbol (instance or static field) - follows JavaC's VarSymbol creation for fields
-    pub fn add_field(&mut self, name: &str, owner_class: &str, field_type: &str, 
-                     is_static: bool, modifiers: Vec<String>) {
-        let key = format!("class:{}::{}", owner_class, name);
-        let symbol = VariableSymbol {
-            name: name.to_string(),
-            kind: SymbolKind::Field,
-            owner: format!("class:{}", owner_class),
-            var_type: field_type.to_string(),
-            is_static,
-            is_parameter: false,
-            local_slot: None,
-            modifiers,
-        };
-        self.fields.insert(key, symbol);
-        eprintln!("📝 ENTER: Added field symbol '{}' in class '{}' (static: {})", name, owner_class, is_static);
-    }
-    
-    /// Look up a variable symbol by name and method context - follows JavaC's lookup pattern
-    pub fn lookup_variable(&self, name: &str, method_context: &str) -> Option<&VariableSymbol> {
-        let key = format!("method:{}::{}", method_context, name);
-        self.variables.get(&key)
-    }
-    
-    /// Look up a field symbol by name and class context - follows JavaC's lookup pattern
-    pub fn lookup_field(&self, name: &str, class_context: &str) -> Option<&VariableSymbol> {
-        let key = format!("class:{}::{}", class_context, name);
-        self.fields.get(&key)
-    }
-    
-    /// Resolve identifier in context (like JavaC's Resolve.resolveIdent)
-    /// Returns the appropriate symbol based on scoping rules
-    pub fn resolve_identifier(&self, name: &str, method_context: Option<&str>, class_context: &str) -> Option<&VariableSymbol> {
-        // 1. First check local variables and parameters if we're in a method
-        if let Some(method) = method_context {
-            if let Some(var_symbol) = self.lookup_variable(name, method) {
-                eprintln!("🔍 RESOLVE_ID: Found variable '{}' in method '{}'", name, method);
-                return Some(var_symbol);
-            }
-        }
-        
-        // 2. Then check instance and static fields of the current class
-        if let Some(field_symbol) = self.lookup_field(name, class_context) {
-            eprintln!("🔍 RESOLVE_ID: Found field '{}' in class '{}'", name, class_context);
-            return Some(field_symbol);
-        }
-        
-        // TODO: 3. Check inherited fields from superclasses
-        // TODO: 4. Check static imports
-        
-        eprintln!("⚠️ RESOLVE_ID: Could not resolve identifier '{}'", name);
-        None
-    }
-}
-
-impl Default for SymbolEnvironment {
-    fn default() -> Self {
-        Self {
-            classes: HashMap::new(),
-            imports: HashMap::new(),
-            wildcard_imports: Vec::new(),
-            static_imports: HashMap::new(),
-            static_wildcard_imports: Vec::new(),
-            current_package: None,
-            type_parameters: HashMap::new(),
-            methods: HashMap::new(),
-            variables: HashMap::new(),      // Initialize new field
-            fields: HashMap::new(),         // Initialize new field  
-            instantiation_cache: HashMap::new(),
-        }
-    }
-}
-
-/// Enter phase processor - corresponds to JavaC's Enter class
-pub struct Enter {
-    pub symbol_env: SymbolEnvironment,
-}
-
-impl Enter {
-    pub fn new() -> Self {
-        Self {
+        EnhancedEnter {
+            type_resolver: crate::common::type_resolver::StandaloneTypeResolver::new(classpath),
+            import_resolver: None,
             symbol_env: SymbolEnvironment::default(),
+            current_class: None,
+            resolved_types: HashMap::new(),
+            classpath: classpath.to_string(),
         }
     }
     
-    /// Process AST through Enter phase - build symbol tables
-    /// Corresponds to JavaC's Enter.main() method
-    pub fn process(&mut self, ast: Ast) -> Result<Ast> {
-        eprintln!("🔍 ENTER: Starting symbol table construction");
+    /// Process AST with enhanced type resolution
+    pub fn process(&mut self, mut ast: Ast) -> Result<Ast> {
+        eprintln!("🔧 ENHANCED_ENTER: Starting Enter phase with dynamic type resolution");
         
-        // Process package declaration
-        if let Some(ref package) = ast.package_decl {
-            self.symbol_env.current_package = Some(package.name.clone());
-            eprintln!("📦 ENTER: Package: {}", package.name);
-        }
+        // Phase 1: Build import resolver from AST
+        self.import_resolver = Some(
+            crate::common::import::StandaloneImportResolver::from_ast(&ast, &self.classpath)
+        );
         
-        // Process import declarations
-        for import in &ast.imports {
-            self.process_import(import)?;
-        }
+        // Phase 2: Resolve all type references in the AST  
+        self.resolve_all_type_references(&mut ast)?;
         
-        // Process type declarations (classes, interfaces, enums)
-        for type_decl in &ast.type_decls {
-            self.process_type_decl(type_decl)?;
-        }
+        // Phase 3: Build symbol tables with resolved types
+        self.build_symbol_tables(&ast)?;
         
-        eprintln!("✅ ENTER: Symbol table construction complete");
-        eprintln!("📊 ENTER: {} classes, {} imports, {} type parameters", 
-                 self.symbol_env.classes.len(), 
-                 self.symbol_env.imports.len(),
-                 self.symbol_env.type_parameters.len());
+        eprintln!("✅ ENHANCED_ENTER: Completed Enter phase");
+        eprintln!("   📊 Resolved {} type names", self.resolved_types.len());
+        eprintln!("   📊 Symbol environment: {} fields, {} methods", 
+                 self.symbol_env.fields.len(), 
+                 self.symbol_env.methods.len());
         
         Ok(ast)
     }
     
-    /// Process import declaration - JavaC style import resolution
-    /// Handles both static and wildcard imports following JavaC's MemberEnter.visitImport pattern
-    fn process_import(&mut self, import: &crate::ast::ImportDecl) -> Result<()> {
-        if import.is_wildcard {
-            // Import on demand (wildcard import)
-            if import.is_static {
-                // Static wildcard import: import static Class.*
-                eprintln!("📦 ENTER: Static wildcard import: {}.*", import.name);
-                self.symbol_env.static_wildcard_imports.push(import.name.clone());
-                self.import_static_all(&import.name)?;
-            } else {
-                // Package wildcard import: import package.*
-                eprintln!("📦 ENTER: Wildcard import: {}.*", import.name);
-                self.symbol_env.wildcard_imports.push(import.name.clone());
-                self.import_all(&import.name)?;
-            }
-        } else {
-            // Named import
-            if import.is_static {
-                // Static named import: import static Class.member
-                eprintln!("📥 ENTER: Static import: {}", import.name);
-                self.import_named_static(&import.name)?;
-            } else {
-                // Single type import: import Class
-                eprintln!("📥 ENTER: Type import: {}", import.name);
-                self.import_named(&import.name)?;
+    /// Resolve all type references in the AST to fully qualified names
+    fn resolve_all_type_references(&mut self, ast: &mut Ast) -> Result<()> {
+        eprintln!("🔍 ENHANCED_ENTER: Resolving type references");
+        
+        for type_decl in &mut ast.type_decls {
+            match type_decl {
+                TypeDecl::Class(class_decl) => {
+                    self.current_class = Some(class_decl.name.clone());
+                    self.resolve_class_type_references(class_decl)?;
+                }
+                TypeDecl::Interface(interface_decl) => {
+                    self.current_class = Some(interface_decl.name.clone());
+                    self.resolve_interface_type_references(interface_decl)?;
+                }
+                TypeDecl::Enum(enum_decl) => {
+                    self.current_class = Some(enum_decl.name.clone());
+                    self.resolve_enum_type_references(enum_decl)?;
+                }
+                TypeDecl::Annotation(annotation_decl) => {
+                    self.current_class = Some(annotation_decl.name.clone());
+                    self.resolve_annotation_type_references(annotation_decl)?;
+                }
             }
         }
         
         Ok(())
     }
     
-    /// Import a single named type (JavaC importNamed equivalent)
-    fn import_named(&mut self, qualified_name: &str) -> Result<()> {
-        let simple_name = qualified_name.split('.').last().unwrap_or(qualified_name);
-        self.symbol_env.imports.insert(simple_name.to_string(), qualified_name.to_string());
-        eprintln!("✅ ENTER: Imported type: {} -> {}", simple_name, qualified_name);
-        Ok(())
-    }
-    
-    /// Import all types from a package (JavaC importAll equivalent)
-    fn import_all(&mut self, package_name: &str) -> Result<()> {
-        // For wildcard imports, we store the package name and resolve types on demand
-        // This matches JavaC's behavior where wildcard imports are resolved during symbol lookup
-        eprintln!("✅ ENTER: Added wildcard import for package: {}", package_name);
-        Ok(())
-    }
-    
-    /// Import a single static member (JavaC importNamedStatic equivalent)
-    fn import_named_static(&mut self, qualified_name: &str) -> Result<()> {
-        if let Some(member_name) = qualified_name.split('.').last() {
-            self.symbol_env.static_imports.insert(member_name.to_string(), qualified_name.to_string());
-            eprintln!("✅ ENTER: Imported static member: {} -> {}", member_name, qualified_name);
-        }
-        Ok(())
-    }
-    
-    /// Import all static members from a class (JavaC importStaticAll equivalent)
-    fn import_static_all(&mut self, class_name: &str) -> Result<()> {
-        // For static wildcard imports, we store the class name and resolve members on demand
-        // This matches JavaC's behavior for static import resolution
-        eprintln!("✅ ENTER: Added static wildcard import for class: {}", class_name);
-        Ok(())
-    }
-    
-    /// Process type declaration - corresponds to JavaC's visitClassDef
-    fn process_type_decl(&mut self, type_decl: &TypeDecl) -> Result<()> {
-        match type_decl {
-            TypeDecl::Class(class_decl) => {
-                self.process_class_decl(class_decl)?;
-            }
-            TypeDecl::Interface(interface_decl) => {
-                self.process_interface_decl(interface_decl)?;
-            }
-            TypeDecl::Enum(enum_decl) => {
-                self.process_enum_decl(enum_decl)?;
-            }
-            TypeDecl::Annotation(annotation_decl) => {
-                self.process_annotation_decl(annotation_decl)?;
-            }
-        }
-        Ok(())
-    }
-    
-    /// Process class declaration with generic support
-    fn process_class_decl(&mut self, class_decl: &ClassDecl) -> Result<()> {
-        let fully_qualified_name = if let Some(ref package) = self.symbol_env.current_package {
-            format!("{}.{}", package, class_decl.name)
-        } else {
-            class_decl.name.clone()
-        };
+    fn resolve_class_type_references(&mut self, class_decl: &mut ClassDecl) -> Result<()> {
+        eprintln!("🔍 ENHANCED_ENTER: Resolving types in class '{}'", class_decl.name);
         
-        eprintln!("🏛️  ENTER: Processing class: {}", fully_qualified_name);
+        // Resolve superclass (extends clause)
+        if let Some(ref mut extends) = class_decl.extends {
+            self.resolve_type_ref(extends)?;
+        }
+        
+        // Resolve implemented interfaces
+        for interface in &mut class_decl.implements {
+            self.resolve_type_ref(interface)?;
+        }
+        
+        // Resolve types in class members
+        for member in &mut class_decl.body {
+            match member {
+                ClassMember::Field(ref mut field_decl) => {
+                    self.resolve_type_ref(&mut field_decl.type_ref)?;
+                }
+                ClassMember::Method(ref mut method_decl) => {
+                    self.resolve_method_type_references(method_decl)?;
+                }
+                ClassMember::Constructor(ref mut constructor_decl) => {
+                    // Resolve constructor parameter types
+                    for param in &mut constructor_decl.parameters {
+                        self.resolve_type_ref(&mut param.type_ref)?;
+                    }
+                }
+                _ => {} // Handle other members if needed
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn resolve_interface_type_references(&mut self, interface_decl: &mut InterfaceDecl) -> Result<()> {
+        eprintln!("🔍 ENHANCED_ENTER: Resolving types in interface '{}'", interface_decl.name);
+        
+        // Resolve extended interfaces
+        for extended_interface in &mut interface_decl.extends {
+            self.resolve_type_ref(extended_interface)?;
+        }
+        
+        // Resolve types in interface members
+        for member in &mut interface_decl.body {
+            match member {
+                InterfaceMember::Method(ref mut method_decl) => {
+                    self.resolve_method_type_references(method_decl)?;
+                }
+                _ => {} // Handle other members if needed
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn resolve_enum_type_references(&mut self, enum_decl: &mut EnumDecl) -> Result<()> {
+        eprintln!("🔍 ENHANCED_ENTER: Resolving types in enum '{}'", enum_decl.name);
+        
+        // Resolve implemented interfaces
+        for interface in &mut enum_decl.implements {
+            self.resolve_type_ref(interface)?;
+        }
+        
+        // Resolve types in enum members
+        for member in &mut enum_decl.body {
+            match member {
+                ClassMember::Field(ref mut field_decl) => {
+                    self.resolve_type_ref(&mut field_decl.type_ref)?;
+                }
+                ClassMember::Method(ref mut method_decl) => {
+                    self.resolve_method_type_references(method_decl)?;
+                }
+                ClassMember::Constructor(ref mut constructor_decl) => {
+                    // Resolve constructor parameter types
+                    for param in &mut constructor_decl.parameters {
+                        self.resolve_type_ref(&mut param.type_ref)?;
+                    }
+                }
+                _ => {} // Handle other members if needed
+            }
+        }
+        
+        Ok(())
+    }
+    
+    
+    fn resolve_method_type_references(&mut self, method_decl: &mut MethodDecl) -> Result<()> {
+        // Resolve return type
+        if let Some(ref mut return_type) = method_decl.return_type {
+            self.resolve_type_ref(return_type)?;
+        }
+        
+        // Resolve parameter types
+        for param in &mut method_decl.parameters {
+            self.resolve_type_ref(&mut param.type_ref)?;
+        }
+        
+        // TODO: Resolve exception types in throws clause
+        
+        Ok(())
+    }
+    
+    fn resolve_annotation_type_references(&mut self, annotation_decl: &mut AnnotationDecl) -> Result<()> {
+        eprintln!("🔍 ENHANCED_ENTER: Resolving types in annotation '{}'", annotation_decl.name);
+        
+        // For now, annotations don't have complex type resolution needs
+        // TODO: Handle annotation elements if they have type references
+        
+        Ok(())
+    }
+    
+    
+    /// Resolve a single TypeRef to its fully qualified name
+    fn resolve_type_ref(&mut self, type_ref: &mut TypeRef) -> Result<()> {
+        let original_name = type_ref.name.clone();
+        
+        // Skip if already resolved (contains dots or is primitive)
+        if original_name.contains('.') || is_primitive_type(&original_name) {
+            return Ok(());
+        }
+        
+        // Check if we've already resolved this type
+        if let Some(resolved) = self.resolved_types.get(&original_name) {
+            type_ref.name = resolved.clone();
+            return Ok(());
+        }
+        
+        // Resolve using TypeResolver
+        if let Some(ref mut import_resolver) = self.import_resolver {
+            if let Some(fully_qualified) = self.type_resolver.resolve_type_name_standalone(&original_name, import_resolver) {
+                eprintln!("✅ ENHANCED_ENTER: '{}' -> '{}'", original_name, fully_qualified);
+                
+                // Cache the resolution
+                self.resolved_types.insert(original_name.clone(), fully_qualified.clone());
+                
+                // Update the TypeRef
+                type_ref.name = fully_qualified;
+            } else {
+                eprintln!("⚠️  ENHANCED_ENTER: Could not resolve type '{}'", original_name);
+                // Keep original name - might be a forward reference or external type
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Build symbol tables using the resolved type information
+    fn build_symbol_tables(&mut self, ast: &Ast) -> Result<()> {
+        eprintln!("🔧 ENHANCED_ENTER: Building symbol tables");
+        
+        for type_decl in &ast.type_decls {
+            match type_decl {
+                TypeDecl::Class(class_decl) => {
+                    self.build_class_symbols(class_decl, ast)?;
+                }
+                TypeDecl::Interface(interface_decl) => {
+                    self.build_interface_symbols(interface_decl, ast)?;
+                }
+                TypeDecl::Enum(enum_decl) => {
+                    self.build_enum_symbols(enum_decl, ast)?;
+                }
+                TypeDecl::Annotation(annotation_decl) => {
+                    self.build_annotation_symbols(annotation_decl, ast)?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn build_class_symbols(&mut self, class_decl: &ClassDecl, ast: &Ast) -> Result<()> {
+        let class_owner = format!("class:{}", class_decl.name);
+        
+        // Get fully qualified name and package info
+        let (fully_qualified_name, package_name) = self.get_fully_qualified_name(&class_decl.name, ast);
         
         // Process type parameters
-        let mut type_parameters = Vec::new();
-        for (index, type_param) in class_decl.type_params.iter().enumerate() {
-            let type_param_symbol = self.process_type_parameter(type_param, &class_decl.name, index)?;
-            type_parameters.push(type_param_symbol);
-        }
+        let type_parameters = self.process_type_parameters(&class_decl.type_params, &fully_qualified_name);
         
-        // Determine if class is generic
-        let is_generic = !class_decl.type_params.is_empty();
-        
-        if is_generic {
-            eprintln!("🧬 ENTER: Generic class with {} type parameters", type_parameters.len());
-        }
-        
-        // Process superclass
-        let super_class = class_decl.extends.as_ref().map(|ext| self.resolve_type_name(ext));
-        
-        // Process interfaces
-        let interfaces: Vec<String> = class_decl.implements.iter()
-            .map(|iface| self.resolve_type_name(iface))
-            .collect();
-        
-        // Process class members to collect method and field information
-        let mut methods = HashMap::new();
-        for member in &class_decl.body {
-            match member {
-                crate::ast::ClassMember::Method(method_decl) => {
-                    let method_symbol = self.process_method_decl(method_decl, &class_decl.name)?;
-                    let method_signature = format!("{}:{}", class_decl.name, method_decl.name);
-                    methods.insert(method_signature.clone(), method_symbol.clone());
-                    self.symbol_env.methods.insert(method_signature, method_symbol);
-                }
-                crate::ast::ClassMember::Field(field_decl) => {
-                    // Process field declaration and add to symbol table
-                    let is_static = field_decl.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Static));
-                    let field_modifiers: Vec<String> = field_decl.modifiers.iter()
-                        .map(|m| format!("{:?}", m))
-                        .collect();
-                    
-                    // Add field to symbol environment
-                    self.symbol_env.add_field(
-                        &field_decl.name,
-                        &class_decl.name,
-                        &self.resolve_type_name(&field_decl.type_ref),
-                        is_static,
-                        field_modifiers
-                    );
-                }
-                crate::ast::ClassMember::Constructor(constructor_decl) => {
-                    // Process constructor as a special method with name "<init>"
-                    let method_symbol = self.process_constructor_decl(constructor_decl, &class_decl.name)?;
-                    let method_signature = format!("{}:<init>", class_decl.name);
-                    methods.insert(method_signature.clone(), method_symbol.clone());
-                    self.symbol_env.methods.insert(method_signature, method_symbol);
-                }
-                _ => {
-                    // Handle other member types (nested types, etc.) if needed
-                }
-            }
-        }
-        
-        // Create class symbol
-        let class_symbol = ClassSymbol {
+        // Create the ClassSymbol and add it to the classes table
+        let mut class_methods = HashMap::new();
+        let class_symbol = crate::common::env::ClassSymbol {
             name: class_decl.name.clone(),
-            fully_qualified_name: fully_qualified_name.clone(),
-            package_name: self.symbol_env.current_package.clone(),
+            fully_qualified_name,
+            package_name,
             is_interface: false,
             is_enum: false,
             is_annotation: false,
-            super_class,
-            interfaces,
+            super_class: class_decl.extends.as_ref().map(|e| e.name.clone()),
+            interfaces: class_decl.implements.iter().map(|i| i.name.clone()).collect(),
             modifiers: class_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
             type_parameters,
-            is_generic,
-            methods,
-            enum_constants: Vec::new(),
+            is_generic: !class_decl.type_params.is_empty(),
+            methods: class_methods.clone(),
+            enum_constants: vec![],
         };
         
-        // Store class symbol
         self.symbol_env.classes.insert(class_decl.name.clone(), class_symbol);
+        eprintln!("📝 ENHANCED_ENTER: Added class symbol '{}'", class_decl.name);
         
-        eprintln!("✅ ENTER: Class {} processed", class_decl.name);
+        // Add symbols for class members
+        for member in &class_decl.body {
+            match member {
+                ClassMember::Field(field_decl) => {
+                    let field_key = format!("{}::{}", class_owner, field_decl.name);
+                    let is_static = field_decl.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Static));
+                    
+                    let field_symbol = VariableSymbol {
+                        name: field_decl.name.clone(),
+                        kind: SymbolKind::Field,
+                        owner: class_owner.clone(),
+                        var_type: field_decl.type_ref.name.clone(), // Now contains resolved type
+                        is_static,
+                        is_parameter: false,
+                        local_slot: None,
+                        modifiers: field_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+                    };
+                    
+                    self.symbol_env.fields.insert(field_key, field_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added field symbol '{}'", field_decl.name);
+                }
+                ClassMember::Method(method_decl) => {
+                    let method_key = format!("{}:{}", class_decl.name, method_decl.name);
+                    let return_type = method_decl.return_type.as_ref()
+                        .map(|rt| rt.name.clone())
+                        .unwrap_or_else(|| "void".to_string());
+                    
+                    let is_static = method_decl.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Static));
+                    
+                    let method_symbol = MethodSymbol {
+                        name: method_decl.name.clone(),
+                        return_type, // Now contains resolved type
+                        parameter_types: method_decl.parameters.iter()
+                            .map(|p| p.type_ref.name.clone()) // Now contains resolved types
+                            .collect(),
+                        is_static,
+                        owner_class: class_decl.name.clone(),
+                        is_generic: !method_decl.type_params.is_empty(),
+                        type_parameters: self.process_type_parameters(&method_decl.type_params, &method_key),
+                    };
+                    
+                    self.symbol_env.methods.insert(method_key, method_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added method symbol '{}'", method_decl.name);
+                    
+                    // Add method parameters as variable symbols with proper slot assignment
+                    let mut param_slot = if is_static { 0 } else { 1 }; // Start after 'this' for instance methods
+                    for param in &method_decl.parameters {
+                        let param_key = format!("method:{}#{}::{}", class_decl.name, method_decl.name, param.name);
+                        let param_symbol = VariableSymbol {
+                            name: param.name.clone(),
+                            kind: SymbolKind::Variable,
+                            owner: format!("{}:{}", class_decl.name, method_decl.name),
+                            var_type: self.build_full_type_name(&param.type_ref), // Include array dimensions
+                            is_static: false, // Parameters are never static
+                            is_parameter: true,
+                            local_slot: Some(param_slot), // Assign proper parameter slot
+                            modifiers: param.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+                        };
+                        
+                        self.symbol_env.variables.insert(param_key, param_symbol); // Store in variables table
+                        eprintln!("📝 ENHANCED_ENTER: Added parameter '{}' with slot {} for method '{}'", param.name, param_slot, method_decl.name);
+                        param_slot += 1; // Increment for next parameter
+                    }
+                    
+                    // Process method body for local variable declarations
+                    if let Some(ref body) = method_decl.body {
+                        self.process_method_body_statements(&body.statements, &class_decl.name, &method_decl.name)?;
+                    }
+                }
+                ClassMember::Constructor(constructor_decl) => {
+                    let constructor_key = format!("{}:{}", class_decl.name, "<init>");
+                    
+                    let constructor_symbol = MethodSymbol {
+                        name: "<init>".to_string(), // JVM constructor name
+                        return_type: "void".to_string(), // Constructors always return void
+                        parameter_types: constructor_decl.parameters.iter()
+                            .map(|p| p.type_ref.name.clone()) // Now contains resolved types
+                            .collect(),
+                        is_static: false, // Constructors are instance methods
+                        owner_class: class_decl.name.clone(),
+                        is_generic: false, // Constructors don't have type parameters
+                        type_parameters: vec![], // No type parameters
+                    };
+                    
+                    self.symbol_env.methods.insert(constructor_key, constructor_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added constructor symbol for class '{}'", class_decl.name);
+                    
+                    // Add constructor parameters as variable symbols with proper slot assignment
+                    let mut param_slot = 1; // Constructors are instance methods, slot 0 = 'this'
+                    for param in &constructor_decl.parameters {
+                        let param_key = format!("method:{}#<init>::{}", class_decl.name, param.name);
+                        let param_symbol = VariableSymbol {
+                            name: param.name.clone(),
+                            kind: SymbolKind::Variable,
+                            owner: format!("{}:<init>", class_decl.name),
+                            var_type: self.build_full_type_name(&param.type_ref), // Include array dimensions
+                            is_static: false, // Parameters are never static
+                            is_parameter: true,
+                            local_slot: Some(param_slot), // Assign proper parameter slot
+                            modifiers: param.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+                        };
+                        
+                        self.symbol_env.variables.insert(param_key, param_symbol);
+                        eprintln!("📝 ENHANCED_ENTER: Added constructor parameter '{}' with slot {} for class '{}'", param.name, param_slot, class_decl.name);
+                        param_slot += 1; // Increment for next parameter
+                    }
+                    
+                    // Process constructor body for local variable declarations
+                    self.process_method_body_statements(&constructor_decl.body.statements, &class_decl.name, "<init>")?;
+                }
+                _ => {} // Handle other members if needed
+            }
+        }
+        
         Ok(())
     }
     
-    /// Process interface declaration with generic support
-    fn process_interface_decl(&mut self, interface_decl: &InterfaceDecl) -> Result<()> {
-        let fully_qualified_name = if let Some(ref package) = self.symbol_env.current_package {
-            format!("{}.{}", package, interface_decl.name)
-        } else {
-            interface_decl.name.clone()
-        };
+    fn build_interface_symbols(&mut self, interface_decl: &InterfaceDecl, ast: &Ast) -> Result<()> {
+        // Similar to class symbols but for interfaces
+        let class_owner = format!("class:{}", interface_decl.name);
         
-        eprintln!("🔌 ENTER: Processing interface: {}", fully_qualified_name);
+        // Get fully qualified name and package info
+        let (fully_qualified_name, package_name) = self.get_fully_qualified_name(&interface_decl.name, ast);
         
         // Process type parameters
-        let mut type_parameters = Vec::new();
-        for (index, type_param) in interface_decl.type_params.iter().enumerate() {
-            let type_param_symbol = self.process_type_parameter(type_param, &interface_decl.name, index)?;
-            type_parameters.push(type_param_symbol);
-        }
+        let type_parameters = self.process_type_parameters(&interface_decl.type_params, &fully_qualified_name);
         
-        let is_generic = !interface_decl.type_params.is_empty();
-        
-        // Process extended interfaces
-        let interfaces: Vec<String> = interface_decl.extends.iter()
-            .map(|iface| self.resolve_type_name(iface))
-            .collect();
-        
-        // Create class symbol for interface
-        let interface_symbol = ClassSymbol {
+        // Create the InterfaceSymbol and add it to the classes table
+        let class_methods = HashMap::new();
+        let class_symbol = crate::common::env::ClassSymbol {
             name: interface_decl.name.clone(),
-            fully_qualified_name: fully_qualified_name.clone(),
-            package_name: self.symbol_env.current_package.clone(),
+            fully_qualified_name,
+            package_name,
             is_interface: true,
             is_enum: false,
             is_annotation: false,
-            super_class: Some("java.lang.Object".to_string()),
-            interfaces,
+            super_class: None, // Interfaces don't extend classes
+            interfaces: interface_decl.extends.iter().map(|i| i.name.clone()).collect(),
             modifiers: interface_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
             type_parameters,
-            is_generic,
-            methods: HashMap::new(),
-            enum_constants: Vec::new(),
+            is_generic: !interface_decl.type_params.is_empty(),
+            methods: class_methods,
+            enum_constants: vec![],
         };
         
-        self.symbol_env.classes.insert(interface_decl.name.clone(), interface_symbol);
+        self.symbol_env.classes.insert(interface_decl.name.clone(), class_symbol);
+        eprintln!("📝 ENHANCED_ENTER: Added interface symbol '{}'", interface_decl.name);
         
-        eprintln!("✅ ENTER: Interface {} processed", interface_decl.name);
+        for member in &interface_decl.body {
+            match member {
+                InterfaceMember::Method(method_decl) => {
+                    let method_key = format!("{}:{}", interface_decl.name, method_decl.name);
+                    let return_type = method_decl.return_type.as_ref()
+                        .map(|rt| rt.name.clone())
+                        .unwrap_or_else(|| "void".to_string());
+                    
+                    let method_symbol = MethodSymbol {
+                        name: method_decl.name.clone(),
+                        return_type,
+                        parameter_types: method_decl.parameters.iter()
+                            .map(|p| p.type_ref.name.clone())
+                            .collect(),
+                        is_static: false, // Interface methods are not static by default
+                        owner_class: interface_decl.name.clone(),
+                        is_generic: !method_decl.type_params.is_empty(),
+                        type_parameters: self.process_type_parameters(&method_decl.type_params, &method_key),
+                    };
+                    
+                    self.symbol_env.methods.insert(method_key, method_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added interface method symbol '{}'", method_decl.name);
+                    
+                    // Add method parameters as variable symbols
+                    for param in &method_decl.parameters {
+                        let param_key = format!("method:{}#{}::{}", interface_decl.name, method_decl.name, param.name);
+                        let param_symbol = VariableSymbol {
+                            name: param.name.clone(),
+                            kind: SymbolKind::Variable,
+                            owner: format!("{}:{}", interface_decl.name, method_decl.name),
+                            var_type: param.type_ref.name.clone(), // Resolved type
+                            is_static: false, // Parameters are never static
+                            is_parameter: true,
+                            local_slot: None, // Will be set during code generation
+                            modifiers: param.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+                        };
+                        
+                        self.symbol_env.variables.insert(param_key, param_symbol); // Store in variables table
+                        eprintln!("📝 ENHANCED_ENTER: Added parameter symbol '{}' for interface method '{}'", param.name, method_decl.name);
+                    }
+                }
+                _ => {} // Handle other members if needed
+            }
+        }
+        
         Ok(())
     }
     
-    /// Process type parameter and create symbol
-    fn process_type_parameter(&mut self, type_param: &TypeParam, owner: &str, index: usize) -> Result<TypeParameterSymbol> {
-        let bounds: Vec<String> = type_param.bounds.iter()
-            .map(|bound| self.resolve_type_name(bound))
-            .collect();
+    fn build_enum_symbols(&mut self, enum_decl: &EnumDecl, ast: &Ast) -> Result<()> {
+        // Build symbols for enum members (similar to class)
+        let class_owner = format!("class:{}", enum_decl.name);
         
-        let symbol = TypeParameterSymbol {
-            name: type_param.name.clone(),
-            bounds,
-            owner: owner.to_string(),
-            index,
-        };
+        // Get fully qualified name and package info
+        let (fully_qualified_name, package_name) = self.get_fully_qualified_name(&enum_decl.name, ast);
         
-        // Store in scoped map (owner:name -> symbol)
-        let scoped_name = format!("{}:{}", owner, type_param.name);
-        self.symbol_env.type_parameters.insert(scoped_name, symbol.clone());
-        
-        eprintln!("🧬 ENTER: Type parameter {} with {} bounds", type_param.name, symbol.bounds.len());
-        
-        Ok(symbol)
-    }
-    
-    /// Process method declaration and create symbol
-    fn process_method_decl(&mut self, method_decl: &crate::ast::MethodDecl, owner_class: &str) -> Result<MethodSymbol> {
-        // Process method type parameters
-        let mut type_parameters = Vec::new();
-        for (index, type_param) in method_decl.type_params.iter().enumerate() {
-            let method_owner = format!("{}#{}", owner_class, method_decl.name);
-            let type_param_symbol = self.process_type_parameter(type_param, &method_owner, index)?;
-            type_parameters.push(type_param_symbol);
-        }
-        
-        let is_generic = !method_decl.type_params.is_empty();
-        let is_static = method_decl.modifiers.iter()
-            .any(|m| matches!(m, crate::ast::Modifier::Static));
-        
-        // Process parameter types
-        let parameter_types: Vec<String> = method_decl.parameters.iter()
-            .map(|param| self.resolve_type_name(&param.type_ref))
-            .collect();
-        
-        // Process return type
-        let return_type = method_decl.return_type.as_ref()
-            .map(|rt| self.resolve_type_name(rt))
-            .unwrap_or_else(|| "void".to_string());
-        
-        let method_symbol = MethodSymbol {
-            name: method_decl.name.clone(),
-            owner_class: owner_class.to_string(),
-            type_parameters,
-            parameter_types,
-            return_type,
-            is_static,
-            is_generic,
-        };
-        
-        // Add method parameters to symbol table
-        let method_owner = format!("{}#{}", owner_class, method_decl.name);
-        let mut local_slot = if is_static { 0 } else { 1 }; // Static methods start at 0, instance methods at 1 (for 'this')
-        
-        for param in &method_decl.parameters {
-            let param_type = self.resolve_type_name(&param.type_ref);
-            self.symbol_env.add_variable(&param.name, &method_owner, &param_type, true, Some(local_slot));
-            
-            // JVM local variable slot computation (double/long take 2 slots)
-            local_slot += match param_type.as_str() {
-                "long" | "double" => 2,
-                _ => 1,
-            };
-            
-            eprintln!("📝 ENTER: Added parameter '{}' type '{}' to method '{}' at slot {}", 
-                     param.name, param_type, method_owner, local_slot - 1);
-        }
-        
-        if is_generic {
-            eprintln!("🧬 ENTER: Generic method {} with {} type parameters", 
-                     method_decl.name, method_symbol.type_parameters.len());
-        }
-        
-        Ok(method_symbol)
-    }
-    
-    /// Process constructor declaration and create method symbol (JavaC aligned)
-    fn process_constructor_decl(&mut self, constructor_decl: &crate::ast::ConstructorDecl, owner_class: &str) -> Result<MethodSymbol> {
-        // Constructors don't have their own type parameters in Java
-        // They inherit type parameters from their declaring class
-        let type_parameters = Vec::new();
-        let is_generic = false;
-        let is_static = false; // Constructors are never static
-        
-        // Process parameter types
-        let parameter_types: Vec<String> = constructor_decl.parameters.iter()
-            .map(|param| self.resolve_type_name(&param.type_ref))
-            .collect();
-        
-        // Constructor return type is void
-        let return_type = "void".to_string();
-        
-        let method_symbol = MethodSymbol {
-            name: "<init>".to_string(), // JVM constructor name
-            owner_class: owner_class.to_string(),
-            type_parameters,
-            parameter_types,
-            return_type,
-            is_static,
-            is_generic,
-        };
-        
-        // Add constructor parameters to symbol table
-        let method_owner = format!("{}#<init>", owner_class);
-        let mut local_slot = 1; // Constructors always start at slot 1 (for 'this')
-        
-        for param in &constructor_decl.parameters {
-            let param_type = self.resolve_type_name(&param.type_ref);
-            self.symbol_env.add_variable(&param.name, &method_owner, &param_type, true, Some(local_slot));
-            
-            // JVM local variable slot computation (double/long take 2 slots)
-            local_slot += match param_type.as_str() {
-                "long" | "double" => 2,
-                _ => 1,
-            };
-            
-            eprintln!("📝 ENTER: Added constructor parameter '{}' type '{}' to '{}' at slot {}", 
-                     param.name, param_type, method_owner, local_slot - 1);
-        }
-        
-        if is_generic {
-            eprintln!("🧬 ENTER: Generic constructor <init> with {} type parameters", 
-                     method_symbol.type_parameters.len());
-        }
-        
-        Ok(method_symbol)
-    }
-    
-    /// Resolve type name from TypeRef to string representation (JavaC aligned with import resolution)
-    fn resolve_type_name(&self, type_ref: &TypeRef) -> String {
-        use crate::codegen::array_type_info::{ArrayTypeInfo, ArrayAwareTypeResolver};
-        
-        // Use ArrayAwareTypeResolver for proper array handling
-        if type_ref.array_dims > 0 {
-            let final_type = ArrayAwareTypeResolver::resolve_type_ref(type_ref);
-            eprintln!("🔍 ENTER: Resolved array type '{}' (array_dims={}) -> '{}'", 
-                     type_ref.name, type_ref.array_dims, final_type);
-            return final_type;
-        }
-        
-        // Non-array type resolution
-        let base_name = if type_ref.type_args.is_empty() {
-            // Simple type - resolve through import hierarchy (JavaC pattern)
-            self.resolve_simple_type_name(&type_ref.name)
-        } else {
-            // Generic type with type arguments
-            let resolved_base = self.resolve_simple_type_name(&type_ref.name);
-            let args: Vec<String> = type_ref.type_args.iter()
-                .map(|arg| self.resolve_type_arg(arg))
-                .collect();
-            format!("{}<{}>", resolved_base, args.join(", "))
-        };
-        
-        eprintln!("🔍 ENTER: Resolved non-array type '{}' -> '{}'", type_ref.name, base_name);
-        base_name
-    }
-    
-    /// Convert a type name to JVM descriptor format using enhanced ArrayTypeInfo
-    fn type_name_to_descriptor(&self, type_name: &str) -> String {
-        use crate::codegen::array_type_info::ArrayTypeInfo;
-        
-        // Clean up malformed type names like "test/int" -> "int"
-        let clean_type_name = if type_name.starts_with("test/") {
-            &type_name[5..] // Remove "test/" prefix
-        } else {
-            type_name
-        };
-        
-        match clean_type_name {
-            // Primitive types
-            "int" => "I".to_string(),
-            "long" => "J".to_string(),
-            "float" => "F".to_string(),
-            "double" => "D".to_string(),
-            "boolean" => "Z".to_string(),
-            "byte" => "B".to_string(),
-            "char" => "C".to_string(),
-            "short" => "S".to_string(),
-            "void" => "V".to_string(),
-            _ => {
-                // Reference types: convert to L<classname>;
-                let class_name = clean_type_name.replace('.', "/");
-                format!("L{};", class_name)
-            }
-        }
-    }
-    
-    /// Resolve a simple type name through the import resolution hierarchy
-    /// Following JavaC's symbol resolution order: single imports -> wildcard imports -> classpath
-    fn resolve_simple_type_name(&self, simple_name: &str) -> String {
-        // 0. Check primitive types first (JavaC behavior - primitives are never qualified)
-        match simple_name {
-            "int" | "boolean" | "byte" | "char" | "short" | "long" | "float" | "double" | "void" => {
-                eprintln!("🎯 ENTER: Primitive type: {} -> {}", simple_name, simple_name);
-                return simple_name.to_string();
-            }
-            _ => {}
-        }
-        
-        // 1. Check single-type imports (highest precedence)
-        if let Some(qualified_name) = self.symbol_env.imports.get(simple_name) {
-            eprintln!("🎯 ENTER: Found in single imports: {} -> {}", simple_name, qualified_name);
-            return qualified_name.clone();
-        }
-        
-        // 2. Check wildcard imports (on-demand)
-        for package_name in &self.symbol_env.wildcard_imports {
-            let candidate = format!("{}.{}", package_name, simple_name);
-            // Try to resolve this candidate through classpath
-            if let Some(resolved) = classpath::resolve_class_name(&candidate) {
-                eprintln!("🎯 ENTER: Found via wildcard import: {} -> {}", simple_name, resolved);
-                return resolved.to_string();
-            }
-        }
-        
-        // 3. Check current package
-        if let Some(ref current_pkg) = self.symbol_env.current_package {
-            let candidate = format!("{}.{}", current_pkg, simple_name);
-            if let Some(resolved) = classpath::resolve_class_name(&candidate) {
-                eprintln!("🎯 ENTER: Found in current package: {} -> {}", simple_name, resolved);
-                return resolved.to_string();
-            }
-        }
-        
-        // 4. Try direct classpath resolution (for java.lang.* types)
-        if let Some(resolved) = classpath::resolve_class_name(simple_name) {
-            eprintln!("🎯 ENTER: Found in classpath: {} -> {}", simple_name, resolved);
-            return resolved.to_string();
-        }
-        
-        // 5. Fallback to package-based resolution
-        let fallback = classpath::resolve_class_name_with_fallback(simple_name, self.symbol_env.current_package.as_deref());
-        eprintln!("🔍 ENTER: Using fallback resolution: {} -> {}", simple_name, fallback);
-        fallback
-    }
-    
-    /// Resolve type argument to string representation
-    fn resolve_type_arg(&self, type_arg: &crate::ast::TypeArg) -> String {
-        match type_arg {
-            crate::ast::TypeArg::Type(type_ref) => self.resolve_type_name(type_ref),
-            crate::ast::TypeArg::Wildcard(wildcard) => {
-                match &wildcard.bound {
-                    Some((crate::ast::BoundKind::Extends, bound)) => {
-                        format!("? extends {}", self.resolve_type_name(bound))
-                    }
-                    Some((crate::ast::BoundKind::Super, bound)) => {
-                        format!("? super {}", self.resolve_type_name(bound))
-                    }
-                    None => "?".to_string(),
-                }
-            }
-        }
-    }
-    
-    /// Process enum declaration - corresponds to JavaC's visitClassDef for enums
-    fn process_enum_decl(&mut self, enum_decl: &EnumDecl) -> Result<()> {
-        let fully_qualified_name = if let Some(ref package) = self.symbol_env.current_package {
-            format!("{}.{}", package, enum_decl.name)
-        } else {
-            enum_decl.name.clone()
-        };
-        
-        eprintln!("🔢 ENTER: Processing enum: {}", fully_qualified_name);
-        
-        // Collect enum constants
-        let enum_constants: Vec<String> = enum_decl.constants
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
-        
-        eprintln!("📝 ENTER: Enum constants: {:?}", enum_constants);
-        
-        // Process interfaces implemented by the enum
-        let interfaces: Vec<String> = enum_decl.implements
-            .iter()
-            .map(|iface| self.resolve_type_name(iface))
-            .collect();
-        
-        // Create enum symbol (enums extend java.lang.Enum)
-        let enum_symbol = ClassSymbol {
+        // Create the EnumSymbol and add it to the classes table
+        let class_methods = HashMap::new();
+        let class_symbol = crate::common::env::ClassSymbol {
             name: enum_decl.name.clone(),
-            fully_qualified_name: fully_qualified_name.clone(),
-            package_name: self.symbol_env.current_package.clone(),
+            fully_qualified_name,
+            package_name,
             is_interface: false,
             is_enum: true,
             is_annotation: false,
-            super_class: Some("java.lang.Enum".to_string()),
-            interfaces,
+            super_class: Some("java.lang.Enum".to_string()), // Enums extend java.lang.Enum
+            interfaces: enum_decl.implements.iter().map(|i| i.name.clone()).collect(),
             modifiers: enum_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
-            type_parameters: Vec::new(), // Enums cannot have type parameters
-            is_generic: false,
-            methods: HashMap::new(),
-            enum_constants,
+            type_parameters: vec![], // Enums don't support type parameters in Java
+            is_generic: false, // Enums don't support type parameters in Java
+            methods: class_methods,
+            enum_constants: enum_decl.constants.iter().map(|c| c.name.clone()).collect(),
         };
         
-        self.symbol_env.classes.insert(enum_decl.name.clone(), enum_symbol);
+        self.symbol_env.classes.insert(enum_decl.name.clone(), class_symbol);
+        eprintln!("📝 ENHANCED_ENTER: Added enum symbol '{}'", enum_decl.name);
         
-        eprintln!("✅ ENTER: Enum {} processed", enum_decl.name);
+        // Add symbols for enum members
+        for member in &enum_decl.body {
+            match member {
+                ClassMember::Field(field_decl) => {
+                    let field_key = format!("{}::{}", class_owner, field_decl.name);
+                    let is_static = field_decl.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Static));
+                    
+                    let field_symbol = VariableSymbol {
+                        name: field_decl.name.clone(),
+                        kind: SymbolKind::Field,
+                        owner: class_owner.clone(),
+                        var_type: field_decl.type_ref.name.clone(), // Now contains resolved type
+                        is_static,
+                        is_parameter: false,
+                        local_slot: None,
+                        modifiers: field_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+                    };
+                    
+                    self.symbol_env.fields.insert(field_key, field_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added enum field symbol '{}'", field_decl.name);
+                }
+                ClassMember::Method(method_decl) => {
+                    let method_key = format!("{}:{}", enum_decl.name, method_decl.name);
+                    let return_type = method_decl.return_type.as_ref()
+                        .map(|rt| rt.name.clone())
+                        .unwrap_or_else(|| "void".to_string());
+                    
+                    let is_static = method_decl.modifiers.iter().any(|m| matches!(m, crate::ast::Modifier::Static));
+                    
+                    let method_symbol = MethodSymbol {
+                        name: method_decl.name.clone(),
+                        return_type, // Now contains resolved type
+                        parameter_types: method_decl.parameters.iter()
+                            .map(|p| p.type_ref.name.clone()) // Now contains resolved types
+                            .collect(),
+                        is_static,
+                        owner_class: enum_decl.name.clone(),
+                        is_generic: !method_decl.type_params.is_empty(),
+                        type_parameters: self.process_type_parameters(&method_decl.type_params, &method_key),
+                    };
+                    
+                    self.symbol_env.methods.insert(method_key, method_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added enum method symbol '{}'", method_decl.name);
+                    
+                    // Add method parameters as variable symbols
+                    for param in &method_decl.parameters {
+                        let param_key = format!("method:{}#{}::{}", enum_decl.name, method_decl.name, param.name);
+                        let param_symbol = VariableSymbol {
+                            name: param.name.clone(),
+                            kind: SymbolKind::Variable,
+                            owner: format!("{}:{}", enum_decl.name, method_decl.name),
+                            var_type: param.type_ref.name.clone(), // Resolved type
+                            is_static: false, // Parameters are never static
+                            is_parameter: true,
+                            local_slot: None, // Will be set during code generation
+                            modifiers: param.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
+                        };
+                        
+                        self.symbol_env.variables.insert(param_key, param_symbol); // Store in variables table
+                        eprintln!("📝 ENHANCED_ENTER: Added parameter symbol '{}' for enum method '{}'", param.name, method_decl.name);
+                    }
+                }
+                _ => {} // Handle other members if needed
+            }
+        }
+        
         Ok(())
     }
     
-    /// Process annotation declaration - corresponds to JavaC's visitClassDef for annotations
-    fn process_annotation_decl(&mut self, annotation_decl: &AnnotationDecl) -> Result<()> {
-        let fully_qualified_name = if let Some(ref package) = self.symbol_env.current_package {
-            format!("{}.{}", package, annotation_decl.name)
-        } else {
-            annotation_decl.name.clone()
-        };
+    fn build_annotation_symbols(&mut self, annotation_decl: &AnnotationDecl, ast: &Ast) -> Result<()> {
+        eprintln!("📝 ENHANCED_ENTER: Building symbols for annotation '{}'", annotation_decl.name);
         
-        eprintln!("📋 ENTER: Processing annotation: {}", fully_qualified_name);
+        // Get fully qualified name and package info
+        let (fully_qualified_name, package_name) = self.get_fully_qualified_name(&annotation_decl.name, ast);
         
-        // Create annotation symbol (annotations extend java.lang.annotation.Annotation)
-        let annotation_symbol = ClassSymbol {
+        // Create the AnnotationSymbol and add it to the classes table
+        let class_methods = HashMap::new();
+        let class_symbol = crate::common::env::ClassSymbol {
             name: annotation_decl.name.clone(),
-            fully_qualified_name: fully_qualified_name.clone(),
-            package_name: self.symbol_env.current_package.clone(),
-            is_interface: true, // Annotations are special interfaces
+            fully_qualified_name,
+            package_name,
+            is_interface: false,
             is_enum: false,
             is_annotation: true,
-            super_class: Some("java.lang.Object".to_string()),
-            interfaces: vec!["java.lang.annotation.Annotation".to_string()],
+            super_class: Some("java.lang.annotation.Annotation".to_string()), // Annotations extend Annotation
+            interfaces: vec![],
             modifiers: annotation_decl.modifiers.iter().map(|m| format!("{:?}", m)).collect(),
-            type_parameters: Vec::new(), // Annotations cannot have type parameters
-            is_generic: false,
-            methods: HashMap::new(),
-            enum_constants: Vec::new(),
+            type_parameters: vec![], // Annotations don't support type parameters in Java
+            is_generic: false, // Annotations don't support type parameters in Java
+            methods: class_methods,
+            enum_constants: vec![],
         };
         
-        self.symbol_env.classes.insert(annotation_decl.name.clone(), annotation_symbol);
+        self.symbol_env.classes.insert(annotation_decl.name.clone(), class_symbol);
+        eprintln!("📝 ENHANCED_ENTER: Added annotation symbol '{}'", annotation_decl.name);
         
-        eprintln!("✅ ENTER: Annotation {} processed", annotation_decl.name);
+        // Handle annotation methods/elements
+        for member in &annotation_decl.body {
+            let method_key = format!("{}:{}", annotation_decl.name, member.name);
+            
+            let method_symbol = MethodSymbol {
+                name: member.name.clone(),
+                return_type: member.type_ref.name.clone(),
+                parameter_types: vec![], // Annotation methods don't have parameters
+                is_static: false, // Annotation methods are instance methods
+                owner_class: annotation_decl.name.clone(),
+                is_generic: false, // Annotation methods are not generic
+                type_parameters: vec![], // No type parameters
+            };
+            
+            self.symbol_env.methods.insert(method_key, method_symbol);
+            eprintln!("📝 ENHANCED_ENTER: Added annotation method symbol '{}'", member.name);
+        }
+        
         Ok(())
     }
     
-    /// Get symbol environment for use by subsequent phases
+    /// Get the symbol environment
     pub fn get_symbol_environment(&self) -> &SymbolEnvironment {
         &self.symbol_env
     }
+    
+    /// Process type parameters and convert them to TypeParameterSymbol
+    fn process_type_parameters(&self, type_params: &[crate::ast::TypeParam], owner: &str) -> Vec<crate::common::env::TypeParameterSymbol> {
+        type_params.iter().enumerate().map(|(index, param)| {
+            crate::common::env::TypeParameterSymbol {
+                name: param.name.clone(),
+                bounds: param.bounds.iter().map(|bound| bound.name.clone()).collect(),
+                owner: owner.to_string(),
+                index,
+            }
+        }).collect()
+    }
+    
+    /// Extract package name from AST and create fully qualified name
+    fn get_fully_qualified_name(&self, class_name: &str, ast: &crate::ast::Ast) -> (String, Option<String>) {
+        match &ast.package_decl {
+            Some(package_decl) => {
+                let package_name = package_decl.name.clone();
+                let fully_qualified_name = format!("{}.{}", package_name, class_name);
+                (fully_qualified_name, Some(package_name))
+            }
+            None => {
+                // Default package
+                (class_name.to_string(), None)
+            }
+        }
+    }
+
+    /// Get the resolved type mappings
+    pub fn get_resolved_types(&self) -> &HashMap<String, String> {
+        &self.resolved_types
+    }
+    
+    /// Process method body statements to find local variable declarations
+    fn process_method_body_statements(&mut self, statements: &[crate::ast::Stmt], class_name: &str, method_name: &str) -> Result<()> {
+        // Initialize slot counter: 0 for static methods, 1 for instance methods (slot 0 = 'this')
+        let mut next_local_slot = if method_name == "<init>" || !self.is_static_method(class_name, method_name) {
+            1 // Instance method: slot 0 is 'this'
+        } else {
+            0 // Static method: start from slot 0
+        };
+        
+        // Account for method parameters (they get slots before local variables)
+        next_local_slot += self.count_method_parameters(class_name, method_name);
+        
+        for stmt in statements {
+            next_local_slot = self.process_statement_with_slots(stmt, class_name, method_name, next_local_slot)?;
+        }
+        Ok(())
+    }
+    
+    /// Check if a method is static
+    fn is_static_method(&self, class_name: &str, method_name: &str) -> bool {
+        // Look up method in symbol table and check if it's static
+        let method_key = format!("method:{}#{}", class_name, method_name);
+        if let Some(method_symbol) = self.symbol_env.methods.get(&method_key) {
+            method_symbol.is_static
+        } else {
+            false // Default to instance method
+        }
+    }
+    
+    /// Build full type name including array dimensions
+    fn build_full_type_name(&self, type_ref: &crate::ast::TypeRef) -> String {
+        let mut type_name = type_ref.name.clone();
+        
+        // Add array dimensions
+        for _ in 0..type_ref.array_dims {
+            type_name.push_str("[]");
+        }
+        
+        type_name
+    }
+    
+    /// Count method parameters to calculate starting local slot
+    fn count_method_parameters(&self, class_name: &str, method_name: &str) -> usize {
+        let method_pattern = format!("method:{}#{}::", class_name, method_name);
+        self.symbol_env.variables.keys()
+            .filter(|k| k.starts_with(&method_pattern))
+            .filter(|k| {
+                if let Some(var_symbol) = self.symbol_env.variables.get(*k) {
+                    var_symbol.is_parameter
+                } else {
+                    false
+                }
+            })
+            .count()
+    }
+    
+    /// Process statements with slot tracking
+    fn process_statement_with_slots(&mut self, stmt: &crate::ast::Stmt, class_name: &str, method_name: &str, mut next_local_slot: usize) -> Result<usize> {
+        use crate::ast::Stmt;
+        
+        match stmt {
+            Stmt::Declaration(var_decl_stmt) => {
+                // Process local variable declarations and assign slots
+                for variable in &var_decl_stmt.variables {
+                    let var_key = format!("method:{}#{}::{}", class_name, method_name, variable.name);
+                    
+                    let var_symbol = VariableSymbol {
+                        name: variable.name.clone(),
+                        kind: SymbolKind::Variable,
+                        owner: format!("{}:{}", class_name, method_name),
+                        var_type: self.build_full_type_name(&var_decl_stmt.type_ref),
+                        is_static: false,
+                        is_parameter: false,
+                        local_slot: Some(next_local_slot), // Assign proper local slot
+                        modifiers: vec![],
+                    };
+                    
+                    self.symbol_env.variables.insert(var_key, var_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added local variable '{}' with slot {} in method '{}::{}'", 
+                             variable.name, next_local_slot, class_name, method_name);
+                    
+                    next_local_slot += 1; // Increment for next variable
+                }
+            }
+            Stmt::Block(block) => {
+                // Recursively process statements in blocks
+                for stmt in &block.statements {
+                    next_local_slot = self.process_statement_with_slots(stmt, class_name, method_name, next_local_slot)?;
+                }
+            }
+            Stmt::If(if_stmt) => {
+                // Process then and else branches
+                next_local_slot = self.process_statement_with_slots(&if_stmt.then_branch, class_name, method_name, next_local_slot)?;
+                if let Some(ref else_branch) = if_stmt.else_branch {
+                    next_local_slot = self.process_statement_with_slots(else_branch, class_name, method_name, next_local_slot)?;
+                }
+            }
+            Stmt::For(for_stmt) => {
+                // Process for loop initialization statements (may contain variable declarations)
+                for init_stmt in &for_stmt.init {
+                    next_local_slot = self.process_statement_with_slots(init_stmt, class_name, method_name, next_local_slot)?;
+                }
+                // Process the for loop body
+                next_local_slot = self.process_statement_with_slots(&for_stmt.body, class_name, method_name, next_local_slot)?;
+            }
+            Stmt::While(while_stmt) => {
+                // Process while loop body
+                next_local_slot = self.process_statement_with_slots(&while_stmt.body, class_name, method_name, next_local_slot)?;
+            }
+            Stmt::DoWhile(do_while_stmt) => {
+                // Process do-while loop body
+                next_local_slot = self.process_statement_with_slots(&do_while_stmt.body, class_name, method_name, next_local_slot)?;
+            }
+            Stmt::Try(try_stmt) => {
+                // Process try block
+                for stmt in &try_stmt.try_block.statements {
+                    next_local_slot = self.process_statement_with_slots(stmt, class_name, method_name, next_local_slot)?;
+                }
+                // Process catch blocks
+                for catch in &try_stmt.catch_clauses {
+                    // Add catch parameter as a local variable with proper slot
+                    let param_key = format!("method:{}#{}::{}", class_name, method_name, catch.parameter.name);
+                    let param_symbol = VariableSymbol {
+                        name: catch.parameter.name.clone(),
+                        kind: SymbolKind::Variable,
+                        owner: format!("{}:{}", class_name, method_name),
+                        var_type: self.build_full_type_name(&catch.parameter.type_ref),
+                        is_static: false,
+                        is_parameter: false,
+                        local_slot: Some(next_local_slot), // Assign proper slot
+                        modifiers: vec![],
+                    };
+                    
+                    self.symbol_env.variables.insert(param_key, param_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added catch parameter '{}' with slot {} in method '{}::{}'", 
+                             catch.parameter.name, next_local_slot, class_name, method_name);
+                    
+                    next_local_slot += 1;
+                    
+                    // Process catch body
+                    for stmt in &catch.block.statements {
+                        next_local_slot = self.process_statement_with_slots(stmt, class_name, method_name, next_local_slot)?;
+                    }
+                }
+                // Process finally block if it exists
+                if let Some(ref finally_block) = try_stmt.finally_block {
+                    for stmt in &finally_block.statements {
+                        next_local_slot = self.process_statement_with_slots(stmt, class_name, method_name, next_local_slot)?;
+                    }
+                }
+            }
+            _ => {
+                // For other statement types, no local variables are declared
+            }
+        }
+        
+        Ok(next_local_slot)
+    }
+    
+    /// Recursively process individual statements to find variable declarations
+    fn process_statement(&mut self, stmt: &crate::ast::Stmt, class_name: &str, method_name: &str) -> Result<()> {
+        use crate::ast::Stmt;
+        
+        match stmt {
+            Stmt::Declaration(var_decl) => {
+                // Process each variable declarator
+                for declarator in &var_decl.variables {
+                    let var_key = format!("method:{}#{}::{}", class_name, method_name, declarator.name);
+                    let var_symbol = VariableSymbol {
+                        name: declarator.name.clone(),
+                        kind: SymbolKind::Variable,
+                        owner: format!("{}:{}", class_name, method_name),
+                        var_type: var_decl.type_ref.name.clone(), // Use declared type
+                        is_static: false, // Local variables are never static
+                        is_parameter: false, // This is a local variable, not a parameter
+                        local_slot: None, // Will be assigned during code generation
+                        modifiers: vec![], // Local variables don't have modifiers
+                    };
+                    
+                    self.symbol_env.variables.insert(var_key, var_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added local variable symbol '{}' in method '{}::{}'", declarator.name, class_name, method_name);
+                }
+            }
+            Stmt::Block(block) => {
+                // Recursively process statements in blocks
+                self.process_method_body_statements(&block.statements, class_name, method_name)?;
+            }
+            Stmt::If(if_stmt) => {
+                // Process then and else branches
+                self.process_statement(&if_stmt.then_branch, class_name, method_name)?;
+                if let Some(ref else_branch) = if_stmt.else_branch {
+                    self.process_statement(else_branch, class_name, method_name)?;
+                }
+            }
+            Stmt::For(for_stmt) => {
+                // Process for loop initialization statements (may contain variable declarations)
+                for init_stmt in &for_stmt.init {
+                    self.process_statement(init_stmt, class_name, method_name)?;
+                }
+                // Process the for loop body
+                self.process_statement(&for_stmt.body, class_name, method_name)?;
+            }
+            Stmt::While(while_stmt) => {
+                // Process while loop body
+                self.process_statement(&while_stmt.body, class_name, method_name)?;
+            }
+            Stmt::DoWhile(do_while_stmt) => {
+                // Process do-while loop body
+                self.process_statement(&do_while_stmt.body, class_name, method_name)?;
+            }
+            Stmt::Try(try_stmt) => {
+                // Process try block
+                self.process_method_body_statements(&try_stmt.try_block.statements, class_name, method_name)?;
+                // Process catch blocks
+                for catch in &try_stmt.catch_clauses {
+                    // Add catch parameter as a local variable
+                    let param_key = format!("method:{}#{}::{}", class_name, method_name, catch.parameter.name);
+                    let param_symbol = VariableSymbol {
+                        name: catch.parameter.name.clone(),
+                        kind: SymbolKind::Variable,
+                        owner: format!("{}:{}", class_name, method_name),
+                        var_type: self.build_full_type_name(&catch.parameter.type_ref),
+                        is_static: false,
+                        is_parameter: false, // It's more like a local variable
+                        local_slot: None,
+                        modifiers: vec![],
+                    };
+                    
+                    self.symbol_env.variables.insert(param_key, param_symbol);
+                    eprintln!("📝 ENHANCED_ENTER: Added catch parameter symbol '{}' in method '{}::{}'", catch.parameter.name, class_name, method_name);
+                    
+                    // Process catch body
+                    self.process_method_body_statements(&catch.block.statements, class_name, method_name)?;
+                }
+                // Process finally block
+                if let Some(ref finally_block) = try_stmt.finally_block {
+                    self.process_method_body_statements(&finally_block.statements, class_name, method_name)?;
+                }
+            }
+            Stmt::EnhancedFor(enhanced_for_stmt) => {
+                // Add enhanced for loop variable
+                let var_key = format!("method:{}#{}::{}", class_name, method_name, enhanced_for_stmt.variable_name);
+                let var_symbol = VariableSymbol {
+                    name: enhanced_for_stmt.variable_name.clone(),
+                    kind: SymbolKind::Variable,
+                    owner: format!("{}:{}", class_name, method_name),
+                    var_type: enhanced_for_stmt.variable_type.name.clone(),
+                    is_static: false,
+                    is_parameter: false,
+                    local_slot: None,
+                    modifiers: vec![],
+                };
+                
+                self.symbol_env.variables.insert(var_key, var_symbol);
+                eprintln!("📝 ENHANCED_ENTER: Added foreach variable symbol '{}' in method '{}::{}'", enhanced_for_stmt.variable_name, class_name, method_name);
+                
+                // Process foreach body
+                self.process_statement(&enhanced_for_stmt.body, class_name, method_name)?;
+            }
+            _ => {
+                // Other statement types (Expression, Return, Break, Continue, etc.) 
+                // don't introduce new variables, so we don't need to process them
+            }
+        }
+        
+        Ok(())
+    }
 }
 
-impl Default for Enter {
-    fn default() -> Self {
-        Self::new()
+/// Check if a type name is a primitive type
+fn is_primitive_type(type_name: &str) -> bool {
+    matches!(type_name, "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{ImportDecl, Span, Modifier};
+    use tempfile::TempDir;
+    use std::fs;
+    
+    #[test]
+    fn test_enhanced_enter_integration() {
+        // Create test classpath
+        let temp_dir = TempDir::new().unwrap();
+        let java_util = temp_dir.path().join("java/util");
+        fs::create_dir_all(&java_util).unwrap();
+        fs::write(java_util.join("List.java"), "package java.util; public interface List<T> {}").unwrap();
+        
+        let mut enhanced_enter = EnhancedEnter::new(&temp_dir.path().to_string_lossy());
+        
+        // Create test AST with unresolved type references
+        let ast = Ast {
+            package_decl: None,
+            imports: vec![
+                ImportDecl {
+                    name: "java.util.List".to_string(),
+                    is_static: false,
+                    is_wildcard: false,
+                    span: Span::default(),
+                }
+            ],
+            type_decls: vec![
+                TypeDecl::Class(ClassDecl {
+                    modifiers: vec![],
+                    annotations: vec![],
+                    name: "TestClass".to_string(),
+                    type_params: vec![],
+                    extends: None,
+                    implements: vec![],
+                    body: vec![
+                        ClassMember::Field(FieldDecl {
+                            modifiers: vec![],
+                            annotations: vec![],
+                            type_ref: TypeRef {
+                                name: "List".to_string(), // Unresolved
+                                type_args: vec![],
+                                annotations: vec![],
+                                array_dims: 0,
+                                span: Span::default(),
+                            },
+                            name: "list".to_string(),
+                            initializer: None,
+                            span: Span::default(),
+                        })
+                    ],
+                    span: Span::default(),
+                })
+            ],
+            span: Span::default(),
+        };
+        
+        let processed_ast = enhanced_enter.process(ast).unwrap();
+        
+        // Verify type resolution
+        if let TypeDecl::Class(ref class_decl) = processed_ast.type_decls[0] {
+            // The List field type should now be resolved to java.util.List
+            if let ClassMember::Field(ref field_decl) = class_decl.body[0] {
+                assert_eq!(field_decl.type_ref.name, "java.util.List");
+            }
+        }
+        
+        // Verify symbol table
+        let symbol_env = enhanced_enter.get_symbol_environment();
+        assert!(symbol_env.fields.contains_key("class:TestClass::list"));
     }
 }
