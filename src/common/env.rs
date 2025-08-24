@@ -5,6 +5,8 @@
 //! their relationships across the compilation process.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use crate::common::manager::ClasspathManager;
 
 /// Symbol kinds matching JavaC's Kinds.java
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +78,7 @@ pub struct ClassSymbol {
 }
 
 /// Global symbol environment containing all symbols
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SymbolEnvironment {
     /// Map from class name to ClassSymbol
     pub classes: HashMap<String, ClassSymbol>,
@@ -102,6 +104,28 @@ pub struct SymbolEnvironment {
     pub fields: HashMap<String, VariableSymbol>,
     /// Generic instantiation cache (T -> String, T -> Integer, etc.)
     pub instantiation_cache: HashMap<String, Vec<String>>,
+    /// Shared ClasspathManager for centralized classpath management
+    /// This replaces multiple independent ClasspathManager instances across the compilation process
+    pub classpath_manager: Option<Arc<Mutex<ClasspathManager>>>,
+}
+
+impl std::fmt::Debug for SymbolEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolEnvironment")
+            .field("classes", &self.classes)
+            .field("imports", &self.imports)
+            .field("wildcard_imports", &self.wildcard_imports)
+            .field("static_imports", &self.static_imports)
+            .field("static_wildcard_imports", &self.static_wildcard_imports)
+            .field("current_package", &self.current_package)
+            .field("type_parameters", &self.type_parameters)
+            .field("methods", &self.methods)
+            .field("variables", &self.variables)
+            .field("fields", &self.fields)
+            .field("instantiation_cache", &self.instantiation_cache)
+            .field("classpath_manager", &"<ClasspathManager>") // Don't try to debug the ClasspathManager
+            .finish()
+    }
 }
 
 impl Default for SymbolEnvironment {
@@ -118,11 +142,57 @@ impl Default for SymbolEnvironment {
             variables: HashMap::new(),
             fields: HashMap::new(),
             instantiation_cache: HashMap::new(),
+            classpath_manager: None,
         }
     }
 }
 
 impl SymbolEnvironment {
+    /// Create SymbolEnvironment with shared ClasspathManager
+    /// This ensures all type resolution operations use the same classpath instance
+    pub fn with_classpath(classpath: &str) -> Self {
+        let manager = Arc::new(Mutex::new(ClasspathManager::new(classpath)));
+        
+        Self {
+            classes: HashMap::new(),
+            imports: HashMap::new(),
+            wildcard_imports: Vec::new(),
+            static_imports: HashMap::new(),
+            static_wildcard_imports: Vec::new(),
+            current_package: None,
+            type_parameters: HashMap::new(),
+            methods: HashMap::new(),
+            variables: HashMap::new(),
+            fields: HashMap::new(),
+            instantiation_cache: HashMap::new(),
+            classpath_manager: Some(manager),
+        }
+    }
+    
+    /// Get reference to the shared ClasspathManager
+    /// Returns None if no ClasspathManager was configured
+    pub fn get_classpath_manager(&self) -> Option<Arc<Mutex<ClasspathManager>>> {
+        self.classpath_manager.clone()
+    }
+    
+    /// Create a new SymbolEnvironment with an existing ClasspathManager
+    /// Useful for sharing the same manager across multiple compilation units
+    pub fn with_shared_classpath_manager(manager: Arc<Mutex<ClasspathManager>>) -> Self {
+        Self {
+            classes: HashMap::new(),
+            imports: HashMap::new(),
+            wildcard_imports: Vec::new(),
+            static_imports: HashMap::new(),
+            static_wildcard_imports: Vec::new(),
+            current_package: None,
+            type_parameters: HashMap::new(),
+            methods: HashMap::new(),
+            variables: HashMap::new(),
+            fields: HashMap::new(),
+            instantiation_cache: HashMap::new(),
+            classpath_manager: Some(manager),
+        }
+    }
     /// Resolve simple type name to fully qualified name
     /// Follows Java name resolution rules: single import -> current package -> wildcard import -> java.lang
     pub fn resolve_type(&self, simple_name: &str) -> Option<String> {

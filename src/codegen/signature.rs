@@ -42,10 +42,12 @@ impl TypeNameResolver {
         
         // Add common Java types - these would normally come from classpath scanning
         resolver.add_type_mapping("AbstractCollection", "java.util.AbstractCollection");
+        resolver.add_type_mapping("AbstractList", "java.util.AbstractList");
         resolver.add_type_mapping("AbstractSet", "java.util.AbstractSet");
         resolver.add_type_mapping("Set", "java.util.Set");
         resolver.add_type_mapping("Collection", "java.util.Collection");
         resolver.add_type_mapping("List", "java.util.List");
+        resolver.add_type_mapping("ListIterator", "java.util.ListIterator");
         resolver.add_type_mapping("Map", "java.util.Map");
         resolver.add_type_mapping("Iterator", "java.util.Iterator");
         resolver.add_type_mapping("Iterable", "java.lang.Iterable");
@@ -222,6 +224,7 @@ pub fn class_to_signature(class: &ClassDecl, package_name: Option<&str>, current
 
 /// Generate a JVM signature string for an interface
 /// Format: <T:Ljava/lang/Object;>Ljava/lang/Object;LInterface1;LInterface2;
+/// Note: Interfaces DO include Ljava/lang/Object; as superclass in signatures (JavaC alignment)
 pub fn interface_to_signature(interface: &InterfaceDecl, package_name: Option<&str>, current_class_name: Option<&str>, type_resolver: &TypeNameResolver) -> String {
     let mut signature = String::new();
     
@@ -234,7 +237,8 @@ pub fn interface_to_signature(interface: &InterfaceDecl, package_name: Option<&s
         signature.push('>');
     }
     
-    // All interfaces implicitly extend java.lang.Object
+    // All interfaces implicitly extend java.lang.Object in their signature 
+    // This is required by JavaC alignment even though interfaces conceptually don't inherit from Object
     signature.push_str("Ljava/lang/Object;");
     
     // Add explicitly extended interfaces
@@ -261,10 +265,8 @@ fn resolve_internal_name_for_signature(raw: &str, package_name: Option<&str>, cu
         _ => {}
     }
     
-    // First try TypeResolver for accurate resolution
-    let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
-    
-    if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(raw) {
+    // First try the provided TypeNameResolver for import resolution
+    if let Some(fully_qualified) = type_resolver.resolve_type_name(raw) {
         return format!("L{};", fully_qualified.replace('.', "/"));
     }
     
@@ -289,7 +291,7 @@ fn resolve_internal_name_for_signature(raw: &str, package_name: Option<&str>, cu
     }
     
     // Try to resolve using the type resolver again
-    if let Some(qualified_name) = type_resolver.resolve_type_name_simple(raw) {
+    if let Some(qualified_name) = type_resolver.resolve_type_name(raw) {
         return format!("L{};", qualified_name.replace('.', "/"));
     }
     

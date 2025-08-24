@@ -27,6 +27,10 @@ enum Commands {
         #[arg(short, long, value_name = "DIR")]
         output: Option<PathBuf>,
         
+        /// Classpath for finding dependencies (overrides TOLC_CLASSPATH env var)
+        #[arg(long, value_name = "PATH")]
+        classpath: Option<String>,
+        
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -70,8 +74,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match &cli.command {
-        Commands::Compile { input, output, verbose, target_version, debug_frames, no_frames } => {
-            compile_file(input, output.as_ref(), *verbose, *target_version, *debug_frames, *no_frames)?;
+        Commands::Compile { input, output, classpath, verbose, target_version, debug_frames, no_frames } => {
+            compile_file_with_classpath(input, output.as_ref(), classpath.as_deref(), *verbose, *target_version, *debug_frames, *no_frames)?;
         }
         Commands::Parse { input, detailed } => {
             parse_file(input, *detailed)?;
@@ -84,7 +88,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target_version: u8, debug_frames: bool, no_frames: bool) -> Result<()> {
+/// Get classpath from command line argument, environment variable, or default
+fn get_effective_classpath(classpath_arg: Option<&str>) -> String {
+    // Priority: 1) Command line arg, 2) Environment variable, 3) Current directory
+    classpath_arg
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("TOLC_CLASSPATH").ok())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn compile_file_with_classpath(input: &PathBuf, output: Option<&PathBuf>, classpath: Option<&str>, verbose: bool, target_version: u8, debug_frames: bool, no_frames: bool) -> Result<()> {
+    let effective_classpath = get_effective_classpath(classpath);
+    
+    if verbose {
+        println!("Compiling {} with classpath: {}", input.display(), effective_classpath);
+    }
+    
+    compile_file_internal(input, output, &effective_classpath, verbose, target_version, debug_frames, no_frames)
+}
+
+fn compile_file_internal(input: &PathBuf, output: Option<&PathBuf>, classpath: &str, verbose: bool, target_version: u8, debug_frames: bool, no_frames: bool) -> Result<()> {
     if verbose {
         println!("Compiling {}...", input.display());
     }
@@ -111,8 +134,9 @@ fn compile_file(input: &PathBuf, output: Option<&PathBuf>, verbose: bool, target
     let input_str = input.to_string_lossy();
     
     if input_str.ends_with(".java") {
-        // Use new Java compilation pipeline
-        tolc::compile_file(&input_str, &output_str, &config)
+        // Use new Java compilation pipeline with custom classpath
+        let mut manager = tolc::common::manager::ClasspathManager::new(classpath);
+        tolc::compile_file_with_manager(&input_str, &output_str, &config, &mut manager)
             .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
     } else if input_str.ends_with(".tol") {
         // Use legacy .tol compilation

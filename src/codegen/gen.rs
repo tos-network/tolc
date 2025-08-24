@@ -3812,6 +3812,9 @@ impl Gen {
             "Map" => "java.util.Map".to_string(),
             "Set" => "java.util.Set".to_string(),
             "Collection" => "java.util.Collection".to_string(),
+            "ListIterator" => "java.util.ListIterator".to_string(),
+            "Iterator" => "java.util.Iterator".to_string(),
+            "AbstractList" => "java.util.AbstractList".to_string(),
             "UnsupportedOperationException" => "java.lang.UnsupportedOperationException".to_string(),
             "NoSuchElementException" => "java.util.NoSuchElementException".to_string(),
             _ => {

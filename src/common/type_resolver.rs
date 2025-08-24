@@ -10,6 +10,7 @@ use crate::common::manager::ClasspathManager;
 use crate::common::import::ImportResolver;
 use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Strongly-typed type resolution result with JVM descriptor support
 #[derive(Debug, Clone, PartialEq)]
@@ -118,11 +119,12 @@ pub struct TypeResolver<'a> {
 /// Owned TypeResolver that manages its own ClasspathManager
 /// Use this for temporary type resolution that doesn't need to share the manager
 pub struct OwnedTypeResolver {
-    manager: ClasspathManager,
+    /// Reference to shared ClasspathManager via SymbolEnvironment
+    /// This replaces the owned manager to enable cache sharing across compilation units
+    symbol_env: Option<Arc<SymbolEnvironment>>,
     builtin_types: BuiltinTypeRegistry,
     resolution_cache: HashMap<String, Option<String>>,
     type_resolution_cache: HashMap<String, TypeResolution>,
-    symbol_env: Option<SymbolEnvironment>,
 }
 
 impl<'a> TypeResolver<'a> {
@@ -420,25 +422,48 @@ impl StandaloneTypeResolver {
 }
 
 impl OwnedTypeResolver {
-    pub fn new(default_classpath: &str) -> Self {
+    /// Create OwnedTypeResolver with shared SymbolEnvironment
+    /// This is the preferred method as it enables shared caching
+    pub fn with_symbol_env(symbol_env: Arc<SymbolEnvironment>) -> Self {
         OwnedTypeResolver {
-            manager: ClasspathManager::new(default_classpath),
+            symbol_env: Some(symbol_env),
             builtin_types: BuiltinTypeRegistry::new(),
             resolution_cache: HashMap::new(),
             type_resolution_cache: HashMap::new(),
-            symbol_env: None,
         }
     }
     
+    /// Legacy constructor for backwards compatibility
+    /// Creates a standalone resolver with its own ClasspathManager (not recommended for new code)
+    pub fn new(default_classpath: &str) -> Self {
+        let symbol_env = Arc::new(SymbolEnvironment::with_classpath(default_classpath));
+        Self::with_symbol_env(symbol_env)
+    }
+    
     /// Simple type name resolution without import context
+    /// Now uses the shared ClasspathManager from SymbolEnvironment
     pub fn resolve_type_name_simple(&mut self, simple_name: &str) -> Option<String> {
         // Check builtin types first
         if let Some(builtin_fqn) = self.builtin_types.get_builtin_reference_type(simple_name) {
             return Some(builtin_fqn);
         }
         
-        // Try classpath manager's common packages
-        self.manager.find_class_by_simple_name(simple_name)
+        // Try classpath manager's common packages via SymbolEnvironment
+        if let Some(ref symbol_env) = self.symbol_env {
+            if let Some(manager_arc) = symbol_env.get_classpath_manager() {
+                if let Ok(mut manager) = manager_arc.lock() {
+                    return manager.find_class_by_simple_name(simple_name);
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// Get reference to the shared ClasspathManager
+    /// Useful for operations that need direct manager access
+    pub fn get_classpath_manager(&self) -> Option<Arc<Mutex<ClasspathManager>>> {
+        self.symbol_env.as_ref().and_then(|env| env.get_classpath_manager())
     }
 }
 

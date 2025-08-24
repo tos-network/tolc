@@ -727,7 +727,7 @@ pub struct SemanticAnalyzer {
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
-            enter: enter::EnhancedEnter::new("tests/java"),
+            enter: enter::EnhancedEnter::new("."),
             attr: attr::Attr::new(),
             flow: flow::Flow::new(),
             trans_types: trans_types::TransTypes::new(),
@@ -735,6 +735,8 @@ impl SemanticAnalyzer {
         }
     }
 
+
+    /// Create SemanticAnalyzer with custom ClasspathManager (legacy compatibility)
     pub fn new_with_manager(manager: &mut crate::common::manager::ClasspathManager) -> Result<Self> {
         let classpath_entries = manager.get_classpath_entries();
         let classpath = if classpath_entries.is_empty() {

@@ -28,13 +28,23 @@ pub mod common;
 
 pub use common::{Config, Result, Error};
 
+/// Get classpath from environment variable TOLC_CLASSPATH or default to current directory
+/// 
+/// This function checks for the TOLC_CLASSPATH environment variable first,
+/// then falls back to "." (current directory) if not set.
+fn get_classpath() -> String {
+    std::env::var("TOLC_CLASSPATH").unwrap_or_else(|_| ".".to_string())
+}
+
 /// Compile Java source to bytecode without writing to files
 /// 
 /// This function compiles Java source code to bytecode and returns the generated
 /// class data as a Vec<u8>. Useful for tests and in-memory compilation.
+/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
 /// Java Source → Parser → AST → Wash Pipeline → Bytecode Generation → Vec<u8>
 pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
-    let mut manager = common::manager::ClasspathManager::new(".");
+    let classpath = get_classpath();
+    let mut manager = common::manager::ClasspathManager::new(&classpath);
     compile_with_manager(source, config, &mut manager)
 }
 
@@ -75,9 +85,11 @@ pub fn compile_with_manager(source: &str, config: &Config, manager: &mut common:
 /// Complete Java compilation pipeline following standard approach
 /// 
 /// This is the main entry point that orchestrates the entire compilation process:
+/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
 /// Java Source → Parser → AST → Wash Pipeline → Code Generation → .class files
 pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<()> {
-    let mut manager = common::manager::ClasspathManager::new(".");
+    let classpath = get_classpath();
+    let mut manager = common::manager::ClasspathManager::new(&classpath);
     compile2file_with_manager(source, output_dir, config, &mut manager)
 }
 
@@ -123,8 +135,10 @@ pub fn compile2file_with_manager(source: &str, output_dir: &str, config: &Config
 }
 
 /// Compile a Java source file to bytecode
+/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
 pub fn compile_file(input_path: &str, output_dir: &str, config: &Config) -> Result<()> {
-    let mut manager = common::manager::ClasspathManager::new(".");
+    let classpath = get_classpath();
+    let mut manager = common::manager::ClasspathManager::new(&classpath);
     compile_file_with_manager(input_path, output_dir, config, &mut manager)
 }
 
@@ -138,8 +152,10 @@ pub fn compile_file_with_manager(input_path: &str, output_dir: &str, config: &Co
 }
 
 /// Compile multiple Java source files
+/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
 pub fn compile_files(input_paths: &[String], output_dir: &str, config: &Config) -> Result<()> {
-    let mut manager = common::manager::ClasspathManager::new(".");
+    let classpath = get_classpath();
+    let mut manager = common::manager::ClasspathManager::new(&classpath);
     compile_files_with_manager(input_paths, output_dir, config, &mut manager)
 }
 

@@ -3561,6 +3561,9 @@ impl Gen {
                     };
                     items.code.state.push(field_type);
                     
+                    // Update max_stack tracking after stack state change
+                    items.code.max_stack = items.code.max_stack.max(items.code.state.stacksize);
+                    
                     Ok(BytecodeItem::Stack { typecode: typecodes::OBJECT })
                 });
             }
@@ -4433,14 +4436,20 @@ impl Gen {
         let class_idx = self.get_pool_mut().add_class(&internal_class_name);
         
         self.with_items(|items| {
+            eprintln!("DEBUG CONSTRUCTOR: Before NEW - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
+            
             // 1. Generate 'new' instruction - allocate object
             items.code.emitop(super::opcodes::NEW);
             items.code.emit2(class_idx);
             items.code.state.push(super::code::Type::Object(internal_class_name.clone()));
             
+            eprintln!("DEBUG CONSTRUCTOR: After NEW - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
+            
             // 2. Duplicate reference for constructor call
             items.code.emitop(super::opcodes::DUP);
             items.code.state.push(super::code::Type::Object(internal_class_name.clone()));
+            
+            eprintln!("DEBUG CONSTRUCTOR: After DUP - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
             
             Ok(())
         })?;
@@ -4451,6 +4460,11 @@ impl Gen {
             let arg_item = self.visit_expr(arg, env)?;
             arg_types.push(self.typecode_to_type_enum(arg_item.typecode()));
         }
+        
+        self.with_items(|items| {
+            eprintln!("DEBUG CONSTRUCTOR: After args - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
+            Ok(())
+        })?;
         
         // 4. Build constructor method descriptor
         let method_descriptor = self.generate_method_descriptor_with_types("<init>", &arg_types);
@@ -4463,9 +4477,14 @@ impl Gen {
             items.code.emitop(super::opcodes::INVOKESPECIAL);
             items.code.emit2(constructor_ref_idx);
             
+            eprintln!("DEBUG CONSTRUCTOR: After INVOKESPECIAL - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
+            
             // Pop constructor arguments and the duplicated reference
             let arg_count = tree.arguments.len() + 1; // +1 for 'this' reference
+            eprintln!("DEBUG CONSTRUCTOR: About to pop {} args", arg_count);
             items.code.state.pop(arg_count as u16);
+            
+            eprintln!("DEBUG CONSTRUCTOR: After pop - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
             
             // The result is the object reference (from the first 'dup')
             Ok(BytecodeItem::Stack { typecode: super::items::typecodes::OBJECT })

@@ -41,7 +41,11 @@ impl State {
     /// Push a value onto the operand stack
     pub fn push(&mut self, t: Type) {
         self.stacksize += t.width();
+        let old_max = self.max_stacksize;
         self.max_stacksize = self.max_stacksize.max(self.stacksize);
+        if self.max_stacksize > old_max {
+            eprintln!("DEBUG STACK: max_stacksize updated: {} -> {} (pushed {:?})", old_max, self.max_stacksize, t);
+        }
         self.stack.push(t);
     }
     
@@ -332,6 +336,11 @@ impl Code {
                 opcodes::RETURN => {
                     // No stack change for void return
                 }
+                // Load instructions that push values onto stack
+                opcodes::ALOAD_0..=opcodes::ALOAD_3 => {
+                    self.state.push(Type::Object("java/lang/Object".to_string()));
+                }
+                // Note: ILOAD instructions are handled automatically by emitop0 method
                 // Note: Method invocation instructions (INVOKEVIRTUAL, etc.) are handled
                 // manually after emitop() with proper signature information
                 _ => {}
@@ -902,16 +911,16 @@ impl Code {
                 self.state.pop(1); // Simplified
             }
             opcodes::GETFIELD => {
-                // objectref -> value
-                self.state.pop(1);
-                self.state.push(Type::Int); // Simplified
+                // Stack updates handled manually in gen_visitor.rs for proper typing
+                // Skip automatic update to avoid double-counting
             }
             opcodes::PUTFIELD => {
                 // objectref, value ->
                 self.state.pop(2); // Simplified
             }
             opcodes::NEW => {
-                self.state.push(Type::Object("object".to_string()));
+                // Stack updates handled manually in gen_visitor.rs for proper typing
+                // Skip automatic update to avoid double-counting
             }
             opcodes::ANEWARRAY => {
                 // count -> arrayref
@@ -1253,9 +1262,8 @@ impl Code {
                 self.state.pop(2);
             }
             opcodes::DUP => {
-                // Duplicate top stack element
-                let top = self.state.stack.last().cloned().unwrap_or(Type::Top);
-                self.state.push(top);
+                // Stack updates handled manually in gen_visitor.rs for proper typing
+                // Skip automatic update to avoid double-counting
             }
             opcodes::DUP_X1 => {
                 // ..., value2, value1 -> ..., value1, value2, value1

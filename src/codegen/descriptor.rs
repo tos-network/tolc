@@ -56,17 +56,45 @@ pub fn type_to_descriptor(ty: &TypeRef) -> String {
             if simple.len() == 1 && simple.chars().next().unwrap().is_ascii_uppercase() {
                 format!("{}Ljava/lang/Object;", desc)
             } else {
-                // Use TypeResolver for dynamic resolution instead of hardcoded classpath
+                // Use TypeResolver for dynamic resolution with fallback mappings
                 let internal = if !simple.contains('/') && !simple.contains('.') {
-                    // Create a temporary TypeResolver for resolution
-                    let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                    // First check common java.util types that aren't in BuiltinTypeRegistry
+                    let common_util_types = [
+                        ("ListIterator", "java.util.ListIterator"),
+                        ("Iterator", "java.util.Iterator"),
+                        ("Collection", "java.util.Collection"),
+                        ("List", "java.util.List"),
+                        ("Set", "java.util.Set"),
+                        ("Map", "java.util.Map"),
+                        ("AbstractList", "java.util.AbstractList"),
+                        ("AbstractSet", "java.util.AbstractSet"),
+                        ("AbstractCollection", "java.util.AbstractCollection"),
+                    ];
                     
-                    if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(simple) {
-                        fully_qualified.replace('.', "/")
-                    } else if JAVA_LANG_SIMPLE_TYPES.contains(&simple) {
-                        format!("java/lang/{}", simple)
+                    // Check if it's a common util type first
+                    let mut found_util = false;
+                    let mut internal_name = String::new();
+                    for (simple_name, qualified_name) in &common_util_types {
+                        if simple == *simple_name {
+                            internal_name = qualified_name.replace('.', "/");
+                            found_util = true;
+                            break;
+                        }
+                    }
+                    
+                    if found_util {
+                        internal_name
                     } else {
-                        simple.replace('.', "/")
+                        // Create a temporary TypeResolver for resolution
+                        let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
+                        
+                        if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(simple) {
+                            fully_qualified.replace('.', "/")
+                        } else if JAVA_LANG_SIMPLE_TYPES.contains(&simple) {
+                            format!("java/lang/{}", simple)
+                        } else {
+                            simple.replace('.', "/")
+                        }
                     }
                 } else {
                     ty.name.replace('.', "/")
