@@ -1142,10 +1142,23 @@ impl Item {
     
     /// Get width on stack (JavaC width equivalent)
     pub fn width(&self) -> u8 {
-        match self.typecode() {
-            typecodes::LONG | typecodes::DOUBLE => 2,
-            typecodes::VOID => 0,
-            _ => 1,
+        match self {
+            Item::Assign { lhs, typecode } => {
+                // JavaC AssignItem.width(): lhs.width() + Code.width(typecode)
+                let type_width = match typecode {
+                    &typecodes::LONG | &typecodes::DOUBLE => 2,
+                    &typecodes::VOID => 0,
+                    _ => 1,
+                };
+                lhs.width() + type_width
+            },
+            _ => {
+                match self.typecode() {
+                    typecodes::LONG | typecodes::DOUBLE => 2,
+                    typecodes::VOID => 0,
+                    _ => 1,
+                }
+            }
         }
     }
     
@@ -1421,6 +1434,12 @@ impl Item {
                 Ok(())
             },
             
+            Item::Assign { .. } => {
+                // JavaC AssignItem inherits base Item.store() which should error
+                // AssignItems are not directly storable - they represent assignment expressions
+                Err(crate::common::error::Error::codegen_error("AssignItem cannot be stored to".to_string()))
+            },
+            
             _ => {
                 Err(crate::common::error::Error::codegen_error(format!("Cannot store to item type: {:?}", self)))
             }
@@ -1472,6 +1491,11 @@ impl Item {
                     }
                 }
                 Ok(self)
+            },
+            
+            Item::Assign { .. } => {
+                // JavaC AssignItem.stash() - throws Assert.error()
+                Err(crate::common::error::Error::codegen_error("AssignItem cannot be stashed".to_string()))
             },
             
             _ => {
@@ -1583,6 +1607,61 @@ impl Item {
             items.code.emit2((value & 0xFFFF) as u16);
         }
         Ok(())
+    }
+    
+    /// Duplicate item on stack (JavaC duplicate() equivalent)
+    pub fn duplicate(self, items: &mut Items) -> Result<()> {
+        match &self {
+            Item::Assign { .. } => {
+                // JavaC AssignItem.duplicate(): load().duplicate()
+                let loaded = self.load(items)?;
+                items.duplicate_item(&loaded)
+            },
+            _ => {
+                // For other items, use the standard duplicate
+                items.duplicate_item(&self)
+            }
+        }
+    }
+    
+    /// Drop item from stack (JavaC drop() equivalent) 
+    pub fn drop(self, items: &mut Items) -> Result<()> {
+        match self {
+            Item::Assign { lhs, .. } => {
+                // JavaC AssignItem.drop(): lhs.store()
+                lhs.store(items)
+            },
+            _ => {
+                // For other items, emit pop instruction
+                match self.width() {
+                    2 => items.code.emitop(crate::codegen::opcodes::POP2),
+                    1 => items.code.emitop(crate::codegen::opcodes::POP),
+                    0 => {}, // Void items don't need to be popped
+                    _ => return Err(crate::common::error::Error::codegen_error("Invalid item width for drop".to_string())),
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Item {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Item::Assign { lhs, .. } => {
+                // JavaC AssignItem.toString(): "assign(lhs = " + lhs + ")"
+                write!(f, "assign(lhs = {})", lhs)
+            },
+            Item::Local { reg, .. } => write!(f, "local({})", reg),
+            Item::Member { member_name, class_name, .. } => write!(f, "member({}.{})", class_name, member_name),
+            Item::Static { member_name, class_name, .. } => write!(f, "static({}.{})", class_name, member_name),
+            Item::Indexed { typecode } => write!(f, "indexed({})", typecode),
+            Item::Immediate { value, .. } => write!(f, "immediate({:?})", value),
+            Item::Stack { typecode } => write!(f, "stack({})", typecode),
+            Item::This => write!(f, "this"),
+            Item::Super => write!(f, "super"),
+            Item::Void => write!(f, "void"),
+        }
     }
 }
 
