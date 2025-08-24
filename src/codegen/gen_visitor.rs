@@ -5639,74 +5639,17 @@ impl Gen {
         }
     }
     
-    /// Visit array access expression - JavaC-aligned implementation
+    /// Visit array access expression - JavaC visitIndexed implementation
     pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<BytecodeItem> {
-        // Generate array and index expressions
+        // JavaC pattern: genExpr(tree.indexed, tree.indexed.type).load();
         let _array_item = self.visit_expr(&tree.array, env)?;
+        // JavaC pattern: genExpr(tree.index, syms.intType).load();
         let _index_item = self.visit_expr(&tree.index, env)?;
         
-        // Determine array element type from the array expression
+        // JavaC pattern: result = items.makeIndexedItem(tree.type);
         let element_type = self.infer_array_element_type(&tree.array)?;
         
         self.with_items(|items| {
-            // Generate appropriate array load instruction based on element type
-            match &element_type {
-                TypeEnum::Primitive(primitive_type) => {
-                    match primitive_type {
-                        PrimitiveType::Boolean => {
-                            items.code.emitop(super::opcodes::BALOAD); // boolean arrays use BALOAD
-                        }
-                        PrimitiveType::Byte => {
-                            items.code.emitop(super::opcodes::BALOAD);
-                        }
-                        PrimitiveType::Char => {
-                            items.code.emitop(super::opcodes::CALOAD);
-                        }
-                        PrimitiveType::Short => {
-                            items.code.emitop(super::opcodes::SALOAD);
-                        }
-                        PrimitiveType::Int => {
-                            items.code.emitop(super::opcodes::IALOAD);
-                        }
-                        PrimitiveType::Long => {
-                            items.code.emitop(super::opcodes::LALOAD);
-                        }
-                        PrimitiveType::Float => {
-                            items.code.emitop(super::opcodes::FALOAD);
-                        }
-                        PrimitiveType::Double => {
-                            items.code.emitop(super::opcodes::DALOAD);
-                        }
-                    }
-                }
-                TypeEnum::Reference(_) => {
-                    // Reference types use aaload
-                    items.code.emitop(super::opcodes::AALOAD);
-                }
-                _ => {
-                    // Default to aaload for unknown types
-                    items.code.emitop(super::opcodes::AALOAD);
-                }
-            }
-            
-            // Update stack: pop array ref and index, push element
-            items.code.state.pop(2); // Pop array reference and index
-            match &element_type {
-                TypeEnum::Primitive(PrimitiveType::Long) | TypeEnum::Primitive(PrimitiveType::Double) => {
-                    items.code.state.push(super::code::Type::Long); // 2 slots
-                }
-                TypeEnum::Reference(ref_type) => {
-                    let class_name = match ref_type {
-                        ReferenceType::Class(name) => name.clone(),
-                        _ => "java/lang/Object".to_string(),
-                    };
-                    items.code.state.push(super::code::Type::Object(class_name));
-                }
-                _ => {
-                    items.code.state.push(super::code::Type::Int); // Most primitives are 1 slot
-                }
-            }
-            
             Ok(items.make_indexed_item(&element_type))
         })
     }
