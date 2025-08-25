@@ -6,7 +6,7 @@
 
 use crate::codegen::{
     opcodes,
-    pending_jumps::PendingJumpsManager,
+    javac_jump_optimizer::JavacJumpOptimizer,
 };
 
 /// Stack state tracking for StackMapTable generation (javac State equivalent)
@@ -162,10 +162,8 @@ pub struct Code {
     pub fatcode: bool,
     
     // Jump management (javac equivalent)
-    /// A chain for jumps to be resolved before the next opcode is emitted (legacy)
-    pub pending_jumps: Option<Box<crate::codegen::chain::Chain>>,
-    /// Enhanced jump management
-    pub jump_manager: PendingJumpsManager,
+    /// JavaC-aligned jump chain optimizer - replaces pending_jumps
+    pub javac_jump_optimizer: JavacJumpOptimizer,
     
     // Debug and metadata (javac equivalent)
     /// Switch: emit variable debug info
@@ -211,8 +209,7 @@ impl Code {
             alive: true,
             fixed_pc: false,
             fatcode: false,
-            pending_jumps: None,
-            jump_manager: PendingJumpsManager::new(),
+            javac_jump_optimizer: JavacJumpOptimizer::new(),
             var_debug_info: true,
             line_debug_info: true,
             pending_stat_pos: -1, // NOPOS equivalent
@@ -295,7 +292,7 @@ impl Code {
     /// Emit an opcode (javac emitop)
     pub fn emitop(&mut self, op: u8) {
         // Resolve pending jumps before emitting new instruction
-        if self.pending_jumps.is_some() {
+        if self.javac_jump_optimizer.pending_jumps.is_some() {
             self.resolve_pending();
         }
         
@@ -444,7 +441,7 @@ impl Code {
     
     /// Get current code pointer, resolving pending jumps (javac curCP)
     pub fn cur_cp(&mut self) -> u16 {
-        if self.pending_jumps.is_some() {
+        if self.javac_jump_optimizer.pending_jumps.is_some() {
             self.resolve_pending();
         }
         self.cp as u16
@@ -466,7 +463,7 @@ impl Code {
     
     /// Check if code generation is currently enabled (javac isAlive)
     pub fn is_alive(&self) -> bool {
-        self.alive || self.pending_jumps.is_some()
+        self.alive || self.javac_jump_optimizer.pending_jumps.is_some()
     }
 
     /// Declare an entry point with initial state (javac entryPoint(State))
@@ -1092,8 +1089,11 @@ impl Code {
     
     /// Resolve all pending jumps (javac resolvePending)
     fn resolve_pending(&mut self) {
-        // For now, pending jumps use the older system
-        // TODO: Migrate to new Chain system
+        // Use JavaC-aligned jump optimizer to resolve pending jumps to current PC
+        let current_pc = self.cp as u32;
+        if let Err(e) = self.javac_jump_optimizer.resolve_pending(current_pc) {
+            eprintln!("Warning: Failed to resolve pending jumps: {:?}", e);
+        }
     }
     
     /// Adjust alive ranges for local variables when code is compacted

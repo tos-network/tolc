@@ -1,7 +1,15 @@
+//! DEPRECATED: This module has been replaced by javac_jump_optimizer.rs
+//! 
+//! The functionality provided here has been superseded by a complete JavaC-aligned
+//! jump chain optimization system in javac_jump_optimizer.rs. This module remains
+//! for compatibility but should not be used in new code.
+//!
+//! Use crate::codegen::javac_jump_optimizer::JavacJumpOptimizer instead.
+
 use crate::codegen::opcode_enum::Opcode;
 use std::collections::{HashMap, VecDeque};
 
-/// JavaC-style pending jumps optimization
+/// DEPRECATED: Use JavacJumpOptimizer instead - JavaC-style pending jumps optimization
 /// 
 /// This implements the lazy jump resolution mechanism from javac's Code.java
 /// to avoid "jumps to jumps" and optimize control flow.

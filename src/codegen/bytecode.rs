@@ -505,8 +505,8 @@ impl BytecodeBuilder {
         self.stack_state.is_alive() || !self.pending_jumps.is_empty()
     }
     
-    /// Enhanced alive check with pending jumps manager integration
-    pub fn is_alive_with_pending_jumps(&self, pending_jumps_manager: Option<&crate::codegen::pending_jumps::PendingJumpsManager>) -> bool {
+    /// Enhanced alive check with JavaC jump optimizer integration
+    pub fn is_alive_with_javac_optimizer(&self, javac_optimizer: Option<&crate::codegen::javac_jump_optimizer::JavacJumpOptimizer>) -> bool {
         // Basic alive state
         if self.stack_state.is_alive() {
             return true;
@@ -517,9 +517,9 @@ impl BytecodeBuilder {
             return true;
         }
         
-        // Check external pending jumps manager (javac-style)
-        if let Some(manager) = pending_jumps_manager {
-            if manager.has_pending_jumps() {
+        // Check external JavaC jump optimizer
+        if let Some(optimizer) = javac_optimizer {
+            if optimizer.pending_jumps.is_some() {
                 return true;
             }
         }

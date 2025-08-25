@@ -8,7 +8,7 @@ use crate::ast::*;
 use crate::common::error::Result;
 use crate::codegen::{
     instruction_optimizer::{InstructionOptimizer, PeepholeOptimizer},
-    pending_jumps::PendingJumpsManager,
+    javac_jump_optimizer::JavacJumpOptimizer,
     constant_optimizer::{ConstantOptimizer, ConstantInstruction},
     branch_optimizer::{BranchOptimizer, BranchOptimizationContext},
 };
@@ -176,8 +176,8 @@ pub struct OptimizationManager {
     /// Target method size threshold for aggressive optimization
     pub method_size_threshold: u32,
     
-    /// Jump optimization manager for complex jump handling (JavaC pattern)
-    pub jump_manager: PendingJumpsManager,
+    /// JavaC-aligned jump chain optimizer for complex jump handling
+    pub javac_jump_optimizer: JavacJumpOptimizer,
     
     /// Branch optimization manager (JavaC pattern)
     pub branch_optimizer: BranchOptimizer,
@@ -195,7 +195,7 @@ impl OptimizationManager {
             max_global_iterations: 3,
             parallel_execution: false,
             method_size_threshold: 1000,
-            jump_manager: PendingJumpsManager::new(),
+            javac_jump_optimizer: JavacJumpOptimizer::new(),
             branch_optimizer: BranchOptimizer::new(),
         };
         
@@ -833,24 +833,20 @@ impl OptimizationManager {
         self.enabled_optimizations.contains(&optimization)
     }
     
-    /// Get the jump optimization manager for complex jump handling
-    pub fn get_jump_manager(&mut self) -> &mut PendingJumpsManager {
-        &mut self.jump_manager
+    /// Get the JavaC-aligned jump optimizer for complex jump handling
+    pub fn get_javac_jump_optimizer(&mut self) -> &mut JavacJumpOptimizer {
+        &mut self.javac_jump_optimizer
     }
     
-    /// Reset the jump manager for a new method (JavaC pattern)
-    pub fn reset_jump_manager(&mut self) {
-        self.jump_manager.reset();
+    /// Reset the jump optimizer for a new method (JavaC pattern)
+    pub fn reset_jump_optimizer(&mut self) {
+        self.javac_jump_optimizer.reset();
     }
     
-    /// Apply jump optimizations and get patch locations (JavaC pattern)
-    pub fn optimize_and_resolve_jumps(&mut self, target_pc: u32) -> Vec<(u32, i32)> {
-        // First apply optimization patterns
-        self.jump_manager.optimize_jump_chains();
-        self.jump_manager.advanced_optimize_chains();
-        
-        // Then resolve all pending jumps
-        self.jump_manager.resolve_all_pending(target_pc)
+    /// Apply jump optimizations and resolve pending jumps (JavaC pattern)
+    pub fn optimize_and_resolve_jumps(&mut self, target_pc: u32) -> Result<()> {
+        // JavaC-style jump resolution - all pending jumps resolved to target
+        self.javac_jump_optimizer.resolve_pending(target_pc)
     }
 }
 

@@ -96,6 +96,7 @@ pub mod pending_jumps; // Needed by JavaC code.rs
 // Backed up: pub mod jsr_ret_optimizer;
 // Backed up: pub mod enhanced_string_optimizer;
 pub mod line_number_optimizer; // JavaC-aligned line number debug optimization
+pub mod javac_jump_optimizer;  // JavaC-aligned jump chain optimization
 pub mod loop_optimizer;
 pub mod method;
 pub mod method_invocation_optimizer;
