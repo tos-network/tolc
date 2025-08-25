@@ -679,7 +679,14 @@ impl EnhancedEnter {
         };
         
         // Account for method parameters (they get slots before local variables)
-        next_local_slot += self.count_method_parameters(class_name, method_name);
+        let param_count = self.count_method_parameters(class_name, method_name);
+        eprintln!("🔍 SLOT_DEBUG: Method '{}', static={}, param_count={}, next_local_slot before params={}", 
+                 method_name, 
+                 self.is_static_method(class_name, method_name),
+                 param_count,
+                 next_local_slot);
+        next_local_slot += param_count;
+        eprintln!("🔍 SLOT_DEBUG: Next local slot after accounting for parameters: {}", next_local_slot);
         
         for stmt in statements {
             next_local_slot = self.process_statement_with_slots(stmt, class_name, method_name, next_local_slot)?;
@@ -690,10 +697,14 @@ impl EnhancedEnter {
     /// Check if a method is static
     fn is_static_method(&self, class_name: &str, method_name: &str) -> bool {
         // Look up method in symbol table and check if it's static
-        let method_key = format!("method:{}#{}", class_name, method_name);
+        // FIXED: Use same key format as when storing methods (ClassName:methodName)
+        let method_key = format!("{}:{}", class_name, method_name);
+        eprintln!("🔍 STATIC_CHECK: Looking for method key '{}'", method_key);
         if let Some(method_symbol) = self.symbol_env.methods.get(&method_key) {
+            eprintln!("🔍 STATIC_CHECK: Found method '{}', is_static={}", method_name, method_symbol.is_static);
             method_symbol.is_static
         } else {
+            eprintln!("🔍 STATIC_CHECK: Method '{}' not found in symbol table, defaulting to instance method", method_name);
             false // Default to instance method
         }
     }

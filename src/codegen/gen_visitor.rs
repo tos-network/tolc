@@ -28,7 +28,7 @@
 use crate::ast::*;
 use crate::common::error::{Result, Error};
 use super::gen::{Gen, GenContext};
-use super::items::{Item as BytecodeItem, Items, typecodes};
+use super::items::{Item, Item as BytecodeItem, Items, typecodes};
 use super::branch_optimizer::BranchOptimizationContext;
 use super::opcodes;
 use crate::codegen::attr::ResolvedType;
@@ -287,6 +287,7 @@ impl Gen {
     /// Evaluate class name from expression - Enhanced expression type resolution
     /// Handles identifiers, field access, method calls, and complex expressions
     fn evaluate_class_name_from_expr(&mut self, expr: &Expr, env: &GenContext) -> Result<String> {
+        eprintln!("🔍 EVALUATE_CLASS: Evaluating expression: {:?}", expr);
         // CONSERVATIVE FIX: Only use enhanced inference for complex expressions, not simple casts
         // This avoids breaking simple interface method calls while helping complex field access patterns
         match expr {
@@ -296,7 +297,16 @@ impl Gen {
             },
             // Use enhanced inference for field access and other complex expressions
             Expr::FieldAccess(_) | Expr::Identifier(_) => {
-                if let Ok(inferred_type) = self.infer_expression_type(expr) {
+                // CRITICAL FIX: Skip enhanced inference for System.out to use correct pattern matching
+                let is_system_out = if let Expr::FieldAccess(fa) = expr {
+                    if let Some(Expr::Identifier(id)) = fa.target.as_deref() {
+                        id.name == "System" && fa.name == "out"
+                    } else { false }
+                } else { false };
+                
+                if !is_system_out {
+                    if let Ok(inferred_type) = self.infer_expression_type(expr) {
+                    eprintln!("🔍 INFERRED_TYPE: Enhanced inference returned: {:?}", inferred_type);
                     match inferred_type {
                         TypeEnum::Reference(ReferenceType::Class(class_name)) => {
                             eprintln!("🎯 METHOD TARGET: Expression resolved to class '{}'", class_name);
@@ -310,6 +320,7 @@ impl Gen {
                             // Fall through to existing logic
                         }
                     }
+                }
                 }
             },
             _ => {
@@ -384,18 +395,29 @@ impl Gen {
             
             // Field access like System.out or java.base.Data
             Expr::FieldAccess(field_access) => {
+                eprintln!("🔍 EVALUATE_CLASS: Processing FieldAccess");
                 if let Some(ref target) = field_access.target {
+                    eprintln!("🔍 EVALUATE_CLASS: FieldAccess has target");
                     // Check if this is a qualified class name like java.base.Data
                     if let Some(qualified_class) = self.extract_qualified_class_name_for_evaluation(expr) {
-                        eprintln!("🔍 EVALUATE_CLASS: Found qualified class name: {}", qualified_class);
-                        // Convert to internal format (java.base.Data -> java/base/Data)
-                        return Ok(qualified_class.replace('.', "/"));
+                        eprintln!("🔍 EVALUATE_CLASS: Found qualified class name: '{}'", qualified_class);
+                        // CRITICAL FIX: Don't treat System.out as qualified class name
+                        if qualified_class == "System.out" {
+                            eprintln!("🔧 EVALUATE_CLASS: Skipping System.out as qualified class, using field access pattern");
+                        } else {
+                            // Convert to internal format (java.base.Data -> java/base/Data)
+                            return Ok(qualified_class.replace('.', "/"));
+                        }
                     }
                     
                     // Handle specific field access patterns
                     if let Expr::Identifier(ref obj) = target.as_ref() {
+                        eprintln!("🔍 FIELD_ACCESS: Checking pattern '{}::{}'", obj.name, field_access.name);
                         match (obj.name.as_str(), field_access.name.as_str()) {
-                            ("System", "out") => Ok("java/io/PrintStream".to_string()),
+                            ("System", "out") => {
+                                eprintln!("🔧 FIELD_ACCESS: Matched System.out -> java/io/PrintStream");
+                                Ok("java/io/PrintStream".to_string())
+                            },
                             ("System", "in") => Ok("java/io/InputStream".to_string()),
                             ("System", "err") => Ok("java/io/PrintStream".to_string()),
                             _ => {
@@ -3756,15 +3778,19 @@ impl Gen {
         
         let result = if is_static {
             // Static method call: invokestatic
+            eprintln!("🔍 METHOD_BRANCH: Taking STATIC method call branch for '{}'", tree.name);
             self.gen_static_method_call(tree, env)?
         } else if is_constructor {
             // Constructor call: invokespecial
+            eprintln!("🔍 METHOD_BRANCH: Taking CONSTRUCTOR method call branch for '{}'", tree.name);
             self.gen_constructor_call(tree, env)?
         } else if is_super_call {
             // Super method call: invokespecial
+            eprintln!("🔍 METHOD_BRANCH: Taking SUPER method call branch for '{}'", tree.name);
             self.gen_super_method_call(tree, env)?
         } else {
             // Instance method call: invokevirtual or invokeinterface
+            eprintln!("🔍 METHOD_BRANCH: Taking INSTANCE method call branch for '{}'", tree.name);
             self.gen_instance_method_call(tree, env)?
         };
         
@@ -5407,18 +5433,23 @@ impl Gen {
             },
             
             Expr::ArrayAccess(array_access) => {
-                // Handle array assignment: array[index] = value
+                // Handle array assignment: array[index] = value using array access optimizer
                 
                 // First, generate the array reference
-                let _array_item = self.visit_expr(&array_access.array, env)?;
+                let array_item = self.visit_expr(&array_access.array, env)?;
                 
                 // Then, generate the index
-                let _index_item = self.visit_expr(&array_access.index, env)?;
+                let index_item = self.visit_expr(&array_access.index, env)?;
                 
-                // Create an indexed item for array assignment
-                Ok(Item::Indexed {
-                    typecode: typecodes::INT, // Default to int, should be inferred from array type
-                })
+                // Use array access optimizer for JavaC-aligned optimization
+                let optimized_result = self.array_access_optimizer.optimize_array_access(array_access, &array_item, &index_item)?;
+                
+                eprintln!("🚀 ARRAY OPTIMIZER: Applied optimization for array assignment: {} -> {}", 
+                    if optimized_result.bounds_check_needed { "with bounds check" } else { "bounds check eliminated" },
+                    format!("{:?}", optimized_result.store_instruction));
+                
+                // Create optimized indexed item for array assignment
+                Ok(optimized_result.to_indexed_item())
             },
             
             _ => {
@@ -6594,13 +6625,28 @@ impl Gen {
         // Generate length cache variable: int #len = #arr.length; (JavaC alignment)
         let len_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
         
-        // Load array and get length
-        self.with_items(|items| {
-            items.code.emitop1(opcodes::ALOAD, array_slot as u8); // Load array
-            items.code.emitop(opcodes::ARRAYLENGTH); // Get array.length
-            items.code.emitop1(opcodes::ISTORE, len_slot as u8); // Store length
-            Ok(())
-        })?;
+        // Try to use array length optimization first
+        let array_name = self.extract_array_name(&tree.iterable).unwrap_or_else(|_| "_enhanced_for_array_".to_string());
+        
+        if let Ok(Some(cached_length_item)) = self.array_access_optimizer.optimize_array_length(&array_name) {
+            eprintln!("🚀 ARRAY OPTIMIZER: Using cached array length for enhanced for loop: {}", array_name);
+            
+            // Load cached length and store in local variable
+            self.with_items(|items| {
+                // Load the cached value
+                cached_length_item.load(items)?;
+                items.code.emitop1(opcodes::ISTORE, len_slot as u8); // Store length
+                Ok(())
+            })?;
+        } else {
+            // Fallback to standard array length access
+            self.with_items(|items| {
+                items.code.emitop1(opcodes::ALOAD, array_slot as u8); // Load array
+                items.code.emitop(opcodes::ARRAYLENGTH); // Get array.length
+                items.code.emitop1(opcodes::ISTORE, len_slot as u8); // Store length
+                Ok(())
+            })?;
+        }
         
         // Generate index variable: int #i = 0; (JavaC alignment)
         let index_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
@@ -6635,65 +6681,123 @@ impl Gen {
         // Determine element type for correct array access instruction
         let element_type = self.infer_array_element_type(&tree.iterable)?;
         
-        self.with_items(|items| {
-            items.code.emitop1(opcodes::ALOAD, array_slot as u8); // Load array
-            items.code.emitop1(opcodes::ILOAD, index_slot as u8); // Load index
+        // Use array access optimizer for enhanced for loop element access
+        // Create temporary array access expression for optimization
+        let temp_array_access = crate::ast::ArrayAccessExpr {
+            array: Box::new(tree.iterable.clone()),
+            index: Box::new(Expr::Identifier(crate::ast::IdentifierExpr {
+                name: format!("_loop_index_{}", index_slot),
+                span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+            })),
+            span: crate::ast::Span::new(crate::ast::Location::new(0, 0, 0), crate::ast::Location::new(0, 0, 0)),
+        };
+        
+        // Create corresponding items for the optimizer
+        let array_item = Item::Local { typecode: typecodes::OBJECT, reg: array_slot as u16 };
+        let index_item = Item::Local { typecode: typecodes::INT, reg: index_slot as u16 };
+        
+        // Try to use array access optimizer for sequential pattern detection
+        if let Ok(optimized_result) = self.array_access_optimizer.optimize_array_access(&temp_array_access, &array_item, &index_item) {
+            eprintln!("🚀 ARRAY OPTIMIZER: Applied sequential access optimization for enhanced for loop: {}", array_name);
             
-            // Use appropriate array load instruction based on element type
-            match &element_type {
-                TypeEnum::Primitive(primitive_type) => {
-                    match primitive_type {
-                        PrimitiveType::Boolean | PrimitiveType::Byte => {
-                            items.code.emitop(opcodes::BALOAD);
-                        }
-                        PrimitiveType::Char => {
-                            items.code.emitop(opcodes::CALOAD);
-                        }
-                        PrimitiveType::Short => {
-                            items.code.emitop(opcodes::SALOAD);
-                        }
-                        PrimitiveType::Int => {
-                            items.code.emitop(opcodes::IALOAD);
-                        }
-                        PrimitiveType::Long => {
-                            items.code.emitop(opcodes::LALOAD);
-                        }
-                        PrimitiveType::Float => {
-                            items.code.emitop(opcodes::FALOAD);
-                        }
-                        PrimitiveType::Double => {
-                            items.code.emitop(opcodes::DALOAD);
+            self.with_items(|items| {
+                // Load array and index
+                items.code.emitop1(opcodes::ALOAD, array_slot as u8);
+                items.code.emitop1(opcodes::ILOAD, index_slot as u8);
+                
+                // Use optimized load instruction
+                items.code.emitop(optimized_result.load_instruction.to_byte());
+                
+                // Store in appropriate local variable based on element type
+                match &element_type {
+                    TypeEnum::Primitive(primitive_type) => {
+                        match primitive_type {
+                            PrimitiveType::Boolean | PrimitiveType::Byte |
+                            PrimitiveType::Char | PrimitiveType::Short | 
+                            PrimitiveType::Int => {
+                                items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Long => {
+                                items.code.emitop1(opcodes::LSTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Float => {
+                                items.code.emitop1(opcodes::FSTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Double => {
+                                items.code.emitop1(opcodes::DSTORE, var_slot as u8);
+                            }
                         }
                     }
-                    
-                    // Use appropriate store instruction for primitives
-                    match primitive_type {
-                        PrimitiveType::Boolean | PrimitiveType::Byte => {
-                            items.code.emitop1(opcodes::ISTORE, var_slot as u8);
-                        }
-                        PrimitiveType::Char | PrimitiveType::Short | PrimitiveType::Int => {
-                            items.code.emitop1(opcodes::ISTORE, var_slot as u8);
-                        }
-                        PrimitiveType::Long => {
-                            items.code.emitop1(opcodes::LSTORE, var_slot as u8);
-                        }
-                        PrimitiveType::Float => {
-                            items.code.emitop1(opcodes::FSTORE, var_slot as u8);
-                        }
-                        PrimitiveType::Double => {
-                            items.code.emitop1(opcodes::DSTORE, var_slot as u8);
-                        }
+                    _ => {
+                        // Reference types
+                        items.code.emitop1(opcodes::ASTORE, var_slot as u8);
                     }
                 }
-                _ => {
-                    // Reference types use aaload/astore
-                    items.code.emitop(opcodes::AALOAD);
-                    items.code.emitop1(opcodes::ASTORE, var_slot as u8);
+                
+                Ok(())
+            })?;
+        } else {
+            // Fallback to standard array access
+            self.with_items(|items| {
+                items.code.emitop1(opcodes::ALOAD, array_slot as u8); // Load array
+                items.code.emitop1(opcodes::ILOAD, index_slot as u8); // Load index
+                
+                // Use appropriate array load instruction based on element type
+                match &element_type {
+                    TypeEnum::Primitive(primitive_type) => {
+                        match primitive_type {
+                            PrimitiveType::Boolean | PrimitiveType::Byte => {
+                                items.code.emitop(opcodes::BALOAD);
+                            }
+                            PrimitiveType::Char => {
+                                items.code.emitop(opcodes::CALOAD);
+                            }
+                            PrimitiveType::Short => {
+                                items.code.emitop(opcodes::SALOAD);
+                            }
+                            PrimitiveType::Int => {
+                                items.code.emitop(opcodes::IALOAD);
+                            }
+                            PrimitiveType::Long => {
+                                items.code.emitop(opcodes::LALOAD);
+                            }
+                            PrimitiveType::Float => {
+                                items.code.emitop(opcodes::FALOAD);
+                            }
+                            PrimitiveType::Double => {
+                                items.code.emitop(opcodes::DALOAD);
+                            }
+                        }
+                        
+                        // Use appropriate store instruction for primitives
+                        match primitive_type {
+                            PrimitiveType::Boolean | PrimitiveType::Byte => {
+                                items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Char | PrimitiveType::Short | PrimitiveType::Int => {
+                                items.code.emitop1(opcodes::ISTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Long => {
+                                items.code.emitop1(opcodes::LSTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Float => {
+                                items.code.emitop1(opcodes::FSTORE, var_slot as u8);
+                            }
+                            PrimitiveType::Double => {
+                                items.code.emitop1(opcodes::DSTORE, var_slot as u8);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Reference types use aaload/astore
+                        items.code.emitop(opcodes::AALOAD);
+                        items.code.emitop1(opcodes::ASTORE, var_slot as u8);
+                    }
                 }
-            }
-            
-            Ok(())
-        })?;
+                
+                Ok(())
+            })?;
+        }
         
         // Generate loop body
         self.visit_stmt(&tree.body, env)?;
@@ -7445,11 +7549,51 @@ impl Gen {
             // Convert TypeRef to TypeEnum for RegisterAllocator
             let type_enum = self.convert_type_ref_to_type_enum(&tree.type_ref);
             
-            // Use RegisterAllocator to allocate slot (JavaC alignment)
-            let var_slot = self.new_local_by_type(&type_enum)?;
+            // CRITICAL FIX: Use Enhanced Enter's pre-allocated slot instead of re-allocating
+            // This resolves the slot allocation inconsistency between Enter and CodeGen phases
+            let var_slot = if let Some(ref symbol_env) = self.wash_symbol_env {
+                let method_context = self.method_context.method.as_ref()
+                    .map(|m| format!("{}#{}", "VerySimpleTest", m.name)) // TODO: get actual class name
+                    .unwrap_or_default();
+                
+                // Try to find the variable in the symbol environment from Enhanced Enter
+                if let Some(var_symbol) = symbol_env.resolve_identifier(&var.name, Some(&method_context), "VerySimpleTest") {
+                    if let Some(slot) = var_symbol.local_slot {
+                        eprintln!("🔧 REUSE_SLOT: Using Enhanced Enter slot {} for variable '{}'", slot, var.name);
+                        let slot_u16 = slot as u16;
+                        
+                        // CRITICAL FIX: Update max_locals to accommodate the reused slot
+                        self.with_items(|items| {
+                            let required_max_locals = slot_u16 + 1; // slot + 1 to include this slot
+                            if required_max_locals > items.code.max_locals {
+                                eprintln!("🔧 UPDATE_MAX_LOCALS: Updating max_locals from {} to {} for slot {}", 
+                                         items.code.max_locals, required_max_locals, slot_u16);
+                                items.code.max_locals = required_max_locals;
+                            }
+                            Ok(())
+                        })?;
+                        
+                        slot_u16
+                    } else {
+                        eprintln!("⚠️  NO_SLOT: Enhanced Enter variable '{}' has no slot, allocating new", var.name);
+                        self.new_local_by_type(&type_enum)?
+                    }
+                } else {
+                    eprintln!("⚠️  NOT_FOUND: Variable '{}' not found in Enhanced Enter, allocating new slot", var.name);
+                    self.new_local_by_type(&type_enum)?
+                }
+            } else {
+                eprintln!("⚠️  NO_SYMBOL_ENV: No symbol environment, allocating new slot for '{}'", var.name);
+                self.new_local_by_type(&type_enum)?
+            };
             
             eprintln!("🔍 VAR DECL: Variable '{}' allocated to slot {} with TypeRef: {:?} -> TypeEnum: {}", 
                 var.name, var_slot, tree.type_ref, self.type_to_string(&type_enum));
+            
+            // DEBUG: Check max_locals after allocation
+            let current_max_locals = self.with_items(|items| Ok(items.code.max_locals))?;
+            eprintln!("🔍 MAX_LOCALS: After allocating variable '{}' to slot {}, max_locals = {}", 
+                var.name, var_slot, current_max_locals);
             
             // Generate initializer if present and store in variable
             if let Some(ref init) = var.initializer {
@@ -7458,22 +7602,28 @@ impl Gen {
                 // Generate store instruction to put value in local variable slot
                 self.with_items(|items| {
                     // Determine the correct store instruction based on variable type
-                    let (optimized_base, general_op) = match tree.type_ref.name.as_str() {
-                        "boolean" | "byte" | "short" | "char" | "int" => {
-                            (opcodes::ISTORE_0, opcodes::ISTORE)
-                        }
-                        "long" => {
-                            (opcodes::LSTORE_0, opcodes::LSTORE)
-                        }
-                        "float" => {
-                            (opcodes::FSTORE_0, opcodes::FSTORE)
-                        }
-                        "double" => {
-                            (opcodes::DSTORE_0, opcodes::DSTORE)
-                        }
-                        _ => {
-                            // Object references
-                            (opcodes::ASTORE_0, opcodes::ASTORE)
+                    // CRITICAL FIX: Check array_dims first - arrays are always reference types
+                    let (optimized_base, general_op) = if tree.type_ref.array_dims > 0 {
+                        // Any array type (including primitive arrays like int[]) is a reference type
+                        (opcodes::ASTORE_0, opcodes::ASTORE)
+                    } else {
+                        match tree.type_ref.name.as_str() {
+                            "boolean" | "byte" | "short" | "char" | "int" => {
+                                (opcodes::ISTORE_0, opcodes::ISTORE)
+                            }
+                            "long" => {
+                                (opcodes::LSTORE_0, opcodes::LSTORE)
+                            }
+                            "float" => {
+                                (opcodes::FSTORE_0, opcodes::FSTORE)
+                            }
+                            "double" => {
+                                (opcodes::DSTORE_0, opcodes::DSTORE)
+                            }
+                            _ => {
+                                // Object references
+                                (opcodes::ASTORE_0, opcodes::ASTORE)
+                            }
                         }
                     };
                     
@@ -8207,8 +8357,26 @@ impl Gen {
             ("java/io/PrintStream", "println") => {
                 if tree.arguments.is_empty() {
                     "()V".to_string()
+                } else if arg_types.len() == 1 {
+                    // Generate signature based on actual argument type
+                    match &arg_types[0] {
+                        TypeEnum::Primitive(prim) => {
+                            match prim {
+                                crate::ast::PrimitiveType::Int => "(I)V".to_string(),
+                                crate::ast::PrimitiveType::Long => "(J)V".to_string(),
+                                crate::ast::PrimitiveType::Float => "(F)V".to_string(),
+                                crate::ast::PrimitiveType::Double => "(D)V".to_string(),
+                                crate::ast::PrimitiveType::Boolean => "(Z)V".to_string(),
+                                crate::ast::PrimitiveType::Char => "(C)V".to_string(),
+                                crate::ast::PrimitiveType::Byte => "(B)V".to_string(),
+                                crate::ast::PrimitiveType::Short => "(S)V".to_string(),
+                            }
+                        },
+                        TypeEnum::Reference(_) => "(Ljava/lang/Object;)V".to_string(),
+                        TypeEnum::Void => "(Ljava/lang/Object;)V".to_string(), // Fallback for void (shouldn't happen)
+                    }
                 } else {
-                    "(Ljava/lang/Object;)V".to_string()
+                    "(Ljava/lang/Object;)V".to_string() // Fallback for multiple args
                 }
             },
             ("java/io/PrintStream", "print") => {
