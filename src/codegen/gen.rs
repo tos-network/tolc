@@ -132,6 +132,9 @@ pub struct Gen {
     
     /// Type cast optimizer for efficient type conversion (JavaC alignment)
     pub type_cast_optimizer: crate::codegen::type_cast_optimizer::TypeCastOptimizer,
+    
+    /// Array access optimizer for efficient array operations (JavaC alignment)
+    pub array_access_optimizer: crate::codegen::array_access_optimizer::ArrayAccessOptimizer,
 }
 
 
@@ -582,6 +585,7 @@ impl Gen {
             instance_field_initializers: Vec::new(), // Instance field initializers for constructors
             pending_lambda_methods: Vec::new(),      // Pending lambda methods for class file generation
             type_cast_optimizer: TypeCastOptimizer::new(), // Type cast optimizer for efficient conversions
+            array_access_optimizer: crate::codegen::array_access_optimizer::ArrayAccessOptimizer::new(), // Array access optimizer
         }
     }
     

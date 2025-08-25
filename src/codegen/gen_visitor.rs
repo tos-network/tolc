@@ -3556,17 +3556,26 @@ impl Gen {
                 match self.infer_expression_type(target) {
                     Ok(target_type) => {
                         if Self::is_array_type_enum(&target_type) {
-                        
-                        // Evaluate the array expression (loads array reference onto stack)
-                        self.visit_expr(target, env)?;
-                        
-                        // Generate arraylength instruction
-                        self.with_items(|items| {
-                            items.code.emitop(opcodes::ARRAYLENGTH); // JVM arraylength instruction
-                            items.code.state.push(super::code::Type::Int); // Push int result onto type stack
-                            Ok(())
-                        })?;
-                        
+                            // Try to get array identifier for optimization
+                            let array_name = self.extract_array_name(target).unwrap_or_else(|_| "_unknown_".to_string());
+                            
+                            // Try array length optimization first
+                            if let Ok(Some(cached_item)) = self.array_access_optimizer.optimize_array_length(&array_name) {
+                                eprintln!("🚀 ARRAY OPTIMIZER: Using cached array length for {}", array_name);
+                                return Ok(cached_item);
+                            }
+                            
+                            // Fallback to standard arraylength instruction
+                            // Evaluate the array expression (loads array reference onto stack)
+                            self.visit_expr(target, env)?;
+                            
+                            // Generate arraylength instruction
+                            self.with_items(|items| {
+                                items.code.emitop(opcodes::ARRAYLENGTH); // JVM arraylength instruction
+                                items.code.state.push(super::code::Type::Int); // Push int result onto type stack
+                                Ok(())
+                            })?;
+                            
                             return Ok(BytecodeItem::Stack { typecode: typecodes::INT });
                         }
                     }
@@ -5735,15 +5744,20 @@ impl Gen {
     /// Visit array access expression - JavaC visitIndexed implementation
     pub fn visit_indexed(&mut self, tree: &ArrayAccessExpr, env: &GenContext) -> Result<BytecodeItem> {
         // JavaC pattern: genExpr(tree.indexed, tree.indexed.type).load();
-        let _array_item = self.visit_expr(&tree.array, env)?;
+        let array_item = self.visit_expr(&tree.array, env)?;
         // JavaC pattern: genExpr(tree.index, syms.intType).load();
-        let _index_item = self.visit_expr(&tree.index, env)?;
+        let index_item = self.visit_expr(&tree.index, env)?;
         
-        // JavaC pattern: result = items.makeIndexedItem(tree.type);
-        let element_type = self.infer_array_element_type(&tree.array)?;
+        // Use array access optimizer for JavaC-aligned optimization
+        let optimized_result = self.array_access_optimizer.optimize_array_access(tree, &array_item, &index_item)?;
         
+        eprintln!("🚀 ARRAY OPTIMIZER: Applied optimization for array access: {} -> {}", 
+            if optimized_result.bounds_check_needed { "with bounds check" } else { "bounds check eliminated" },
+            format!("{:?}", optimized_result.load_instruction));
+        
+        // Generate optimized indexed item
         self.with_items(|items| {
-            Ok(items.make_indexed_item(&element_type))
+            Ok(optimized_result.to_indexed_item())
         })
     }
     
@@ -6828,6 +6842,19 @@ impl Gen {
         })?;
         
         Ok(())
+    }
+    
+    /// Extract array name from expression for optimization tracking
+    fn extract_array_name(&self, expr: &Expr) -> Result<String> {
+        match expr {
+            Expr::Identifier(ident) => Ok(ident.name.clone()),
+            Expr::FieldAccess(field) => {
+                Ok(format!("{}.{}", 
+                    self.extract_array_name(field.target.as_ref().ok_or_else(|| crate::common::error::Error::codegen_error("Field access without target".to_string()))?)?,
+                    field.name))
+            },
+            _ => Ok("_complex_expr_".to_string()),
+        }
     }
     
     /// Check if an expression evaluates to an array type - JavaC Lower equivalent
