@@ -6296,10 +6296,18 @@ impl Gen {
     }
     
     /// Generate condition item from expression (JavaC: genCond)
-    fn gen_cond(&mut self, expr: &Expr, env: &GenContext) -> Result<BytecodeItem> {
+    fn gen_cond(&mut self, expr: &Expr, env: &GenContext) -> Result<Item> {
         use crate::ast::Expr;
         
         match expr {
+            // Conditional expressions (ternary operator: condition ? then : else) - JavaC aligned
+            // TODO: Implement full conditional expression support
+            Expr::Conditional(cond_expr) => {
+                // For now, evaluate condition as boolean and use IFNE
+                // This is a simplified implementation - full JavaC alignment coming later
+                self.visit_expr(&cond_expr.condition, env)?;
+                self.with_items(|items| Ok(items.make_cond_item(opcodes::IFNE)))
+            }
             // Binary operations - direct conditional generation
             Expr::Binary(bin_expr) => {
                 use crate::ast::BinaryOp;
@@ -6389,11 +6397,11 @@ impl Gen {
                         
                         // Get false jumps from left operand - if left is false, entire expression is false
                         let false_jumps = match &left_cond {
-                            BytecodeItem::Cond { opcode, false_jumps, .. } => {
-                                let negated_opcode = BytecodeItem::negate_cond_opcode(*opcode);
+                            Item::Cond { opcode, false_jumps, .. } => {
+                                let negated_opcode = Item::negate_cond_opcode(*opcode);
                                 self.with_items(|items| {
                                     let jump_chain = items.code.branch(negated_opcode);
-                                    Ok(BytecodeItem::merge_chains(false_jumps.clone(), jump_chain))
+                                    Ok(Item::merge_chains(false_jumps.clone(), jump_chain))
                                 })?
                             },
                             _ => None,
@@ -6401,7 +6409,7 @@ impl Gen {
                         
                         // If left is true, evaluate right operand
                         match &left_cond {
-                            BytecodeItem::Cond { true_jumps, .. } => {
+                            Item::Cond { true_jumps, .. } => {
                                 if let Some(true_chain) = true_jumps.as_ref() {
                                     self.with_items(|items| {
                                         items.code.resolve(Some(true_chain.clone()));
@@ -6419,20 +6427,13 @@ impl Gen {
                         
                         // Combine conditions: true only if both are true
                         match right_cond {
-                            BytecodeItem::Cond { opcode, true_jumps, false_jumps, tree } => {
-                                Ok(BytecodeItem::Cond {
+                            Item::Cond { opcode, true_jumps, false_jumps: right_false_jumps, tree } => {
+                                Ok(Item::Cond {
                                     opcode,
                                     true_jumps,
                                     false_jumps: {
-                                        // Chain false jumps from left and right
-                                        match (false_jumps.as_ref(), false_jumps.as_ref()) {
-                                            (Some(left_false), Some(right_false)) => {
-                                                BytecodeItem::merge_chains(Some(left_false.clone()), Some(right_false.clone()))
-                                            }
-                                            (Some(left_false), None) => Some(left_false.clone()),
-                                            (None, Some(right_false)) => Some(right_false.clone()),
-                                            (None, None) => None,
-                                        }
+                                        // Chain false jumps from left and right - FIXED: using correct variables
+                                        Item::merge_chains(false_jumps, right_false_jumps)
                                     },
                                     tree,
                                 })
@@ -6448,10 +6449,10 @@ impl Gen {
                         
                         // Get true jumps from left operand - if left is true, entire expression is true
                         let true_jumps = match &left_cond {
-                            BytecodeItem::Cond { opcode, true_jumps, .. } => {
+                            Item::Cond { opcode, true_jumps, .. } => {
                                 self.with_items(|items| {
                                     let jump_chain = items.code.branch(*opcode);
-                                    Ok(BytecodeItem::merge_chains(true_jumps.clone(), jump_chain))
+                                    Ok(Item::merge_chains(true_jumps.clone(), jump_chain))
                                 })?
                             },
                             _ => None,
@@ -6459,7 +6460,7 @@ impl Gen {
                         
                         // If left is false, evaluate right operand
                         match &left_cond {
-                            BytecodeItem::Cond { false_jumps, .. } => {
+                            Item::Cond { false_jumps, .. } => {
                                 if let Some(false_chain) = false_jumps.as_ref() {
                                     self.with_items(|items| {
                                         items.code.resolve(Some(false_chain.clone()));
@@ -6477,19 +6478,12 @@ impl Gen {
                         
                         // Combine conditions: false only if both are false
                         match right_cond {
-                            BytecodeItem::Cond { opcode, true_jumps: right_true_jumps, false_jumps, tree } => {
-                                Ok(BytecodeItem::Cond {
+                            Item::Cond { opcode, true_jumps: right_true_jumps, false_jumps, tree } => {
+                                Ok(Item::Cond {
                                     opcode,
                                     true_jumps: {
                                         // Chain true jumps from left and right
-                                        match (true_jumps.as_ref(), right_true_jumps.as_ref()) {
-                                            (Some(left_true), Some(right_true)) => {
-                                                BytecodeItem::merge_chains(Some(left_true.clone()), Some(right_true.clone()))
-                                            }
-                                            (Some(left_true), None) => Some(left_true.clone()),
-                                            (None, Some(right_true)) => Some(right_true.clone()),
-                                            (None, None) => None,
-                                        }
+                                        Item::merge_chains(true_jumps, right_true_jumps)
                                     },
                                     false_jumps,
                                     tree,
