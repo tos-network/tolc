@@ -18,7 +18,7 @@ use super::method_context::MethodContext;
 use super::symtab::Symtab;
 use super::type_inference::{TypeInference, ConstantValue};
 use super::class::ClassFile;
-use super::optimization_manager::OptimizationManager;
+// Backed up: use super::optimization_manager::OptimizationManager;
 use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
 use super::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
 use super::line_number_optimizer::{LineNumberOptimizer, LineNumberContext};
@@ -57,8 +57,8 @@ pub struct Gen {
     /// Type inference system
     pub type_inference: TypeInference,
     
-    /// Optimization manager - coordinates all optimization passes
-    optimizer: OptimizationManager,
+    /// Backed up: Optimization manager - coordinates all optimization passes
+    // Backed up: optimizer: OptimizationManager,
     
     /// Branch optimizer for conditional jump optimization (JavaC alignment)
     pub branch_optimizer: BranchOptimizer,
@@ -553,7 +553,7 @@ impl Gen {
             method_context: MethodContext::new(),    // Transitional
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
-            optimizer: OptimizationManager::new(),   // Optimization coordinator
+            // Backed up: optimizer: OptimizationManager::new(),   // Optimization coordinator
             branch_optimizer: BranchOptimizer::new(), // Branch optimization for conditional jumps
             stack_map_optimizer: StackMapOptimizer::new(), // StackMapTable optimization for frame compression
             register_alloc: crate::codegen::register_alloc::RegisterAllocator::new(), // Register allocation manager
@@ -3965,10 +3965,10 @@ impl Gen {
         self.class_file
     }
     
-    /// Access to the optimization manager for external configuration
-    pub fn optimizer_mut(&mut self) -> &mut OptimizationManager {
-        &mut self.optimizer
-    }
+    /// Backed up: Access to the optimization manager for external configuration
+    // Backed up: pub fn optimizer_mut(&mut self) -> &mut OptimizationManager {
+    //     &mut self.optimizer
+    // }
     
     /// Get mutable reference to code buffer for visitor methods
     pub fn code_mut(&mut self) -> Option<&mut Code> {
@@ -4077,12 +4077,12 @@ impl Gen {
         Ok(())
     }
     
-    /// Get optimization statistics
-    pub fn get_optimization_stats(&self) -> String {
-        format!("Optimization passes enabled: {}, Level: {:?}", 
-                self.optimizer.enabled_optimizations.len(),
-                self.optimizer.optimization_level)
-    }
+    /// Backed up: Get optimization statistics
+    // Backed up: pub fn get_optimization_stats(&self) -> String {
+    //     format!("Optimization passes enabled: {}, Level: {:?}", 
+    //             self.optimizer.enabled_optimizations.len(),
+    //             self.optimizer.optimization_level)
+    // }
     
     /// Visit expression - unified entry point for all expressions
     /// This dispatches to the appropriate visitor method in gen_visitor.rs

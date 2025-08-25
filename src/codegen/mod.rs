@@ -38,7 +38,7 @@ pub mod gen_visitor;  // JavaC-style visitor methods (100% Gen.java aligned)
 // Backed up: pub mod items_simple; // Simplified Items system for Phase 2
 pub mod items;  // Bytecode Items system with direct Code manipulation
 pub mod method_context; // Method-level context management
-pub mod optimization_manager; // Unified optimization management
+// Backed up: pub mod optimization_manager; // Unified optimization management
 pub mod symtab;      // JavaC-aligned symbol table
 pub mod types;       // JavaC-aligned type system  
 pub mod type_inference; // Type inference and checking
@@ -49,16 +49,16 @@ pub mod array_type_info; // Enhanced array type representation
 
 // Optimizer architecture
 pub mod const_fold; // Constant folding operations
-pub mod attr_optimizer;   // Attribute phase optimizations
-pub mod lower_optimizer;  // Lower phase optimizations
-pub mod optimizer_alignment; // Optimizer alignment verification
+// Backed up: pub mod attr_optimizer;   // Attribute phase optimizations
+// Backed up: pub mod lower_optimizer;  // Lower phase optimizations
+// Backed up: pub mod optimizer_alignment; // Optimizer alignment verification
 
 // Backed up: pub mod advanced_optimizer;
 pub mod annotation;  // Needed by class_writer.rs  
 // Backed up: pub mod assignment_optimizer;
 pub mod attribute;
 pub mod branch_optimizer;    // JavaC-aligned branch optimization
-pub mod bytecode; // Still needed by some existing code
+// Backed up: pub mod bytecode; // Still needed by some existing code
 pub mod code;        // New JavaC-aligned code buffer
 // Backed up: pub mod code_builder; // High-level builder using Code
 pub mod chain;
@@ -69,19 +69,19 @@ pub mod class;
 // Backed up: pub mod conditional_optimizer;
 // Backed up: pub mod gen_cond;
 pub mod class_writer;
-pub mod constant_optimizer;
+// Backed up: pub mod constant_optimizer;
 pub mod constpool;
 pub mod defs;
 pub mod descriptor;
 pub mod error;
-pub mod exception_optimizer;
+// Backed up: pub mod exception_optimizer;
 pub mod field;
-pub mod field_access_optimizer;
+// Backed up: pub mod field_access_optimizer;
 // Backed up: pub mod finalizer_optimizer;
 pub mod flag;
 pub mod frame;
-pub mod increment_optimizer;
-pub mod instruction_optimizer;
+// Backed up: pub mod increment_optimizer;
+// Backed up: pub mod instruction_optimizer;
 // Backed up: pub mod instruction_widening;
 // Backed up: pub mod item_system;
 // Backed up: pub mod item_manager;
@@ -91,15 +91,15 @@ pub mod instruction_optimizer;
 // Backed up: pub mod type_erasure;
 // Backed up: pub mod type_erasure_integration;
 // Backed up: pub mod fatcode_manager;
-pub mod pending_jumps; // Needed by JavaC code.rs
+// Backed up: pub mod pending_jumps; // Needed by JavaC code.rs
 // Backed up: pub mod fixed_pc_manager;
 // Backed up: pub mod jsr_ret_optimizer;
 // Backed up: pub mod enhanced_string_optimizer;
 pub mod line_number_optimizer; // JavaC-aligned line number debug optimization
 pub mod javac_jump_optimizer;  // JavaC-aligned jump chain optimization
-pub mod loop_optimizer;
+// Backed up: pub mod loop_optimizer;
 pub mod method;
-pub mod method_invocation_optimizer;
+// Backed up: pub mod method_invocation_optimizer;
 pub mod register_alloc; // Register allocation for local variables (JavaC alignment)
 // Backed up: pub mod method_writer;
 // Backed up: pub mod object_optimizer;
@@ -108,10 +108,10 @@ pub mod opcode_enum;
 pub mod opcode_generator;
 pub mod signature;
 pub mod stack_map_optimizer;
-pub mod string_optimizer;
+// Backed up: pub mod string_optimizer;
 // Backed up: pub mod string_buffer_optimizer;
-pub mod switch_optimizer;
-pub mod type_coercion_optimizer;
+// Backed up: pub mod switch_optimizer;
+// Backed up: pub mod type_coercion_optimizer;
 pub mod typed_index;
 pub mod vec;
 pub mod writer;
@@ -141,7 +141,7 @@ pub use vec::*;
 pub use writer::*;
 
 // Re-export specific types from bytecode and typed_index to avoid conflicts
-pub use bytecode::{StackState, StackFrame, LocalSlot, LocalType, StackError, BytecodeBuilder, ExceptionTableEntry};
+// Backed up: pub use bytecode::{StackState, StackFrame, LocalSlot, LocalType, StackError, BytecodeBuilder, ExceptionTableEntry};
 pub use code::{Code, State, Type as CodeType, StackMapFormat, ExceptionTableEntry as CodeExceptionTableEntry, LineNumberEntry, LocalVarEntry};
 pub use typed_index::{
     ConstPoolIndex, RawConstPoolIndex, ConstPoolEntryInfo,

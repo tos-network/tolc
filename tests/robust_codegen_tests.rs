@@ -3,7 +3,7 @@
 use tolc::codegen::*;
 use tolc::codegen::defs::{MAGIC, major_versions};
 use tolc::codegen::flag::access_flags;
-use tolc::codegen::bytecode::{ClassIndex, StringIndex, NameAndTypeIndex, ConstPoolIndex};
+use tolc::codegen::{ClassIndex, StringIndex, NameAndTypeIndex, ConstPoolIndex};
 use tolc::common::error::Error;
 
 /// Test the new trait-based serialization system
@@ -65,21 +65,21 @@ fn test_jvm_vec_size_limits() {
 #[test]
 fn test_typed_constant_pool_indices() {
     // Create typed indices
-    let class_index: ClassIndex = ConstPoolIndex::new(42);
-    let string_index: StringIndex = ConstPoolIndex::new(100);
-    let name_type_index: NameAndTypeIndex = ConstPoolIndex::new(200);
+    let class_index: ClassIndex = ConstPoolIndex::from(42);
+    let string_index: StringIndex = ConstPoolIndex::from(100);
+    let name_type_index: NameAndTypeIndex = ConstPoolIndex::from(200);
     
     // Test type safety
-    assert_eq!(class_index.get(), 42);
-    assert_eq!(string_index.get(), 100);
-    assert_eq!(name_type_index.get(), 200);
+    assert_eq!(class_index.as_u16(), 42);
+    assert_eq!(string_index.as_u16(), 100);
+    assert_eq!(name_type_index.as_u16(), 200);
     
     // Test conversion to raw indices
-    let raw_class: u16 = class_index.get();
+    let raw_class: u16 = class_index.as_u16();
     assert_eq!(raw_class, 42);
     
     // Test conversion to usize for array indexing
-    let usize_class: usize = class_index.get() as usize;
+    let usize_class: usize = class_index.as_u16() as usize;
     assert_eq!(usize_class, 42);
 }
 
@@ -87,17 +87,17 @@ fn test_typed_constant_pool_indices() {
 #[test]
 fn test_typed_constant_pool_indices_edge_cases() {
     // Test zero index
-    let zero_index: ClassIndex = ConstPoolIndex::new(0);
-    assert_eq!(zero_index.get(), 0);
+    let zero_index: ClassIndex = ConstPoolIndex::from(0);
+    assert_eq!(zero_index.as_u16(), 0);
     
     // Test maximum u16 index
-    let max_index: StringIndex = ConstPoolIndex::new(u16::MAX);
-    assert_eq!(max_index.get(), u16::MAX);
+    let max_index: StringIndex = ConstPoolIndex::from(u16::MAX);
+    assert_eq!(max_index.as_u16(), u16::MAX);
     
     // Test conversion chain
     let original: u16 = 12345;
-    let typed: ClassIndex = ConstPoolIndex::new(original);
-    let raw: u16 = typed.get();
+    let typed: ClassIndex = ConstPoolIndex::from(original);
+    let raw: u16 = typed.as_u16();
     let back_to_u16: u16 = raw;
     assert_eq!(original, back_to_u16);
 }

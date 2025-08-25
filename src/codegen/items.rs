@@ -11,7 +11,7 @@ use crate::common::import::ImportResolver;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;
-use super::optimization_manager::{OptimizationManager, OptimizationLevel};
+// Backed up: use super::optimization_manager::{OptimizationManager, OptimizationLevel};
 
 /// Return true iff float number is positive zero (JavaC ImmediateItem.isPosZero)
 fn is_pos_zero_float(x: f32) -> bool {
@@ -46,8 +46,8 @@ pub struct Items<'a> {
     /// Reference to code buffer (JavaC code field)
     pub code: &'a mut Code,
     
-    /// Integrated optimization manager
-    optimizer: OptimizationManager,
+    /// Backed up: Integrated optimization manager
+    // Backed up: optimizer: OptimizationManager,
     
     /// Type information from wash/attr phase for type-aware code generation
     wash_type_info: Option<&'a std::collections::HashMap<String, ResolvedType>>,
@@ -65,7 +65,7 @@ impl<'a> Items<'a> {
         Self {
             pool,
             code,
-            optimizer: OptimizationManager::new(),
+            // Backed up: optimizer: OptimizationManager::new(),
             wash_type_info: None,
             symbol_table: None,
             type_table: None,
@@ -81,7 +81,7 @@ impl<'a> Items<'a> {
         Self {
             pool,
             code,
-            optimizer: OptimizationManager::new(),
+            // Backed up: optimizer: OptimizationManager::new(),
             wash_type_info: Some(wash_type_info),
             symbol_table: None,
             type_table: None,
@@ -99,28 +99,28 @@ impl<'a> Items<'a> {
         Self {
             pool,
             code,
-            optimizer: OptimizationManager::new(),
+            // Backed up: optimizer: OptimizationManager::new(),
             wash_type_info: Some(wash_type_info),
             symbol_table: Some(symbol_table),
             type_table: Some(type_table),
         }
     }
     
-    /// Create Items with specific optimization level
-    pub fn new_with_optimization(
-        pool: &'a mut ConstantPool, 
-        code: &'a mut Code, 
-        level: OptimizationLevel
-    ) -> Self {
-        Self {
-            pool,
-            code,
-            optimizer: OptimizationManager::with_level(level),
-            wash_type_info: None,
-            symbol_table: None,
-            type_table: None,
-        }
-    }
+    /// Backed up: Create Items with specific optimization level
+    // Backed up: pub fn new_with_optimization(
+    //     pool: &'a mut ConstantPool, 
+    //     code: &'a mut Code, 
+    //     level: OptimizationLevel
+    // ) -> Self {
+    //     Self {
+    //         pool,
+    //         code,
+    //         // Backed up: optimizer: OptimizationManager::with_level(level),
+    //         wash_type_info: None,
+    //         symbol_table: None,
+    //         type_table: None,
+    //     }
+    // }
     
     /// Make void item (JavaC makeVoidItem)
     pub fn make_void_item(&self) -> Item {
