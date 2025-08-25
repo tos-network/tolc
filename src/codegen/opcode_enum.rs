@@ -133,6 +133,11 @@ pub enum Opcode {
     I2c,
     I2s,
     
+    // Narrowing conversions
+    Int2byte,
+    Int2char,
+    Int2short,
+    
     // Comparisons
     Lcmp,
     Fcmpl,
@@ -343,6 +348,11 @@ impl Opcode {
             Opcode::I2b => I2B,
             Opcode::I2c => I2C,
             Opcode::I2s => I2S,
+            
+            // Narrowing conversions (aliases)
+            Opcode::Int2byte => I2B,
+            Opcode::Int2char => I2C,
+            Opcode::Int2short => I2S,
             
             Opcode::Lcmp => LCMP,
             Opcode::Fcmpl => FCMPL,

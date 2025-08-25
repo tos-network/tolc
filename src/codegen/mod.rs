@@ -112,6 +112,7 @@ pub mod stack_map_optimizer;
 // Backed up: pub mod string_buffer_optimizer;
 // Backed up: pub mod switch_optimizer;
 // Backed up: pub mod type_coercion_optimizer;
+pub mod type_cast_optimizer;    // JavaC-aligned type cast optimization
 pub mod typed_index;
 pub mod vec;
 pub mod writer;

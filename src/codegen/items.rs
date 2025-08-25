@@ -475,6 +475,16 @@ impl<'a> Items<'a> {
                 // Conditional items should be loaded using the load() method which converts to boolean
                 todo!("Conditional items should use item.load(items) instead of load_item")
             },
+            
+            Item::ConversionChain { .. } => {
+                // Conversion chain items should use their own load() method
+                todo!("ConversionChain items should use item.load(items) instead of load_item")
+            },
+            
+            Item::ReferenceConversion { .. } => {
+                // Reference conversion items should use their own load() method  
+                todo!("ReferenceConversion items should use item.load(items) instead of load_item")
+            },
         }
     }
     
@@ -1149,6 +1159,20 @@ pub enum Item {
     /// Array element access
     Indexed { typecode: u8 },
     
+    /// Type conversion chain (optimized cast operations)
+    ConversionChain {
+        source_item: Box<Item>,
+        instructions: Vec<crate::codegen::opcode_enum::Opcode>,
+        target_typecode: u8,
+    },
+    
+    /// Reference type conversion (with checkcast optimization)
+    ReferenceConversion {
+        source_item: Box<Item>,
+        target_type: String,
+        needs_checkcast: bool,
+    },
+    
     /// 'this' reference
     This,
     
@@ -1187,6 +1211,8 @@ impl Item {
             Item::Member { typecode, .. } => *typecode,
             Item::Static { typecode, .. } => *typecode,
             Item::Indexed { typecode } => *typecode,
+            Item::ConversionChain { target_typecode, .. } => *target_typecode,
+            Item::ReferenceConversion { .. } => typecodes::OBJECT,
             Item::This | Item::Super => typecodes::OBJECT,
             Item::Void => typecodes::VOID,
             Item::Assign { typecode, .. } => *typecode,
@@ -1418,6 +1444,51 @@ impl Item {
                 let stashed_lhs = lhs.stash(typecode, items)?;
                 stashed_lhs.store(items)?;
                 Ok(Item::Stack { typecode })
+            },
+            
+            Item::ConversionChain { source_item, instructions, target_typecode } => {
+                // Load source item first
+                let loaded_source = source_item.load(items)?;
+                
+                // Apply conversion instructions in sequence
+                for instruction in instructions {
+                    match instruction {
+                        crate::codegen::opcode_enum::Opcode::I2b => items.code.emitop(opcodes::I2B),
+                        crate::codegen::opcode_enum::Opcode::I2c => items.code.emitop(opcodes::I2C),
+                        crate::codegen::opcode_enum::Opcode::I2s => items.code.emitop(opcodes::I2S),
+                        crate::codegen::opcode_enum::Opcode::I2l => items.code.emitop(opcodes::I2L),
+                        crate::codegen::opcode_enum::Opcode::I2f => items.code.emitop(opcodes::I2F),
+                        crate::codegen::opcode_enum::Opcode::I2d => items.code.emitop(opcodes::I2D),
+                        crate::codegen::opcode_enum::Opcode::L2i => items.code.emitop(opcodes::L2I),
+                        crate::codegen::opcode_enum::Opcode::L2f => items.code.emitop(opcodes::L2F),
+                        crate::codegen::opcode_enum::Opcode::L2d => items.code.emitop(opcodes::L2D),
+                        crate::codegen::opcode_enum::Opcode::F2i => items.code.emitop(opcodes::F2I),
+                        crate::codegen::opcode_enum::Opcode::F2l => items.code.emitop(opcodes::F2L),
+                        crate::codegen::opcode_enum::Opcode::F2d => items.code.emitop(opcodes::F2D),
+                        crate::codegen::opcode_enum::Opcode::D2i => items.code.emitop(opcodes::D2I),
+                        crate::codegen::opcode_enum::Opcode::D2l => items.code.emitop(opcodes::D2L),
+                        crate::codegen::opcode_enum::Opcode::D2f => items.code.emitop(opcodes::D2F),
+                        crate::codegen::opcode_enum::Opcode::Int2byte => items.code.emitop(opcodes::I2B),
+                        crate::codegen::opcode_enum::Opcode::Int2char => items.code.emitop(opcodes::I2C),
+                        crate::codegen::opcode_enum::Opcode::Int2short => items.code.emitop(opcodes::I2S),
+                        _ => return Err(crate::common::error::Error::codegen_error(format!("Unsupported conversion instruction: {:?}", instruction))),
+                    }
+                }
+                
+                Ok(Item::Stack { typecode: target_typecode })
+            },
+            
+            Item::ReferenceConversion { source_item, target_type, needs_checkcast } => {
+                // Load source item first
+                let loaded_source = source_item.load(items)?;
+                
+                if needs_checkcast {
+                    // Emit checkcast instruction
+                    let class_idx = items.pool.add_class(&target_type);
+                    items.code.emitop2(opcodes::CHECKCAST, class_idx);
+                }
+                
+                Ok(Item::Stack { typecode: typecodes::OBJECT })
             },
             
             Item::Void => {
@@ -1868,6 +1939,10 @@ impl std::fmt::Display for Item {
             Item::Super => write!(f, "super"),
             Item::Void => write!(f, "void"),
             Item::Cond { opcode, .. } => write!(f, "cond({})", Item::opcode_mnemonic(*opcode)),
+            Item::ConversionChain { target_typecode, instructions, .. } => write!(f, "conversion({} -> {}, {} ops)", 
+                instructions.len(), target_typecode, instructions.len()),
+            Item::ReferenceConversion { target_type, needs_checkcast, .. } => write!(f, "refconv({}, checkcast: {})", 
+                target_type, needs_checkcast),
         }
     }
 }

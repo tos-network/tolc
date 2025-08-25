@@ -32,6 +32,7 @@ use super::items::{Item as BytecodeItem, Items, typecodes};
 use super::branch_optimizer::BranchOptimizationContext;
 use super::opcodes;
 use crate::codegen::attr::ResolvedType;
+use crate::codegen::type_cast_optimizer::TypeCastOptimizer;
 use crate::common::classloader::{ClassLoader, DynamicLoadable};
 use crate::common::type_resolver::TypeResolver;
 use crate::common::import::ImportResolver;
@@ -166,87 +167,121 @@ impl Gen {
         })
     }
     
-    /// Add type cast if needed between from_type and to_type
+    /// Add type cast if needed between from_type and to_type - JavaC-optimized
     fn add_type_cast_if_needed(&mut self, from_type: &TypeEnum, to_type: &TypeEnum) -> Result<()> {
-        // Only add cast if types are different and conversion is needed
-        if std::mem::discriminant(from_type) == std::mem::discriminant(to_type) {
-            return Ok(()); // Same type family, no cast needed
+        // Check if types are the same - no conversion needed
+        if from_type == to_type {
+            return Ok(());
         }
         
-        // Generate warning message outside closure to avoid borrowing conflicts
-        let warning_msg = match (from_type, to_type) {
-            (TypeEnum::Primitive(PrimitiveType::Int), TypeEnum::Primitive(PrimitiveType::Long)) |
-            (TypeEnum::Primitive(PrimitiveType::Int), TypeEnum::Primitive(PrimitiveType::Float)) |
-            (TypeEnum::Primitive(PrimitiveType::Int), TypeEnum::Primitive(PrimitiveType::Double)) |
-            (TypeEnum::Primitive(PrimitiveType::Long), TypeEnum::Primitive(PrimitiveType::Int)) |
-            (TypeEnum::Primitive(PrimitiveType::Long), TypeEnum::Primitive(PrimitiveType::Float)) |
-            (TypeEnum::Primitive(PrimitiveType::Long), TypeEnum::Primitive(PrimitiveType::Double)) |
-            (TypeEnum::Primitive(PrimitiveType::Float), TypeEnum::Primitive(PrimitiveType::Int)) |
-            (TypeEnum::Primitive(PrimitiveType::Float), TypeEnum::Primitive(PrimitiveType::Long)) |
-            (TypeEnum::Primitive(PrimitiveType::Float), TypeEnum::Primitive(PrimitiveType::Double)) |
-            (TypeEnum::Primitive(PrimitiveType::Double), TypeEnum::Primitive(PrimitiveType::Int)) |
-            (TypeEnum::Primitive(PrimitiveType::Double), TypeEnum::Primitive(PrimitiveType::Long)) |
-            (TypeEnum::Primitive(PrimitiveType::Double), TypeEnum::Primitive(PrimitiveType::Float)) |
-            (TypeEnum::Reference(_), TypeEnum::Reference(ReferenceType::Class(_))) => None,
-            _ => Some(format!("No automatic type conversion from {:?} to {:?}", from_type, to_type)),
+        // Create a synthetic cast expression for the optimizer
+        use crate::ast::{CastExpr, Expr, LiteralExpr, Literal, TypeRef, Span, Location};
+        
+        // Convert target TypeEnum to TypeRef
+        let target_type_ref = match to_type {
+            TypeEnum::Primitive(prim_type) => {
+                let type_name = match prim_type {
+                    crate::ast::PrimitiveType::Int => "int",
+                    crate::ast::PrimitiveType::Long => "long", 
+                    crate::ast::PrimitiveType::Float => "float",
+                    crate::ast::PrimitiveType::Double => "double",
+                    crate::ast::PrimitiveType::Byte => "byte",
+                    crate::ast::PrimitiveType::Char => "char",
+                    crate::ast::PrimitiveType::Short => "short",
+                    crate::ast::PrimitiveType::Boolean => "boolean",
+                };
+                TypeRef {
+                    name: type_name.to_string(),
+                    type_args: Vec::new(),
+                    annotations: Vec::new(),
+                    array_dims: 0,
+                    span: Span::new(Location::new(0, 0, 0), Location::new(0, 0, 0)),
+                }
+            },
+            TypeEnum::Reference(ref_type) => {
+                let type_name = match ref_type {
+                    crate::ast::ReferenceType::Class(class_name) => class_name.clone(),
+                    crate::ast::ReferenceType::Interface(interface_name) => interface_name.clone(),
+                    crate::ast::ReferenceType::Array(_) => "java.lang.Object".to_string(), // Simplified
+                };
+                TypeRef {
+                    name: type_name,
+                    type_args: Vec::new(), 
+                    annotations: Vec::new(),
+                    array_dims: 0,
+                    span: Span::new(Location::new(0, 0, 0), Location::new(0, 0, 0)),
+                }
+            },
+            TypeEnum::Void => {
+                eprintln!("⚠️  WARNING: Cannot cast to void type");
+                return Ok(());
+            }
         };
         
-        self.with_items(|items| {
-            match (from_type, to_type) {
-                // Primitive type conversions
-                (TypeEnum::Primitive(PrimitiveType::Int), TypeEnum::Primitive(PrimitiveType::Long)) => {
-                    items.code.emitop(opcodes::I2L);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Int), TypeEnum::Primitive(PrimitiveType::Float)) => {
-                    items.code.emitop(opcodes::I2F);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Int), TypeEnum::Primitive(PrimitiveType::Double)) => {
-                    items.code.emitop(opcodes::I2D);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Long), TypeEnum::Primitive(PrimitiveType::Int)) => {
-                    items.code.emitop(opcodes::L2I);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Long), TypeEnum::Primitive(PrimitiveType::Float)) => {
-                    items.code.emitop(opcodes::L2F);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Long), TypeEnum::Primitive(PrimitiveType::Double)) => {
-                    items.code.emitop(opcodes::L2D);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Float), TypeEnum::Primitive(PrimitiveType::Int)) => {
-                    items.code.emitop(opcodes::F2I);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Float), TypeEnum::Primitive(PrimitiveType::Long)) => {
-                    items.code.emitop(opcodes::F2L);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Float), TypeEnum::Primitive(PrimitiveType::Double)) => {
-                    items.code.emitop(opcodes::F2D);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Double), TypeEnum::Primitive(PrimitiveType::Int)) => {
-                    items.code.emitop(opcodes::D2I);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Double), TypeEnum::Primitive(PrimitiveType::Long)) => {
-                    items.code.emitop(opcodes::D2L);
-                },
-                (TypeEnum::Primitive(PrimitiveType::Double), TypeEnum::Primitive(PrimitiveType::Float)) => {
-                    items.code.emitop(opcodes::D2F);
-                },
-                // Reference type casts - skip for now to avoid borrowing conflicts
-                (TypeEnum::Reference(_), TypeEnum::Reference(ReferenceType::Class(_))) => {
-                    // Note: CHECKCAST would be added here
-                },
-                _ => {
-                    // Will print warning after closure
-                }
-            }
-            Ok(())
+        // Create a dummy cast expression (we only need the target type for the optimizer)
+        let synthetic_cast = CastExpr {
+            expr: Box::new(Expr::Literal(LiteralExpr {
+                value: Literal::Integer(0), // Dummy value
+                span: Span::new(Location::new(0, 0, 0), Location::new(0, 0, 0)),
+            })),
+            target_type: target_type_ref,
+            span: Span::new(Location::new(0, 0, 0), Location::new(0, 0, 0)),
+        };
+        
+        // Create a dummy source item based on from_type
+        let source_item = self.with_items(|items| {
+            Ok(items.make_stack_item_for_type(from_type))
         })?;
         
-        // Print warning outside closure if needed
-        if let Some(msg) = warning_msg {
-            eprintln!("⚠️  WARNING: {}", msg);
+        // Use the type cast optimizer to generate optimized conversion
+        let optimized_result = self.type_cast_optimizer.optimize_cast(&synthetic_cast, &source_item)?;
+        
+        if let Some(optimized_item) = optimized_result {
+            eprintln!("🚀 TYPE CONVERTER: Applied optimization for {} -> {} conversion", 
+                self.type_to_string(from_type), self.type_to_string(to_type));
+                
+            // Load the optimized conversion (this will emit the conversion instructions)
+            self.with_items(|items| {
+                optimized_item.load(items)?;
+                Ok(())
+            })?;
+        } else {
+            // Fallback: warn about unsupported conversion
+            eprintln!("⚠️  WARNING: No automatic type conversion available from {} to {}", 
+                self.type_to_string(from_type), self.type_to_string(to_type));
         }
         
         Ok(())
+    }
+    
+    /// Generate method arguments with automatic parameter type conversion - JavaC aligned
+    fn generate_method_arguments_with_conversion(&mut self, 
+        args: &[Expr], 
+        param_types: &[TypeEnum], 
+        env: &GenContext
+    ) -> Result<Vec<BytecodeItem>> {
+        let mut arg_items = Vec::new();
+        
+        for (i, arg) in args.iter().enumerate() {
+            // Generate the argument expression
+            let arg_item = self.visit_expr(arg, env)?;
+            let arg_type = self.typecode_to_type_enum(arg_item.typecode());
+            
+            // Apply parameter conversion if we have parameter type information
+            if let Some(param_type) = param_types.get(i) {
+                if arg_type != *param_type {
+                    eprintln!("🔄 PARAM CONVERT: Converting argument {} from {} to {}", 
+                        i, self.type_to_string(&arg_type), self.type_to_string(param_type));
+                    
+                    // Use our optimized type conversion
+                    self.add_type_cast_if_needed(&arg_type, param_type)?;
+                }
+            }
+            
+            arg_items.push(arg_item);
+        }
+        
+        Ok(arg_items)
     }
     
     /// Evaluate class name from expression - Enhanced expression type resolution
@@ -5637,12 +5672,28 @@ impl Gen {
         }
     }
     
-    /// Visit type cast expression - simplified version
+    /// Visit type cast expression - JavaC-aligned with optimization
     pub fn visit_type_cast(&mut self, tree: &CastExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Generate expression to cast
-        let _expr_item = self.visit_expr(&tree.expr, env)?;
+        let expr_item = self.visit_expr(&tree.expr, env)?;
         
-        // Generate checkcast instruction for reference types
+        // Try to optimize the cast using the type cast optimizer
+        let optimized_result = self.type_cast_optimizer.optimize_cast(tree, &expr_item)?;
+        
+        if let Some(optimized_item) = optimized_result {
+            // Cast was optimized - use the optimized result
+            eprintln!("🚀 CAST OPTIMIZER: Applied optimization for cast: {} -> {}", 
+                expr_item.typecode(), 
+                optimized_item.typecode());
+                
+            // Load the optimized conversion result
+            return self.with_items(|items| {
+                let result_item = optimized_item.load(items)?;
+                Ok(result_item)
+            });
+        }
+        
+        // Fallback to standard cast handling if no optimization was applied
         let target_type = TypeEnum::from(tree.target_type.clone());
         
         // Handle checkcast for reference types

@@ -17,6 +17,7 @@ use super::items::{Items, Item as BytecodeItem};
 use super::method_context::MethodContext;
 use super::symtab::Symtab;
 use super::type_inference::{TypeInference, ConstantValue};
+use super::type_cast_optimizer::TypeCastOptimizer;
 use super::class::ClassFile;
 // Backed up: use super::optimization_manager::OptimizationManager;
 use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
@@ -128,6 +129,9 @@ pub struct Gen {
     
     /// Pending lambda methods for class file generation
     pub pending_lambda_methods: Vec<crate::codegen::gen_visitor::LambdaMethodInfo>,
+    
+    /// Type cast optimizer for efficient type conversion (JavaC alignment)
+    pub type_cast_optimizer: crate::codegen::type_cast_optimizer::TypeCastOptimizer,
 }
 
 
@@ -577,6 +581,7 @@ impl Gen {
             static_field_initializers: Vec::new(),  // Static field initializers for <clinit>
             instance_field_initializers: Vec::new(), // Instance field initializers for constructors
             pending_lambda_methods: Vec::new(),      // Pending lambda methods for class file generation
+            type_cast_optimizer: TypeCastOptimizer::new(), // Type cast optimizer for efficient conversions
         }
     }
     
