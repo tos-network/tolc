@@ -509,17 +509,26 @@ impl<'a> Items<'a> {
     }
     
     /// Generate method invocation (JavaC invoke)
+    /// This method aligns with JavaC's Item.invoke() pattern for optimal bytecode generation
     pub fn invoke_item(&mut self, item: &Item) -> Result<Item> {
         match item {
             Item::Member { typecode, member_name, class_name, descriptor, is_static, nonvirtual } => {
-                self.emit_invoke_member(*typecode, member_name, class_name, descriptor, *is_static, *nonvirtual)?;
-                Ok(Item::Stack { typecode: *typecode })
+                // JavaC MemberItem.invoke() pattern with enhanced optimizations
+                let return_typecode = Self::extract_return_typecode_from_descriptor(descriptor);
+                
+                if *is_static {
+                    // Static methods should be handled by StaticItem.invoke(), not MemberItem.invoke()
+                    eprintln!("WARNING: Static method {} called through MemberItem.invoke(), redirecting to StaticItem", member_name);
+                    return self.emit_invoke_static_enhanced(member_name, class_name, descriptor);
+                }
+                
+                self.emit_invoke_member_enhanced(*typecode, member_name, class_name, descriptor, *nonvirtual)?;
+                Ok(Item::Stack { typecode: return_typecode })
             }
             
             Item::Static { typecode, member_name, class_name, descriptor } => {
-                // JavaC StaticItem.invoke() - emit invokestatic
-                self.emit_invoke_static(*typecode, member_name, class_name, descriptor)?;
-                Ok(Item::Stack { typecode: *typecode })
+                // JavaC StaticItem.invoke() - emit invokestatic with method type erasure  
+                self.emit_invoke_static_enhanced(member_name, class_name, descriptor)
             }
             
             _ => Err(crate::common::error::Error::CodeGen {
@@ -902,8 +911,96 @@ impl<'a> Items<'a> {
         Ok(())
     }
     
+    /// Extract return typecode from method descriptor (JavaC MethodType.restype pattern)
+    fn extract_return_typecode_from_descriptor(descriptor: &str) -> u8 {
+        if let Some(return_start) = descriptor.rfind(')') {
+            let return_type = &descriptor[return_start + 1..];
+            match return_type {
+                "V" => typecodes::VOID,
+                "Z" => typecodes::BYTE, // Boolean is represented as byte in JVM
+                "B" => typecodes::BYTE,
+                "C" => typecodes::CHAR,
+                "S" => typecodes::SHORT,
+                "I" => typecodes::INT,
+                "J" => typecodes::LONG,
+                "F" => typecodes::FLOAT,
+                "D" => typecodes::DOUBLE,
+                s if s.starts_with('L') || s.starts_with('[') => typecodes::OBJECT,
+                _ => typecodes::INT, // Default fallback
+            }
+        } else {
+            typecodes::INT // Default fallback
+        }
+    }
+    
+    /// Emit enhanced static method invocation (JavaC StaticItem.invoke with type erasure)
+    fn emit_invoke_static_enhanced(&mut self, member_name: &str, class_name: &str, method_descriptor: &str) -> Result<Item> {
+        // JavaC StaticItem.invoke() uses method type erasure: member.erasure(types)
+        let erased_descriptor = self.erase_generic_types_in_descriptor(method_descriptor);
+        let return_typecode = Self::extract_return_typecode_from_descriptor(&erased_descriptor);
+        
+        // Add method reference to constant pool
+        let method_ref_idx = self.pool.add_method_ref(class_name, member_name, &erased_descriptor);
+        
+        eprintln!("🔧 DEBUG: Enhanced StaticItem.invoke() - class: {}, method: {}, descriptor: {}, erased: {}, idx: {}", 
+            class_name, member_name, method_descriptor, erased_descriptor, method_ref_idx);
+        
+        // JavaC StaticItem.invoke() - code.emitInvokestatic(pool.put(member), mtype);
+        self.code.emitop(opcodes::INVOKESTATIC);
+        self.code.emit2(method_ref_idx);
+        
+        Ok(Item::Stack { typecode: return_typecode })
+    }
+    
+    /// Erase generic types in method descriptor (JavaC Types.erasure)
+    fn erase_generic_types_in_descriptor(&self, descriptor: &str) -> String {
+        // For now, return as-is. In full implementation, this would:
+        // 1. Replace generic type parameters with their bounds
+        // 2. Replace parameterized types with raw types
+        // 3. Keep primitive types and non-generic types unchanged
+        descriptor.to_string()
+    }
+    
+    /// Emit enhanced member method invocation (JavaC MemberItem.invoke pattern)
+    fn emit_invoke_member_enhanced(&mut self, _typecode: u8, member_name: &str, class_name: &str, method_descriptor: &str, nonvirtual: bool) -> Result<()> {
+        eprintln!("🔧 DEBUG: Enhanced MemberItem.invoke() - class: {}, method: {}, descriptor: {}, nonvirtual: {}", 
+            class_name, member_name, method_descriptor, nonvirtual);
+
+        // JavaC MemberItem.invoke() pattern with interface detection:
+        // if ((member.owner.flags() & Flags.INTERFACE) != 0 && !nonvirtual) {
+        //     code.emitInvokeinterface(pool.put(member), mtype);
+        // } else if (nonvirtual) {
+        //     code.emitInvokespecial(pool.put(member), mtype); 
+        // } else {
+        //     code.emitInvokevirtual(pool.put(member), mtype);
+        // }
+        
+        if self.is_interface_method(class_name, member_name) && !nonvirtual {
+            // Interface method call - invokeinterface (JavaC MemberItem pattern)
+            let method_ref_idx = self.pool.add_interface_method_ref(class_name, member_name, method_descriptor);
+            self.emit_invoke_interface(method_ref_idx, method_descriptor)?;
+        } else if nonvirtual {
+            // Non-virtual method call - invokespecial (super calls, constructors, private methods)
+            let method_ref_idx = self.pool.add_method_ref(class_name, member_name, method_descriptor);
+            self.code.emitop(opcodes::INVOKESPECIAL);
+            self.code.emit2(method_ref_idx);
+        } else {
+            // Virtual method call - invokevirtual (regular instance methods)
+            let method_ref_idx = self.pool.add_method_ref(class_name, member_name, method_descriptor);
+            self.code.emitop(opcodes::INVOKEVIRTUAL);
+            self.code.emit2(method_ref_idx);
+        }
+        Ok(())
+    }
+    
     /// Check if a method belongs to an interface (JavaC (member.owner.flags() & Flags.INTERFACE) != 0)
     fn is_interface_method(&self, class_name: &str, _method_name: &str) -> bool {
+        // Enhanced interface detection using multiple strategies
+        self.is_interface_class(class_name)
+    }
+    
+    /// Check if a class is an interface (JavaC (clazz.flags() & Flags.INTERFACE) != 0)
+    fn is_interface_class(&self, class_name: &str) -> bool {
         // Check type table for interface flag if available
         if let Some(type_table) = self.type_table {
             if let Some(type_info) = type_table.get(class_name) {

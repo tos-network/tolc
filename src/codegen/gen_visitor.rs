@@ -3843,17 +3843,78 @@ impl Gen {
         let class_name = env.clazz.as_ref().map(|c| c.name.clone()).unwrap_or("UnknownClass".to_string());
         let method_name = tree.name.clone();
         
-        // Add method ref to pool before with_items
-        let method_ref_idx = self.get_pool_mut().add_method_ref(&class_name, &method_name, &descriptor);
+        // Convert return type to TypeEnum for MemberItem
+        let return_type_enum = self.resolved_type_to_type_enum(return_type)?;
         
+        // Determine if this is a non-virtual call
+        let nonvirtual = self.is_nonvirtual_call(tree, &class_name);
+        
+        // Use enhanced MemberItem.invoke() optimization for generic method calls
         return self.with_items(|items| {
-            items.code.emitop(super::opcodes::INVOKEVIRTUAL); // Use invokevirtual for instance methods
-            items.code.emit2(method_ref_idx);
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for generic method: {}", method_name);
             
-            // Create return item based on resolved return type
-            let return_item = items.make_stack_item_for_resolved_type(return_type);
-            Ok(return_item)
+            // Create MemberItem with generic method information
+            let member_item = items.make_member_item_nonvirtual(
+                method_name,
+                class_name,
+                descriptor,
+                false, // is_static = false for instance methods
+                &return_type_enum,
+                nonvirtual
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization
+            items.invoke_item(&member_item)
         });
+    }
+    
+    /// Convert ResolvedType to TypeEnum for MemberItem creation
+    fn resolved_type_to_type_enum(&self, resolved_type: &crate::codegen::attr::ResolvedType) -> Result<TypeEnum> {
+        use crate::codegen::attr::ResolvedType;
+        
+        match resolved_type {
+            ResolvedType::Class(class_type) => Ok(TypeEnum::Reference(crate::ast::ReferenceType::Class(class_type.name.clone()))),
+            ResolvedType::Array(_) => Ok(TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))), // Arrays are objects
+            ResolvedType::Method(_, return_type) => self.resolved_type_to_type_enum(return_type),
+            ResolvedType::Generic(_, _) => Ok(TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))), // Generic types erase to Object
+            ResolvedType::Wildcard(_) => Ok(TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))),
+            _ => Ok(TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))), // Default fallback
+        }
+    }
+    
+    /// Convert ResolvedType to typecode for bytecode generation
+    fn resolved_type_to_typecode(resolved_type: &crate::codegen::attr::ResolvedType) -> u8 {
+        use crate::codegen::attr::ResolvedType;
+        use super::items::typecodes;
+        
+        match resolved_type {
+            ResolvedType::Class(_) => typecodes::OBJECT,
+            ResolvedType::Array(_) => typecodes::OBJECT,
+            ResolvedType::Method(_, return_type) => Self::resolved_type_to_typecode(return_type),
+            ResolvedType::Generic(_, _) => typecodes::OBJECT, // Generic types erase to Object
+            ResolvedType::Wildcard(_) => typecodes::OBJECT,
+            _ => typecodes::OBJECT, // Default fallback for other types
+        }
+    }
+    
+    /// Convert TypeEnum to typecode for bytecode generation
+    fn type_enum_to_typecode(type_enum: &TypeEnum) -> u8 {
+        use super::items::typecodes;
+        
+        match type_enum {
+            TypeEnum::Primitive(prim) => match prim {
+                crate::ast::PrimitiveType::Boolean => typecodes::BYTE, // Boolean is represented as byte in JVM
+                crate::ast::PrimitiveType::Byte => typecodes::BYTE,
+                crate::ast::PrimitiveType::Char => typecodes::CHAR,
+                crate::ast::PrimitiveType::Short => typecodes::SHORT,
+                crate::ast::PrimitiveType::Int => typecodes::INT,
+                crate::ast::PrimitiveType::Long => typecodes::LONG,
+                crate::ast::PrimitiveType::Float => typecodes::FLOAT,
+                crate::ast::PrimitiveType::Double => typecodes::DOUBLE,
+            },
+            TypeEnum::Reference(_) => typecodes::OBJECT,
+            TypeEnum::Void => typecodes::VOID,
+        }
     }
     
     /// Convert TypeRef to TypeEnum helper
@@ -4051,51 +4112,86 @@ impl Gen {
         // This should be the class from the NEW expression that created the object reference
         let class_name = env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("java/lang/Object");
         
-        // Add method reference to constant pool
-        let method_ref_idx = self.get_pool_mut().add_method_ref(class_name, "<init>", &descriptor);
+        eprintln!("🔧 DEBUG: Generating optimized invokespecial for constructor {}.<init>{}", class_name, descriptor);
         
-        eprintln!("🔧 DEBUG: Generating invokespecial for constructor {}.<init>{}", class_name, descriptor);
-        
+        // Use enhanced MemberItem.invoke() optimization for constructor calls (JavaC pattern)
         self.with_items(|items| {
-            // Emit invokespecial with proper constant pool reference
-            items.code.emitop(super::opcodes::INVOKESPECIAL);
-            items.code.emit2(method_ref_idx);
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for constructor: <init>");
+            
+            // Create MemberItem for constructor call (constructors are non-virtual)
+            let member_item = items.make_member_item_nonvirtual(
+                "<init>".to_string(),
+                class_name.to_string(),
+                descriptor.clone(),
+                false, // is_static = false for constructors
+                &TypeEnum::Void, // Constructors return void
+                true // nonvirtual = true for constructors (always invokespecial)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for constructor
+            let result = items.invoke_item(&member_item)?;
             
             // Constructor returns void but object reference remains on stack
+            // Override the result to reflect the correct stack state
             Ok(items.make_stack_item_for_type(&TypeEnum::Reference(crate::ast::ReferenceType::Class(class_name.to_string()))))
         })
     }
     
     /// Generate super method call (invokespecial)
     fn gen_super_method_call(&mut self, tree: &MethodCallExpr, env: &GenContext) -> Result<BytecodeItem> {
-        // Generate 'this' reference
+        // Generate 'this' reference first
         self.with_items(|items| {
             items.code.emitop(super::opcodes::ALOAD_0); // Load 'this'
             Ok(())
         })?;
         
-        // Generate arguments
+        // Generate arguments and collect their types
+        let mut arg_types = Vec::new();
         for arg in &tree.arguments {
-            let _arg_item = self.visit_expr(arg, env)?;
+            let arg_item = self.visit_expr(arg, env)?;
+            arg_types.push(self.typecode_to_type_enum(arg_item.typecode()));
         }
         
+        // Build method descriptor
+        let mut descriptor = String::from("(");
+        for arg_type in &arg_types {
+            descriptor.push_str(&self.type_to_descriptor_string(arg_type));
+        }
+        descriptor.push(')');
+        
+        // Determine return type (simplified heuristic - could be improved)
+        let return_type = if tree.name.starts_with("get") {
+            descriptor.push_str("Ljava/lang/Object;");
+            TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))
+        } else if tree.name.starts_with("is") || tree.name.starts_with("has") {
+            descriptor.push('Z');
+            TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean)
+        } else {
+            descriptor.push('V');
+            TypeEnum::Void
+        };
+        
+        // Get parent class name (for super calls)
+        let class_name = env.clazz.as_ref().map(|c| c.name.as_str()).unwrap_or("java/lang/Object");
+        
+        eprintln!("🔧 DEBUG: Generating optimized invokespecial for super call: {}.{}{}", class_name, tree.name, descriptor);
+        
+        // Use enhanced MemberItem.invoke() optimization for super method calls (JavaC pattern)
         self.with_items(|items| {
-            eprintln!("🔧 DEBUG: Generating invokespecial for super call: {}", tree.name);
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for super call: {}", tree.name);
             
-            // Emit invokespecial bytecode
-            items.code.emitop(super::opcodes::INVOKESPECIAL);
-            items.code.emit2(1); // Super method reference index (placeholder)
+            // Create MemberItem for super method call (super calls are always non-virtual)
+            let member_item = items.make_member_item_nonvirtual(
+                tree.name.clone(),
+                class_name.to_string(),
+                descriptor.clone(),
+                false, // is_static = false for super calls
+                &return_type,
+                true // nonvirtual = true for super calls (always invokespecial)
+            );
             
-            // Determine return type (simplified)
-            let return_type = if tree.name.starts_with("get") {
-                TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string()))
-            } else if tree.name.starts_with("is") || tree.name.starts_with("has") {
-                TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean)
-            } else {
-                TypeEnum::Void
-            };
-            
-            Ok(items.make_stack_item_for_type(&return_type))
+            // Use JavaC MemberItem.invoke() optimization for super call
+            items.invoke_item(&member_item)
         })
     }
     
@@ -4161,20 +4257,24 @@ impl Gen {
         // Determine return type from actual method descriptor
         let return_type = Self::parse_return_type_from_descriptor(&method_descriptor);
         
-        // Use MemberItem.invoke() optimization (JavaC alignment)
+        // Determine if this is a non-virtual call (super calls, private methods, constructors)
+        let nonvirtual = self.is_nonvirtual_call(tree, &class_name);
+        
+        // Use enhanced MemberItem.invoke() optimization (JavaC alignment with interface detection)
         self.with_items(|items| {
-            eprintln!("🔧 DEBUG: Using MemberItem.invoke() optimizer for: {} -> #{}", tree.name, method_ref_idx);
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() optimizer for: {} -> #{}", tree.name, method_ref_idx);
             
-            // Create MemberItem and use invoke() method (JavaC pattern)
-            let member_item = items.make_member_item(
+            // Create MemberItem and use enhanced invoke() method (JavaC pattern)
+            let member_item = items.make_member_item_nonvirtual(
                 tree.name.clone(),
                 class_name.clone(), 
                 method_descriptor.clone(),
                 false, // is_static = false for instance methods
-                &return_type
+                &return_type,
+                nonvirtual
             );
             
-            // Invoke using MemberItem optimization
+            // Invoke using enhanced MemberItem optimization
             items.invoke_item(&member_item)
         })
     }
@@ -4428,6 +4528,37 @@ impl Gen {
         tree.name.contains("Set")
     }
     
+    /// Check if this is a non-virtual method call (JavaC nonvirtual flag)
+    /// Non-virtual calls include: super calls, private methods, constructors, and final methods
+    fn is_nonvirtual_call(&self, tree: &MethodCallExpr, _class_name: &str) -> bool {
+        // Constructor calls are always non-virtual
+        if tree.name == "<init>" {
+            return true;
+        }
+        
+        // Super method calls are non-virtual (invokespecial)
+        if self.is_super_method_call(tree) {
+            return true;
+        }
+        
+        // Private methods are non-virtual (though this requires symbol table lookup)
+        // For now, use method name heuristics
+        if tree.name.starts_with("private") || tree.name.contains("Private") {
+            return true;
+        }
+        
+        // Check if target is 'super' keyword
+        if let Some(ref target) = tree.target {
+            if let Expr::Identifier(ident) = &**target {
+                if ident.name == "super" {
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+    
     /// Check if a type name represents an interface
     fn is_interface_type(&self, type_name: &str) -> bool {
         match type_name {
@@ -4546,15 +4677,24 @@ impl Gen {
         // 4. Build constructor method descriptor
         let method_descriptor = self.generate_method_descriptor_with_types("<init>", &arg_types);
         
-        // 5. Add constructor method reference to constant pool
-        let constructor_ref_idx = self.get_pool_mut().add_method_ref(&internal_class_name, "<init>", &method_descriptor);
-        
+        // 5. Use enhanced MemberItem.invoke() optimization for constructor calls in new expressions
         self.with_items(|items| {
-            // 6. Call constructor with invokespecial
-            items.code.emitop(super::opcodes::INVOKESPECIAL);
-            items.code.emit2(constructor_ref_idx);
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for NEW constructor: <init>");
             
-            eprintln!("DEBUG CONSTRUCTOR: After INVOKESPECIAL - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
+            // Create MemberItem for constructor call (constructors are non-virtual)
+            let member_item = items.make_member_item_nonvirtual(
+                "<init>".to_string(),
+                internal_class_name.clone(),
+                method_descriptor.clone(),
+                false, // is_static = false for constructors
+                &TypeEnum::Void, // Constructors return void
+                true // nonvirtual = true for constructors (always invokespecial)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for constructor
+            let _result = items.invoke_item(&member_item)?;
+            
+            eprintln!("DEBUG CONSTRUCTOR: After optimized INVOKESPECIAL - stack depth: {}, max_stack: {}", items.code.state.stacksize, items.code.state.max_stacksize);
             
             // Pop constructor arguments and the duplicated reference
             let arg_count = tree.arguments.len() + 1; // +1 for 'this' reference
@@ -6835,38 +6975,49 @@ impl Gen {
         // Call iterator() method on the iterable
         let _iterable_result = self.visit_expr(&tree.iterable, env)?;
         
-        // Add iterator() method to constant pool
-        let iterator_method_ref = self.get_pool_mut().add_interface_method_ref(
-            "java/lang/Iterable", 
-            "iterator", 
-            "()Ljava/util/Iterator;"
-        );
-        
+        // Use enhanced MemberItem.invoke() optimization for iterator() interface method call
         self.with_items(|items| {
-            items.code.emitop(opcodes::INVOKEINTERFACE);
-            items.code.emit2(iterator_method_ref);
-            items.code.emit1(1); // Interface method arg count
-            items.code.emit1(0); // Padding
-            items.code.emitop1(opcodes::ASTORE, iterator_slot as u8); // Store iterator
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for interface method: iterator()");
+            
+            // Create MemberItem for iterator() interface method
+            let member_item = items.make_member_item_nonvirtual(
+                "iterator".to_string(),
+                "java/lang/Iterable".to_string(),
+                "()Ljava/util/Iterator;".to_string(),
+                false, // is_static = false for interface methods
+                &TypeEnum::Reference(crate::ast::ReferenceType::Class("java/util/Iterator".to_string())),
+                false // nonvirtual = false for interface methods (uses invokeinterface)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for interface method
+            let _result = items.invoke_item(&member_item)?;
+            
+            // Store iterator in local variable
+            items.code.emitop1(opcodes::ASTORE, iterator_slot as u8);
             Ok(())
         })?;
         
         // Generate loop with hasNext() condition
         let start_pc = self.with_items(|items| Ok(items.code.entry_point()))?;
         
-        // Call hasNext() method
-        let has_next_method_ref = self.get_pool_mut().add_interface_method_ref(
-            "java/util/Iterator",
-            "hasNext", 
-            "()Z"
-        );
-        
+        // Use enhanced MemberItem.invoke() optimization for hasNext() interface method call
         self.with_items(|items| {
             items.code.emitop1(opcodes::ALOAD, iterator_slot as u8); // Load iterator
-            items.code.emitop(opcodes::INVOKEINTERFACE);
-            items.code.emit2(has_next_method_ref);
-            items.code.emit1(1); // Interface method arg count  
-            items.code.emit1(0); // Padding
+            
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for interface method: hasNext()");
+            
+            // Create MemberItem for hasNext() interface method
+            let member_item = items.make_member_item_nonvirtual(
+                "hasNext".to_string(),
+                "java/util/Iterator".to_string(),
+                "()Z".to_string(),
+                false, // is_static = false for interface methods
+                &TypeEnum::Primitive(crate::ast::PrimitiveType::Boolean),
+                false // nonvirtual = false for interface methods (uses invokeinterface)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for interface method
+            let _result = items.invoke_item(&member_item)?;
             Ok(())
         })?;
         
@@ -6880,23 +7031,28 @@ impl Gen {
         // Generate loop variable: T v = (T) #i.next(); (JavaC alignment)
         let var_slot = self.new_local_by_type(&tree.variable_type.as_type_enum())?;
         
-        // Call next() method
-        let next_method_ref = self.get_pool_mut().add_interface_method_ref(
-            "java/util/Iterator",
-            "next", 
-            "()Ljava/lang/Object;"
-        );
-        
         // Pre-calculate type casting outside the closure to avoid borrowing conflicts
         let iterator_element_type = TypeEnum::Reference(ReferenceType::Class("java/lang/Object".to_string()));
         let var_type = self.infer_type_from_variable_name(&tree.variable_name);
         
+        // Use enhanced MemberItem.invoke() optimization for next() interface method call
         self.with_items(|items| {
             items.code.emitop1(opcodes::ALOAD, iterator_slot as u8); // Load iterator
-            items.code.emitop(opcodes::INVOKEINTERFACE);
-            items.code.emit2(next_method_ref);
-            items.code.emit1(1); // Interface method arg count
-            items.code.emit1(0); // Padding
+            
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for interface method: next()");
+            
+            // Create MemberItem for next() interface method
+            let member_item = items.make_member_item_nonvirtual(
+                "next".to_string(),
+                "java/util/Iterator".to_string(),
+                "()Ljava/lang/Object;".to_string(),
+                false, // is_static = false for interface methods
+                &TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string())),
+                false // nonvirtual = false for interface methods (uses invokeinterface)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for interface method
+            let _result = items.invoke_item(&member_item)?;
             Ok(())
         })?;
         
@@ -7137,18 +7293,25 @@ impl Gen {
         // Get list size: int size = list.size(); (JavaC alignment)
         let size_slot = self.new_local_by_type(&TypeEnum::Primitive(PrimitiveType::Int))?;
         
-        let size_method_ref = self.get_pool_mut().add_method_ref(
-            "java/util/List", 
-            "size", 
-            "()I"
-        );
-        
+        // Use enhanced MemberItem.invoke() optimization for list.size() interface method call
         self.with_items(|items| {
             items.code.emitop1(opcodes::ALOAD, list_slot as u8);
-            items.code.emitop(opcodes::INVOKEINTERFACE);
-            items.code.emit2(size_method_ref);
-            items.code.emit1(1); // arg count
-            items.code.emit1(0); // padding
+            
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for interface method: List.size()");
+            
+            // Create MemberItem for size() interface method
+            let member_item = items.make_member_item_nonvirtual(
+                "size".to_string(),
+                "java/util/List".to_string(),
+                "()I".to_string(),
+                false, // is_static = false for interface methods
+                &TypeEnum::Primitive(crate::ast::PrimitiveType::Int),
+                false // nonvirtual = false for interface methods (uses invokeinterface)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for interface method
+            let _result = items.invoke_item(&member_item)?;
+            
             items.code.emitop1(opcodes::ISTORE, size_slot as u8);
             Ok(())
         })?;
@@ -7167,19 +7330,26 @@ impl Gen {
         // Get loop variable: T item = list.get(i); (JavaC alignment)
         let var_slot = self.new_local_by_type(&tree.variable_type.as_type_enum())?;
         
-        let get_method_ref = self.get_pool_mut().add_method_ref(
-            "java/util/List", 
-            "get", 
-            "(I)Ljava/lang/Object;"
-        );
-        
+        // Use enhanced MemberItem.invoke() optimization for list.get(index) interface method call
         self.with_items(|items| {
             items.code.emitop1(opcodes::ALOAD, list_slot as u8); // Load list
             items.code.emitop1(opcodes::ILOAD, index_slot as u8); // Load index
-            items.code.emitop(opcodes::INVOKEINTERFACE);
-            items.code.emit2(get_method_ref);
-            items.code.emit1(2); // arg count (list + index)
-            items.code.emit1(0); // padding
+            
+            eprintln!("🔧 DEBUG: Using Enhanced MemberItem.invoke() for interface method: List.get()");
+            
+            // Create MemberItem for get() interface method
+            let member_item = items.make_member_item_nonvirtual(
+                "get".to_string(),
+                "java/util/List".to_string(),
+                "(I)Ljava/lang/Object;".to_string(),
+                false, // is_static = false for interface methods
+                &TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/Object".to_string())),
+                false // nonvirtual = false for interface methods (uses invokeinterface)
+            );
+            
+            // Use JavaC MemberItem.invoke() optimization for interface method
+            let _result = items.invoke_item(&member_item)?;
+            
             items.code.emitop1(opcodes::ASTORE, var_slot as u8);
             Ok(())
         })?;
@@ -9326,8 +9496,16 @@ impl Gen {
                 items.code.emit2(capacity);
             }
             
-            items.code.emitop(opcodes::INVOKESPECIAL);
-            items.code.emit2(constructor_ref);
+            // Use optimized invoke pattern instead of direct bytecode emission
+            let constructor_item = items.make_member_item_nonvirtual(
+                "<init>".to_string(),
+                "java/lang/StringBuilder".to_string(),
+                "(I)V".to_string(),
+                false,
+                &TypeEnum::Void,
+                true // nonvirtual constructor call
+            );
+            items.invoke_item(&constructor_item)?;
             Ok(())
         })
     }
@@ -9342,8 +9520,16 @@ impl Gen {
             items.code.emitop(opcodes::NEW);
             items.code.emit2(stringbuilder_class);
             items.code.emitop(opcodes::DUP);
-            items.code.emitop(opcodes::INVOKESPECIAL);
-            items.code.emit2(constructor_ref);
+            // Use optimized invoke pattern instead of direct bytecode emission
+            let constructor_item = items.make_member_item_nonvirtual(
+                "<init>".to_string(),
+                "java/lang/StringBuilder".to_string(),
+                "()V".to_string(),
+                false,
+                &TypeEnum::Void,
+                true // nonvirtual constructor call
+            );
+            items.invoke_item(&constructor_item)?;
             Ok(())
         })
     }
@@ -9383,8 +9569,16 @@ impl Gen {
         let append_ref = pool_mut.add_method_ref("java/lang/StringBuilder", "append", descriptor);
         
         self.with_items(|items| {
-            items.code.emitop(opcodes::INVOKEVIRTUAL);
-            items.code.emit2(append_ref);
+            // Use optimized invoke pattern for StringBuilder.append()
+            let append_item = items.make_member_item_nonvirtual(
+                "append".to_string(),
+                "java/lang/StringBuilder".to_string(),
+                descriptor.to_string(),
+                false,
+                &TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/StringBuilder".to_string())),
+                false // virtual method call
+            );
+            items.invoke_item(&append_item)?;
             Ok(())
         })
     }
@@ -9395,8 +9589,16 @@ impl Gen {
         let tostring_ref = pool_mut.add_method_ref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
         
         self.with_items(|items| {
-            items.code.emitop(opcodes::INVOKEVIRTUAL);
-            items.code.emit2(tostring_ref);
+            // Use optimized invoke pattern for StringBuilder.toString()
+            let tostring_item = items.make_member_item_nonvirtual(
+                "toString".to_string(),
+                "java/lang/StringBuilder".to_string(),
+                "()Ljava/lang/String;".to_string(),
+                false,
+                &TypeEnum::Reference(crate::ast::ReferenceType::Class("java/lang/String".to_string())),
+                false // virtual method call
+            );
+            items.invoke_item(&tostring_item)?;
             Ok(())
         })
     }
