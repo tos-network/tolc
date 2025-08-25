@@ -1,4 +1,4 @@
-use tolc::codegen::javac_jump_optimizer::{JavacJumpOptimizer, JumpChain, MachineState, OptimizationStats};
+use tolc::codegen::jump_chain_optimizer::{JumpChainOptimizer, JumpChain, MachineState, OptimizationStats};
 use tolc::codegen::opcode_enum::Opcode;
 use tolc::common::error::Result;
 
@@ -9,12 +9,12 @@ use tolc::common::error::Result;
 /// removal, and lazy resolution.
 
 #[cfg(test)]
-mod javac_jump_chain_tests {
+mod jump_chain_tests {
     use super::*;
 
     #[test]
     fn test_jump_chain_creation() {
-        let mut optimizer = JavacJumpOptimizer::new();
+        let mut optimizer = JumpChainOptimizer::new();
         let state = MachineState::new(2, 4);
         
         // Create a simple jump chain
@@ -49,7 +49,7 @@ mod javac_jump_chain_tests {
     
     #[test]
     fn test_jump_to_jump_detection() {
-        let mut optimizer = JavacJumpOptimizer::new();
+        let mut optimizer = JumpChainOptimizer::new();
         
         // Simulate bytecode with jump-to-jump pattern
         // Position 10: goto +5 (points to position 15)
@@ -86,7 +86,7 @@ mod javac_jump_chain_tests {
     
     #[test]
     fn test_fat_code_mode_switching() {
-        let mut optimizer = JavacJumpOptimizer::new();
+        let mut optimizer = JumpChainOptimizer::new();
         
         // Should start in normal mode
         assert!(!optimizer.is_fat_code());
@@ -105,7 +105,7 @@ mod javac_jump_chain_tests {
     
     #[test]
     fn test_optimization_statistics_tracking() {
-        let optimizer = JavacJumpOptimizer::new();
+        let optimizer = JumpChainOptimizer::new();
         let stats = optimizer.get_stats();
         
         // Initial stats should be zero
@@ -117,7 +117,7 @@ mod javac_jump_chain_tests {
     
     #[test]
     fn test_lazy_resolution_pattern() {
-        let mut optimizer = JavacJumpOptimizer::new();
+        let mut optimizer = JumpChainOptimizer::new();
         let state = MachineState::new(1, 1);
         
         // Create multiple branches that will be resolved later (JavaC pattern)
@@ -136,7 +136,7 @@ mod javac_jump_chain_tests {
     
     #[test]
     fn test_reset_functionality() {
-        let mut optimizer = JavacJumpOptimizer::new();
+        let mut optimizer = JumpChainOptimizer::new();
         let state = MachineState::new(2, 3);
         
         // Create some branches
@@ -152,7 +152,7 @@ mod javac_jump_chain_tests {
     
     #[test]
     fn test_conditional_jump_opcodes() {
-        let optimizer = JavacJumpOptimizer::new();
+        let optimizer = JumpChainOptimizer::new();
         let state = MachineState::new(2, 2);
         
         // Test various conditional jump opcodes

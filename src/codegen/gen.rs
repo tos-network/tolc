@@ -22,7 +22,7 @@ use super::class::ClassFile;
 use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
 use super::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
 use super::line_number_optimizer::{LineNumberOptimizer, LineNumberContext};
-use super::javac_jump_optimizer::{JavacJumpOptimizer, MachineState};
+use super::jump_chain_optimizer::{JumpChainOptimizer, MachineState};
 use super::flag::access_flags;
 use super::attribute;
 use super::field;
@@ -4522,7 +4522,7 @@ impl Gen {
     
     /// Create JavaC-style branch with jump chain optimization
     /// Based on javac's Code.branch() method
-    pub fn create_javac_branch(&mut self, opcode: crate::codegen::opcode_enum::Opcode) -> Result<crate::codegen::javac_jump_optimizer::JumpChain> {
+    pub fn create_branch(&mut self, opcode: crate::codegen::opcode_enum::Opcode) -> Result<crate::codegen::jump_chain_optimizer::JumpChain> {
         if let Some(code) = &mut self.code {
             // Create machine state for current context
             let state = MachineState::new(
@@ -4531,7 +4531,7 @@ impl Gen {
             );
             
             // Create branch with Code's JavaC jump optimizer
-            let chain = code.javac_jump_optimizer.branch(opcode, state);
+            let chain = code.jump_chain_optimizer.branch(opcode, state);
             Ok(chain)
         } else {
             Err(crate::common::error::Error::CodeGen { 
@@ -4542,31 +4542,31 @@ impl Gen {
     
     /// Resolve pending jumps using JavaC-style lazy resolution
     /// Based on javac's Code.resolve() method
-    pub fn resolve_javac_pending(&mut self, target: u32) -> Result<()> {
+    pub fn resolve_pending(&mut self, target: u32) -> Result<()> {
         if let Some(code) = &mut self.code {
-            code.javac_jump_optimizer.resolve_pending(target)?;
+            code.jump_chain_optimizer.resolve_pending(target)?;
         }
         Ok(())
     }
     
-    /// Merge JavaC jump chains (equivalent to Code.mergeChains)
-    pub fn merge_javac_chains(
+    /// Merge jump chains (equivalent to Code.mergeChains)
+    pub fn merge_jump_chains(
         &self,
-        chain1: Option<crate::codegen::javac_jump_optimizer::JumpChain>,
-        chain2: Option<crate::codegen::javac_jump_optimizer::JumpChain>
-    ) -> Option<crate::codegen::javac_jump_optimizer::JumpChain> {
-        crate::codegen::javac_jump_optimizer::JumpChain::merge_chains(chain1, chain2)
+        chain1: Option<crate::codegen::jump_chain_optimizer::JumpChain>,
+        chain2: Option<crate::codegen::jump_chain_optimizer::JumpChain>
+    ) -> Option<crate::codegen::jump_chain_optimizer::JumpChain> {
+        crate::codegen::jump_chain_optimizer::JumpChain::merge_chains(chain1, chain2)
     }
     
     /// Get JavaC jump optimizer statistics
-    pub fn get_jump_optimization_stats(&self) -> Option<&crate::codegen::javac_jump_optimizer::OptimizationStats> {
-        self.code.as_ref().map(|code| code.javac_jump_optimizer.get_stats())
+    pub fn get_jump_optimization_stats(&self) -> Option<&crate::codegen::jump_chain_optimizer::OptimizationStats> {
+        self.code.as_ref().map(|code| code.jump_chain_optimizer.get_stats())
     }
     
     /// Reset JavaC jump optimizer for new method
     pub fn reset_jump_optimizer(&mut self) {
         if let Some(code) = &mut self.code {
-            code.javac_jump_optimizer.reset();
+            code.jump_chain_optimizer.reset();
         }
     }
 }

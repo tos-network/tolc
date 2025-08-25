@@ -5207,19 +5207,19 @@ impl Gen {
         }
     }
     
-    /// Visit assignment expression - JavaC-aligned version following visitAssign pattern
-    pub fn visit_assign_javac(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
-        self.visit_assign_javac_internal(tree, env, true)
+    /// Visit assignment expression - compiler-aligned version following visitAssign pattern
+    pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
+        self.visit_assign_internal(tree, env, true)
     }
     
     /// Visit assignment for statement context (no result needed)
-    pub fn visit_assign_javac_stmt(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<()> {
-        let _result = self.visit_assign_javac_internal(tree, env, false)?;
+    pub fn visit_assign_stmt(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<()> {
+        let _result = self.visit_assign_internal(tree, env, false)?;
         Ok(())
     }
     
-    /// Internal JavaC assignment implementation
-    fn visit_assign_javac_internal(&mut self, tree: &AssignmentExpr, env: &GenContext, need_result: bool) -> Result<BytecodeItem> {
+    /// Internal assignment implementation
+    fn visit_assign_internal(&mut self, tree: &AssignmentExpr, env: &GenContext, need_result: bool) -> Result<BytecodeItem> {
         use crate::codegen::items::{Item, typecodes};
         
         // JavaC pattern: Item l = genExpr(tree.lhs, tree.lhs.type);
@@ -5362,6 +5362,21 @@ impl Gen {
                 })
             },
             
+            Expr::ArrayAccess(array_access) => {
+                // Handle array assignment: array[index] = value
+                
+                // First, generate the array reference
+                let _array_item = self.visit_expr(&array_access.array, env)?;
+                
+                // Then, generate the index
+                let _index_item = self.visit_expr(&array_access.index, env)?;
+                
+                // Create an indexed item for array assignment
+                Ok(Item::Indexed {
+                    typecode: typecodes::INT, // Default to int, should be inferred from array type
+                })
+            },
+            
             _ => {
                 Err(crate::common::error::Error::codegen_error(format!("Unsupported assignment target: {:?}", tree.target)))
             }
@@ -5437,7 +5452,7 @@ impl Gen {
     
     
     /// Determine if assignment should use JavaC-aligned processing
-    fn should_use_javac_assignment(&self, tree: &AssignmentExpr) -> bool {
+    fn should_use_aligned_assignment(&self, tree: &AssignmentExpr) -> bool {
         // Use JavaC assignment for field assignments involving method calls
         match tree.target.as_ref() {
             Expr::Identifier(ident) => {
@@ -5457,8 +5472,8 @@ impl Gen {
         }
     }
     
-    /// Visit assignment expression - simplified version (original)
-    pub fn visit_assign(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
+    /// Visit assignment expression - fallback version
+    pub fn visit_assign_fallback(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<BytecodeItem> {
         // Type check assignment using new infrastructure with proper context
         let target_type = self.infer_expression_type_with_context(&tree.target, env)?;
         let value_type = self.infer_expression_type_with_context(&tree.value, env)?;
@@ -5474,10 +5489,10 @@ impl Gen {
             self.type_to_string(&value_type)
         );
         
-        // For critical assignments involving interface method calls, use JavaC-aligned approach
-        if self.should_use_javac_assignment(tree) {
-            eprintln!("🚀 DEBUG: Using JavaC-style assignment for complex expression");
-            return self.visit_assign_javac(tree, env);
+        // For critical assignments involving interface method calls, use compiler-aligned approach
+        if self.should_use_aligned_assignment(tree) {
+            eprintln!("🚀 DEBUG: Using compiler-style assignment for complex expression");
+            return self.visit_assign_internal(tree, env, true);
         }
         
         // Check if target is a field access (this.field)
@@ -7459,9 +7474,9 @@ impl Gen {
     pub fn visit_exec(&mut self, tree: &ExprStmt, env: &GenContext) -> Result<()> {
         // Special handling for assignments in statement context
         if let Expr::Assignment(assignment) = &tree.expr {
-            if self.should_use_javac_assignment(assignment) {
+            if self.should_use_aligned_assignment(assignment) {
                 eprintln!("🚀 DEBUG: Using JavaC-style statement assignment");
-                return self.visit_assign_javac_stmt(assignment, env);
+                return self.visit_assign_stmt(assignment, env);
             }
         }
         

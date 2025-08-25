@@ -96,7 +96,7 @@ pub mod frame;
 // Backed up: pub mod jsr_ret_optimizer;
 // Backed up: pub mod enhanced_string_optimizer;
 pub mod line_number_optimizer; // JavaC-aligned line number debug optimization
-pub mod javac_jump_optimizer;  // JavaC-aligned jump chain optimization
+pub mod jump_chain_optimizer;  // Jump chain optimization
 // Backed up: pub mod loop_optimizer;
 pub mod method;
 // Backed up: pub mod method_invocation_optimizer;

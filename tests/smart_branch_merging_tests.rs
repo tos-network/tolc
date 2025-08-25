@@ -2,7 +2,7 @@
 // Testing smart branch merging and code liveness management
 
 use tolc::codegen::{Code, State, CodeType};
-use tolc::codegen::javac_jump_optimizer::{JumpChain, MachineState};
+use tolc::codegen::jump_chain_optimizer::{JumpChain, MachineState};
 use tolc::codegen::opcode_enum::Opcode;
 
 #[test]
@@ -48,8 +48,8 @@ fn test_dead_code_restoration() {
     let chain = JumpChain::new(10, None, state, Opcode::Goto, 3);
     
     // Restore code liveness through resolve_with_merge
-    code.javac_jump_optimizer.pending_jumps = Some(chain);
-    let _ = code.javac_jump_optimizer.resolve_pending(code.cp as u32);
+    code.jump_chain_optimizer.pending_jumps = Some(chain);
+    let _ = code.jump_chain_optimizer.resolve_pending(code.cp as u32);
     // After resolving jumps, manually restore alive state (JavaC pattern)
     code.alive = true;
     assert!(code.is_alive()); // Should restore to alive state
@@ -95,8 +95,8 @@ fn test_goto_optimization() {
     let chain = JumpChain::new(goto_pc as u32, None, state, Opcode::Goto, 3);
     
     // Should perform optimization during resolution
-    code.javac_jump_optimizer.pending_jumps = Some(chain);
-    let _ = code.javac_jump_optimizer.resolve_pending(code.cp as u32);
+    code.jump_chain_optimizer.pending_jumps = Some(chain);
+    let _ = code.jump_chain_optimizer.resolve_pending(code.cp as u32);
     
     // Verify code generation is correct
     assert!(code.is_alive());
@@ -127,7 +127,7 @@ fn test_enhanced_aliveness_tracking() {
         // Convert the old Chain to new JumpChain
         let state = MachineState::new(code.max_stack as u32, code.max_locals as u32);
         let jump_chain = JumpChain::new(code.cp as u32, None, state, Opcode::Ifeq, 3);
-        code.javac_jump_optimizer.pending_jumps = Some(jump_chain);
+        code.jump_chain_optimizer.pending_jumps = Some(jump_chain);
         assert!(code.is_alive());
     }
 }
@@ -213,11 +213,11 @@ fn test_javac_style_alive_management() {
     // But if there are pending jumps, still considered alive
     let state = MachineState::new(1, 5);
     let pending_chain = JumpChain::new(10, None, state, Opcode::Goto, 3);
-    code.javac_jump_optimizer.pending_jumps = Some(pending_chain);
+    code.jump_chain_optimizer.pending_jumps = Some(pending_chain);
     assert!(code.is_alive()); // javac isAlive behavior
     
     // After resolving pending jumps, code is alive again
-    let _ = code.javac_jump_optimizer.resolve_pending(code.cp as u32);
+    let _ = code.jump_chain_optimizer.resolve_pending(code.cp as u32);
     // Manually restore alive state (JavaC pattern)
     code.alive = true;
     assert!(code.is_alive());

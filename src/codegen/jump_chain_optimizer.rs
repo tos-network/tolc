@@ -56,7 +56,7 @@ pub struct MachineState {
 /// - Recursive chain merging
 /// - Complete machine state tracking
 #[derive(Debug)]
-pub struct JavacJumpOptimizer {
+pub struct JumpChainOptimizer {
     /// Pending jumps chain (JavaC: pendingJumps)
     pub pending_jumps: Option<JumpChain>,
     
@@ -156,7 +156,7 @@ impl JumpChain {
     }
 }
 
-impl JavacJumpOptimizer {
+impl JumpChainOptimizer {
     /// Create new JavaC-aligned jump optimizer
     pub fn new() -> Self {
         Self {
@@ -408,7 +408,7 @@ impl JavacJumpOptimizer {
     }
 }
 
-impl Default for JavacJumpOptimizer {
+impl Default for JumpChainOptimizer {
     fn default() -> Self {
         Self::new()
     }
@@ -439,7 +439,7 @@ mod tests {
     
     #[test]
     fn test_jump_to_jump_detection() {
-        let mut optimizer = JavacJumpOptimizer::new();
+        let mut optimizer = JumpChainOptimizer::new();
         
         // Set up bytecode with goto instruction at position 10
         optimizer.bytecode = vec![0; 20];
@@ -468,12 +468,12 @@ mod tests {
     
     #[test]
     fn test_instruction_size_calculation() {
-        let optimizer = JavacJumpOptimizer::new();
+        let optimizer = JumpChainOptimizer::new();
         
         assert_eq!(optimizer.get_instruction_size(&Opcode::Goto), 3);
         assert_eq!(optimizer.get_instruction_size(&Opcode::Ifeq), 3);
         
-        let mut fat_optimizer = JavacJumpOptimizer::new();
+        let mut fat_optimizer = JumpChainOptimizer::new();
         fat_optimizer.fat_code = true;
         assert_eq!(fat_optimizer.get_instruction_size(&Opcode::Goto), 5);
     }
