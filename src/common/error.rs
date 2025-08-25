@@ -36,6 +36,9 @@ pub enum Error {
     
     #[error("Internal compiler error: {message}")]
     Internal { message: String },
+    
+    #[error("Error: {message}")]
+    Other { message: String },
 }
 
 impl Error {

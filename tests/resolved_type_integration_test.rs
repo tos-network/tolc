@@ -12,8 +12,14 @@ use tolc::codegen::code::Code;
 use tolc::codegen::items::{Items, typecodes, Item};
 use tolc::codegen::attr::{ResolvedType, PrimitiveType};
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_resolved_type_to_typecode_conversion() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
+    
     // Create a mock constant pool and code buffer
     let mut pool = ConstantPool::new();
     let mut code = Code::new(10, true, false);

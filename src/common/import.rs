@@ -4,7 +4,7 @@
 //! to fully qualified names based on import declarations.
 
 use crate::ast::{Ast, ImportDecl, TypeDecl};
-use crate::common::manager::ClasspathManager;
+use crate::common::class_manager::ClassManager;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -33,11 +33,11 @@ pub struct ImportResolver<'a> {
     imports: Vec<ImportStatement>,
     simple_name_cache: HashMap<String, String>, // simple_name -> fully_qualified_name
     current_package: String,
-    manager: &'a mut ClasspathManager,
+    manager: &'a mut ClassManager,
 }
 
 impl<'a> ImportResolver<'a> {
-    pub fn new(manager: &'a mut ClasspathManager) -> Self {
+    pub fn new(manager: &'a mut ClassManager) -> Self {
         ImportResolver {
             imports: Vec::new(),
             simple_name_cache: HashMap::new(),
@@ -47,7 +47,7 @@ impl<'a> ImportResolver<'a> {
     }
     
     /// Build import resolver from AST import declarations
-    pub fn from_ast(ast: &Ast, manager: &'a mut ClasspathManager) -> Self {
+    pub fn from_ast(ast: &Ast, manager: &'a mut ClassManager) -> Self {
         let mut resolver = ImportResolver::new(manager);
         
         // Extract package name from the first type declaration
@@ -218,16 +218,16 @@ impl<'a> ImportResolver<'a> {
     }
 }
 
-/// Standalone ImportResolver that owns its ClasspathManager
+/// Standalone ImportResolver that owns its ClassManager
 /// This allows existing code to continue working while we migrate
 pub struct StandaloneImportResolver {
-    manager: ClasspathManager,
+    manager: ClassManager,
 }
 
 impl StandaloneImportResolver {
     pub fn new(default_classpath: &str) -> Self {
         StandaloneImportResolver {
-            manager: ClasspathManager::new(default_classpath),
+            manager: ClassManager::with_classpath(default_classpath),
         }
     }
     
@@ -290,7 +290,7 @@ mod tests {
         fs::write(java_util.join("List.java"), "package java.util; public interface List {}").unwrap();
         fs::write(java_util.join("ArrayList.java"), "package java.util; public class ArrayList {}").unwrap();
         
-        let mut manager = ClasspathManager::new(&temp_dir.path().to_string_lossy());
+        let mut manager = ClassManager::with_classpath(&temp_dir.path().to_string_lossy());
         
         // Create test imports
         let imports = vec![

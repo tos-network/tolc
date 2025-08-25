@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::env;
 use tolc::{Config, compile_file};
+mod common;
+use common::setup_test_classpath;
 
 fn java_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("java")
@@ -25,6 +27,7 @@ fn parse_java_files_in_order() {
         .try_init();
     let root = java_root();
     assert!(root.exists(), "tests/java directory not found: {}", root.display());
+    setup_test_classpath();
 
     // Reference compiled classes root for javap parity
     let ref_root = classes_root();

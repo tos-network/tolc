@@ -8,8 +8,13 @@ use tolc::{Config, compile2file};
 use tolc::codegen::SemanticAnalyzer;
 use tolc::parser::parse_java;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_wash_codegen_integration() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     // Simple generic class for testing wash integration
     let java_source = r#"
 public class TestGeneric<T> {
@@ -84,6 +89,8 @@ public class TestGeneric<T> {
 
 #[test]
 fn test_wash_type_info_structure() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let java_source = r#"
 public class SimpleClass {
     public void method() {

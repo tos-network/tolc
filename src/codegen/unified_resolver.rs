@@ -5,8 +5,7 @@
 
 use crate::common::env::SymbolEnvironment;
 use crate::codegen::gen::{IdentifierResolution, ResolutionContext};
-use crate::ast::{TypeRef, MethodDecl, ClassDecl};
-use crate::common::error::Result;
+use crate::ast::TypeRef;
 use std::collections::HashMap;
 
 /// UnifiedResolver - facade over SymbolEnvironment for JavaC-aligned resolution
@@ -144,7 +143,6 @@ impl UnifiedResolver {
     /// Resolve type names to descriptors using integrated type resolution
     /// JavaC equivalent: Types.erasure() + descriptor generation
     pub fn resolve_type_descriptor(&mut self, type_name: &str) -> Option<String> {
-        use crate::common::type_resolver::TypeResolver;
         use crate::ast::{TypeRef, Span, Location};
         
         // Create a simple TypeRef for the type name
@@ -157,7 +155,7 @@ impl UnifiedResolver {
         };
         
         // Use integrated type resolver
-        let mut manager = crate::common::manager::ClasspathManager::new("tests/java");
+        let mut manager = crate::common::class_manager::ClassManager::with_classpath("tests/java");
         let mut type_resolver = crate::common::type_resolver::TypeResolver::with_symbol_environment(&mut manager, self.symbol_env.clone());
         
         let resolution = type_resolver.resolve_type_ref(&type_ref);
@@ -167,7 +165,6 @@ impl UnifiedResolver {
     /// Resolve method signatures using enhanced type resolution
     /// JavaC equivalent: Resolve.resolveMethod
     pub fn resolve_method_signature(&mut self, class_name: &str, method_name: &str, param_types: &[TypeRef]) -> Option<String> {
-        use crate::common::type_resolver::TypeResolver;
         
         let method_key = format!("{}#{}", class_name, method_name);
         
@@ -183,7 +180,7 @@ impl UnifiedResolver {
         }
         
         // Use integrated type resolver for accurate parameter type resolution
-        let mut manager = crate::common::manager::ClasspathManager::new("tests/java");
+        let mut manager = crate::common::class_manager::ClassManager::with_classpath("tests/java");
         let mut type_resolver = crate::common::type_resolver::TypeResolver::with_symbol_environment(&mut manager, self.symbol_env.clone());
         
         let mut descriptor = String::from("(");

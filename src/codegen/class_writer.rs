@@ -29,26 +29,55 @@ pub struct ClassWriter {
 impl ClassWriter {
     /// Create a new JavaC-aligned class writer
     pub fn new() -> Self {
-        Self {
+        let mut instance = Self {
             gen: Gen::new(),
             config: Config::default(),
             package_name: None,
             annotation_retention: HashMap::new(),
             all_types: None,
             generic_signatures: None,
-        }
+        };
+        instance.initialize_compilation_context();
+        instance
     }
 
     /// Create a new JavaC-aligned class writer with configuration
     pub fn new_with_config(config: Config) -> Self {
-        Self {
+        let mut instance = Self {
             gen: Gen::new(),
             config,
             package_name: None,
             annotation_retention: HashMap::new(),
             all_types: None,
             generic_signatures: None,
-        }
+        };
+        instance.initialize_compilation_context();
+        instance
+    }
+
+    /// Initialize CompilationContext with ClassManager for proper type resolution
+    fn initialize_compilation_context(&mut self) {
+        use crate::common::compilation_context::{CompilationContext, CompilePhase};
+        use crate::common::class_manager::ClassManager;
+        
+        // Create ClassManager from TOLC_CLASSPATH environment variable
+        let class_manager = ClassManager::new();
+        
+        // Create CompilationContext
+        let mut compilation_context = CompilationContext {
+            class_manager,
+            config: self.config.clone(),
+            current_phase: CompilePhase::CodeGen,
+            errors: Vec::new(),
+            symbol_env: None,
+            type_info: None,
+            flow_analysis: None,
+        };
+        
+        // Set the compilation context in Gen
+        self.gen.set_compilation_context(compilation_context);
+        
+        eprintln!("✅ ClassWriter: Initialized CompilationContext with ClassManager");
     }
 
     /// Set the package name for class resolution

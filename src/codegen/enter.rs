@@ -1,14 +1,12 @@
 //! Enhanced Enter phase - Integrated with dynamic type resolution
 //!
 //! This is an enhanced version of the Enter phase that integrates with
-//! the new ClasspathManager and TypeResolver for dynamic type resolution.
+//! the new ClassManager and TypeResolver for dynamic type resolution.
 
-use crate::ast::{Ast, TypeDecl, ClassDecl, InterfaceDecl, EnumDecl, AnnotationDecl, TypeRef, ClassMember, InterfaceMember, FieldDecl, MethodDecl, Parameter};
+use crate::ast::{Ast, TypeDecl, ClassDecl, InterfaceDecl, EnumDecl, AnnotationDecl, TypeRef, ClassMember, InterfaceMember, FieldDecl, MethodDecl};
 use crate::common::error::Result;
-use crate::common::type_resolver::TypeResolver;
-use crate::common::import::ImportResolver;
-//use crate::common::manager::ClasspathManager;
-use crate::common::env::{SymbolKind, VariableSymbol, TypeParameterSymbol, MethodSymbol, ClassSymbol, SymbolEnvironment};
+//use crate::common::class_manager::ClassManager;
+use crate::common::env::{SymbolKind, VariableSymbol, MethodSymbol, SymbolEnvironment};
 use std::collections::HashMap;
 
 // Symbol table structures moved to common::env
@@ -271,7 +269,7 @@ impl EnhancedEnter {
         let type_parameters = self.process_type_parameters(&class_decl.type_params, &fully_qualified_name);
         
         // Create the ClassSymbol and add it to the classes table
-        let mut class_methods = HashMap::new();
+        let class_methods = HashMap::new();
         let class_symbol = crate::common::env::ClassSymbol {
             name: class_decl.name.clone(),
             fully_qualified_name,
@@ -410,7 +408,7 @@ impl EnhancedEnter {
     
     fn build_interface_symbols(&mut self, interface_decl: &InterfaceDecl, ast: &Ast) -> Result<()> {
         // Similar to class symbols but for interfaces
-        let class_owner = format!("class:{}", interface_decl.name);
+        let _class_owner = format!("class:{}", interface_decl.name);
         
         // Get fully qualified name and package info
         let (fully_qualified_name, package_name) = self.get_fully_qualified_name(&interface_decl.name, ast);

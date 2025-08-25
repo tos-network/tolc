@@ -2655,7 +2655,7 @@ impl Parser {
             
             self.consume(&Token::RBrace, "Expected '}' to close array initializer")?;
             let end = self.previous_span();
-            let span = Span::new(start.start, end.end);
+            let _span = Span::new(start.start, end.end);
             return Ok(Expr::ArrayInitializer(values));
         }
         

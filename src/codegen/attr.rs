@@ -7,9 +7,9 @@
 //! JavaC alignment: This module implements the same visitor pattern and
 //! attribution logic as JavaC's Attr.java.
 
-use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, FieldDecl, Expr, Stmt, BinaryOp, TypeEnum, ReferenceType, UnaryOp, TypeRef, TypeExt};
+use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, Expr, BinaryOp, TypeEnum, ReferenceType, UnaryOp, TypeExt};
 use crate::ast::PrimitiveType as AstPrimitiveType;
-use crate::common::error::{Result, Error};
+use crate::common::error::Result;
 use crate::common::env::SymbolEnvironment;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -559,11 +559,11 @@ impl Attr {
                 eprintln!("🔍 ATTR: Processing field: {}", field_decl.name);
                 self.attrib_field_decl(field_decl)?;
             }
-            ClassMember::Constructor(constructor_decl) => {
+            ClassMember::Constructor(_constructor_decl) => {
                 eprintln!("🔍 ATTR: Processing constructor");
                 // TODO: Implement constructor attribution
             }
-            ClassMember::Initializer(initializer) => {
+            ClassMember::Initializer(_initializer) => {
                 eprintln!("🔍 ATTR: Processing initializer block");
                 // TODO: Implement initializer attribution
             }
@@ -690,11 +690,11 @@ impl Attr {
             Expr::Identifier(identifier_expr) => {
                 self.resolve_identifier(&identifier_expr.name)
             }
-            Expr::MethodCall(method_call) => {
+            Expr::MethodCall(_method_call) => {
                 // TODO: Implement method call resolution
                 ResolvedType::Reference("java/lang/Object".to_string())
             }
-            Expr::FieldAccess(field_access) => {
+            Expr::FieldAccess(_field_access) => {
                 // TODO: Implement field access resolution
                 ResolvedType::Reference("java/lang/Object".to_string())
             }
@@ -1581,7 +1581,7 @@ impl Attr {
     }
     
     /// Find method candidates based on method name and target
-    fn find_method_candidates(&self, method_name: &str, target: &Option<Box<Expr>>) -> Result<Vec<MethodCandidate>> {
+    fn find_method_candidates(&self, method_name: &str, _target: &Option<Box<Expr>>) -> Result<Vec<MethodCandidate>> {
         let mut candidates = Vec::new();
         
         // Add built-in method candidates based on method name
@@ -1845,7 +1845,7 @@ impl Attr {
     }
     
     /// Resolve field type
-    fn resolve_field_type(&self, field_name: &str, target: &Option<Box<Expr>>) -> Result<ResolvedType> {
+    fn resolve_field_type(&self, field_name: &str, _target: &Option<Box<Expr>>) -> Result<ResolvedType> {
         // For now, return a placeholder field resolution
         // TODO: Implement full field resolution logic
         eprintln!("🔍 ATTR: Resolving field access: {}", field_name);

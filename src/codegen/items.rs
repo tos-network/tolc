@@ -6,8 +6,6 @@
 use crate::ast::{Literal, TypeEnum, PrimitiveType};
 use crate::common::error::Result;
 use crate::codegen::attr::{ResolvedType, PrimitiveType as WashPrimitiveType};
-use crate::common::type_resolver::TypeResolver;
-use crate::common::import::ImportResolver;
 use super::code::Code;
 use super::constpool::ConstantPool;
 use super::opcodes;

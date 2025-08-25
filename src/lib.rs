@@ -40,16 +40,9 @@ fn get_classpath() -> String {
 /// 
 /// This function compiles Java source code to bytecode and returns the generated
 /// class data as a Vec<u8>. Useful for tests and in-memory compilation.
-/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
+/// Uses JavaC-aligned classpath resolution (CLASSPATH env var or current directory).
 /// Java Source → Parser → AST → Wash Pipeline → Bytecode Generation → Vec<u8>
 pub fn compile(source: &str, config: &Config) -> Result<Vec<u8>> {
-    let classpath = get_classpath();
-    let mut manager = common::manager::ClasspathManager::new(&classpath);
-    compile_with_manager(source, config, &mut manager)
-}
-
-/// Compile Java source to bytecode with custom ClasspathManager
-pub fn compile_with_manager(source: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<Vec<u8>> {
     eprintln!("🔧 TOLC: Starting in-memory Java compilation");
     
     // Phase 1: Lexical Analysis & Parsing
@@ -57,9 +50,43 @@ pub fn compile_with_manager(source: &str, config: &Config, manager: &mut common:
     let mut ast = parser::parse_java(&source)?;
     eprintln!("✅ TOLC: Parsing complete - AST generated");
     
-    // Phase 2: Semantic Analysis Pipeline (Wash)
+    // Phase 2: Semantic Analysis Pipeline (uses internal ClassManager)
     eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
-    let mut semantic_analyzer = codegen::SemanticAnalyzer::new_with_manager(manager)?;
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new();
+    ast = semantic_analyzer.analyze(ast)?;
+    eprintln!("✅ TOLC: Semantic analysis complete");
+    
+    // Phase 3: In-memory Bytecode Generation
+    eprintln!("⚙️  TOLC: Phase 3 - In-memory bytecode generation with wash integration");
+    let signatures = semantic_analyzer.get_generic_signatures();
+    let type_info_raw = semantic_analyzer.attr.get_type_information();
+    let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
+    
+    // Convert HashMap<usize, ResolvedType> to HashMap<String, ResolvedType> for codegen
+    let type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType> = type_info_raw
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    
+    let bytecode = codegen::generate_bytecode_inmemory_with_wash(&ast, config, Some(signatures), Some(type_info), Some(symbol_env))?;
+    eprintln!("✅ TOLC: In-memory bytecode generation complete");
+    
+    eprintln!("🎉 TOLC: In-memory Java compilation finished successfully");
+    Ok(bytecode)
+}
+
+/// Compile Java source to bytecode with custom classpath
+pub fn compile_with_classpath(source: &str, config: &Config, classpath: &str) -> Result<Vec<u8>> {
+    eprintln!("🔧 TOLC: Starting in-memory Java compilation with classpath: {}", classpath);
+    
+    // Phase 1: Lexical Analysis & Parsing
+    eprintln!("📝 TOLC: Phase 1 - Parsing Java source");
+    let mut ast = parser::parse_java(&source)?;
+    eprintln!("✅ TOLC: Parsing complete - AST generated");
+    
+    // Phase 2: Semantic Analysis Pipeline with custom classpath
+    eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new_with_classpath(classpath);
     ast = semantic_analyzer.analyze(ast)?;
     eprintln!("✅ TOLC: Semantic analysis complete");
     
@@ -85,16 +112,9 @@ pub fn compile_with_manager(source: &str, config: &Config, manager: &mut common:
 /// Complete Java compilation pipeline following standard approach
 /// 
 /// This is the main entry point that orchestrates the entire compilation process:
-/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
+/// Uses JavaC-aligned classpath resolution (CLASSPATH env var or current directory).
 /// Java Source → Parser → AST → Wash Pipeline → Code Generation → .class files
 pub fn compile2file(source: &str, output_dir: &str, config: &Config) -> Result<()> {
-    let classpath = get_classpath();
-    let mut manager = common::manager::ClasspathManager::new(&classpath);
-    compile2file_with_manager(source, output_dir, config, &mut manager)
-}
-
-/// Complete Java compilation pipeline with custom ClasspathManager
-pub fn compile2file_with_manager(source: &str, output_dir: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<()> {
     eprintln!("🔧 TOLC: Starting Java compilation pipeline");
     
     // Phase 1: Lexical Analysis & Parsing
@@ -102,9 +122,44 @@ pub fn compile2file_with_manager(source: &str, output_dir: &str, config: &Config
     let mut ast = parser::parse_java(&source)?;
     eprintln!("✅ TOLC: Parsing complete - AST generated");
     
-    // Phase 2: Semantic Analysis Pipeline (Wash)
+    // Phase 2: Semantic Analysis Pipeline (uses internal ClassManager)
     eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
-    let mut semantic_analyzer = codegen::SemanticAnalyzer::new_with_manager(manager)?;
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new();
+    ast = semantic_analyzer.analyze(ast)?;
+    eprintln!("✅ TOLC: Semantic analysis complete");
+    
+    // Phase 3: Code Generation
+    eprintln!("⚙️  TOLC: Phase 3 - Bytecode generation with wash integration");
+    let signatures = semantic_analyzer.get_generic_signatures();
+    let type_info_raw = semantic_analyzer.attr.get_type_information();
+    let symbol_env = semantic_analyzer.enter.get_symbol_environment().clone();
+    
+    // Get semantic type mapping (meaningful names) for codegen  
+    let semantic_types = semantic_analyzer.attr.get_semantic_types();
+    let type_info: std::collections::HashMap<String, crate::codegen::attr::ResolvedType> = semantic_types
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    
+    codegen::generate_bytecode_with_wash(&ast, output_dir, config, Some(signatures), Some(type_info), Some(symbol_env))?;
+    eprintln!("✅ TOLC: Bytecode generation complete");
+    
+    eprintln!("🎉 TOLC: Java compilation pipeline finished successfully");
+    Ok(())
+}
+
+/// Complete Java compilation pipeline with custom classpath
+pub fn compile2file_with_classpath(source: &str, output_dir: &str, config: &Config, classpath: &str) -> Result<()> {
+    eprintln!("🔧 TOLC: Starting Java compilation pipeline with classpath: {}", classpath);
+    
+    // Phase 1: Lexical Analysis & Parsing
+    eprintln!("📝 TOLC: Phase 1 - Parsing Java source");
+    let mut ast = parser::parse_java(&source)?;
+    eprintln!("✅ TOLC: Parsing complete - AST generated");
+    
+    // Phase 2: Semantic Analysis Pipeline with custom classpath
+    eprintln!("🧠 TOLC: Phase 2 - Semantic analysis pipeline");
+    let mut semantic_analyzer = codegen::SemanticAnalyzer::new_with_classpath(classpath);
     ast = semantic_analyzer.analyze(ast)?;
     eprintln!("✅ TOLC: Semantic analysis complete");
     
@@ -135,37 +190,45 @@ pub fn compile2file_with_manager(source: &str, output_dir: &str, config: &Config
 }
 
 /// Compile a Java source file to bytecode
-/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
+/// Uses JavaC-aligned classpath resolution (CLASSPATH env var or current directory).
 pub fn compile_file(input_path: &str, output_dir: &str, config: &Config) -> Result<()> {
-    let classpath = get_classpath();
-    let mut manager = common::manager::ClasspathManager::new(&classpath);
-    compile_file_with_manager(input_path, output_dir, config, &mut manager)
-}
-
-/// Compile a Java source file to bytecode with custom ClasspathManager
-pub fn compile_file_with_manager(input_path: &str, output_dir: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<()> {
     eprintln!("📂 TOLC: Compiling file: {}", input_path);
     
     let source = std::fs::read_to_string(input_path)?;
     
-    compile2file_with_manager(&source, output_dir, config, manager)
+    compile2file(&source, output_dir, config)
+}
+
+/// Compile a Java source file with custom classpath
+pub fn compile_file_with_classpath(input_path: &str, output_dir: &str, config: &Config, classpath: &str) -> Result<()> {
+    eprintln!("📂 TOLC: Compiling file: {} with classpath: {}", input_path, classpath);
+    
+    let source = std::fs::read_to_string(input_path)?;
+    
+    compile2file_with_classpath(&source, output_dir, config, classpath)
 }
 
 /// Compile multiple Java source files
-/// Uses TOLC_CLASSPATH environment variable or defaults to current directory.
+/// Uses JavaC-aligned classpath resolution (CLASSPATH env var or current directory).
 pub fn compile_files(input_paths: &[String], output_dir: &str, config: &Config) -> Result<()> {
-    let classpath = get_classpath();
-    let mut manager = common::manager::ClasspathManager::new(&classpath);
-    compile_files_with_manager(input_paths, output_dir, config, &mut manager)
-}
-
-/// Compile multiple Java source files with custom ClasspathManager
-pub fn compile_files_with_manager(input_paths: &[String], output_dir: &str, config: &Config, manager: &mut common::manager::ClasspathManager) -> Result<()> {
     eprintln!("📁 TOLC: Compiling {} files", input_paths.len());
     
     for (index, input_path) in input_paths.iter().enumerate() {
         eprintln!("🔄 TOLC: [{}/{}] Compiling {}", index + 1, input_paths.len(), input_path);
-        compile_file_with_manager(input_path, output_dir, config, manager)?;
+        compile_file(input_path, output_dir, config)?;
+    }
+    
+    eprintln!("🏁 TOLC: All files compiled successfully");
+    Ok(())
+}
+
+/// Compile multiple Java source files with custom classpath
+pub fn compile_files_with_classpath(input_paths: &[String], output_dir: &str, config: &Config, classpath: &str) -> Result<()> {
+    eprintln!("📁 TOLC: Compiling {} files with classpath: {}", input_paths.len(), classpath);
+    
+    for (index, input_path) in input_paths.iter().enumerate() {
+        eprintln!("🔄 TOLC: [{}/{}] Compiling {}", index + 1, input_paths.len(), input_path);
+        compile_file_with_classpath(input_path, output_dir, config, classpath)?;
     }
     
     eprintln!("🏁 TOLC: All files compiled successfully");
@@ -194,6 +257,33 @@ pub fn compile_tol_files(input_paths: &[String], output_dir: &str, config: &Conf
         compile_tol_file(input_path, output_dir, config)?;
     }
     Ok(())
+}
+
+// === Backward Compatibility Functions ===
+// These functions are deprecated but maintained for compatibility
+
+#[deprecated(since = "0.2.0", note = "Use compile() instead - ClassManager is now internal")]
+pub fn compile_with_manager(source: &str, config: &Config, _manager: &mut common::class_manager::ClassManager) -> Result<Vec<u8>> {
+    eprintln!("⚠️  DEPRECATED: compile_with_manager() is deprecated. ClassManager is now internal to SemanticAnalyzer.");
+    compile(source, config)
+}
+
+#[deprecated(since = "0.2.0", note = "Use compile2file() instead - ClassManager is now internal")]
+pub fn compile2file_with_manager(source: &str, output_dir: &str, config: &Config, _manager: &mut common::class_manager::ClassManager) -> Result<()> {
+    eprintln!("⚠️  DEPRECATED: compile2file_with_manager() is deprecated. ClassManager is now internal to SemanticAnalyzer.");
+    compile2file(source, output_dir, config)
+}
+
+#[deprecated(since = "0.2.0", note = "Use compile_file() instead - ClassManager is now internal")]
+pub fn compile_file_with_manager(input_path: &str, output_dir: &str, config: &Config, _manager: &mut common::class_manager::ClassManager) -> Result<()> {
+    eprintln!("⚠️  DEPRECATED: compile_file_with_manager() is deprecated. ClassManager is now internal to SemanticAnalyzer.");
+    compile_file(input_path, output_dir, config)
+}
+
+#[deprecated(since = "0.2.0", note = "Use compile_files() instead - ClassManager is now internal")]
+pub fn compile_files_with_manager(input_paths: &[String], output_dir: &str, config: &Config, _manager: &mut common::class_manager::ClassManager) -> Result<()> {
+    eprintln!("⚠️  DEPRECATED: compile_files_with_manager() is deprecated. ClassManager is now internal to SemanticAnalyzer.");
+    compile_files(input_paths, output_dir, config)
 }
 
 #[cfg(test)]
@@ -245,7 +335,7 @@ public class TestCompilation {
     }
 
     #[test]
-    fn test_compile_with_custom_manager() {
+    fn test_compile_with_custom_classpath() {
         use tempfile::TempDir;
         use std::fs;
         
@@ -265,11 +355,35 @@ public class CustomTest {
 "#;
 
         let config = Config::default();
-        let mut manager = common::manager::ClasspathManager::new(&temp_dir.path().to_string_lossy());
+        let classpath = temp_dir.path().to_string_lossy();
         
-        // Test compilation with custom ClasspathManager
-        let result = compile_with_manager(source, &config, &mut manager);
-        assert!(result.is_ok(), "Custom manager compilation failed: {:?}", result.err());
+        // Test compilation with custom classpath using new API
+        let result = compile_with_classpath(source, &config, &classpath);
+        assert!(result.is_ok(), "Custom classpath compilation failed: {:?}", result.err());
+        
+        let bytecode = result.unwrap();
+        assert!(!bytecode.is_empty(), "Generated bytecode should not be empty");
+        assert_eq!(bytecode[0..4], [0xCA, 0xFE, 0xBA, 0xBE], "Bytecode should start with Java class file magic");
+    }
+
+    #[test] 
+    fn test_deprecated_functions() {
+        let source = r#"
+public class DeprecatedTest {
+    public int getValue() {
+        return 42;
+    }
+}
+"#;
+        let config = Config::default();
+        
+        // Test that deprecated functions still work but show warnings
+        let mut dummy_manager = common::class_manager::ClassManager::new();
+        
+        // This should work but show deprecation warning
+        #[allow(deprecated)]
+        let result = compile_with_manager(source, &config, &mut dummy_manager);
+        assert!(result.is_ok(), "Deprecated compile_with_manager failed: {:?}", result.err());
         
         let bytecode = result.unwrap();
         assert!(!bytecode.is_empty(), "Generated bytecode should not be empty");

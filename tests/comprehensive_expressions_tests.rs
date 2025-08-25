@@ -1,8 +1,13 @@
 use tolc::{Config, compile};
 use tolc::common::error::Result;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_arithmetic_binary_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ArithmeticTest {
             public static void main(String[] args) {
@@ -45,6 +50,8 @@ fn test_arithmetic_binary_expressions() -> Result<()> {
 
 #[test]
 fn test_comparison_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ComparisonTest {
             public static void main(String[] args) {
@@ -86,6 +93,8 @@ fn test_comparison_expressions() -> Result<()> {
 
 #[test]
 fn test_logical_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class LogicalTest {
             public static void main(String[] args) {
@@ -130,6 +139,8 @@ fn test_logical_expressions() -> Result<()> {
 
 #[test]
 fn test_unary_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class UnaryTest {
             public static void main(String[] args) {
@@ -168,6 +179,8 @@ fn test_unary_expressions() -> Result<()> {
 
 #[test]
 fn test_assignment_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class AssignmentTest {
             public static void main(String[] args) {
@@ -207,6 +220,8 @@ fn test_assignment_expressions() -> Result<()> {
 
 #[test]
 fn test_array_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ArrayTest {
             public static void main(String[] args) {
@@ -249,6 +264,8 @@ fn test_array_expressions() -> Result<()> {
 
 #[test]
 fn test_field_access_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class FieldAccessTest {
             public void testFieldAccess() {
@@ -275,6 +292,8 @@ fn test_field_access_expressions() -> Result<()> {
 
 #[test]
 fn test_conditional_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ConditionalTest {
             public static void main(String[] args) {
@@ -311,6 +330,8 @@ fn test_conditional_expressions() -> Result<()> {
 
 #[test]
 fn test_cast_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class CastTest {
             public static void main(String[] args) {
@@ -352,6 +373,8 @@ fn test_cast_expressions() -> Result<()> {
 
 #[test]
 fn test_instanceof_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class InstanceOfTest {
             public static void main(String[] args) {
@@ -390,6 +413,8 @@ fn test_instanceof_expressions() -> Result<()> {
 
 #[test]
 fn test_new_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class NewTest {
             public static void main(String[] args) {
@@ -428,6 +453,8 @@ fn test_new_expressions() -> Result<()> {
 
 #[test]
 fn test_parenthesized_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ParenthesizedTest {
             public static void main(String[] args) {
@@ -464,6 +491,8 @@ fn test_parenthesized_expressions() -> Result<()> {
 
 #[test]
 fn test_literal_expressions() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class LiteralTest {
             public static void main(String[] args) {

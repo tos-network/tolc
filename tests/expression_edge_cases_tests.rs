@@ -1,8 +1,13 @@
 use tolc::{Config, compile};
 use tolc::common::error::Result;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_operator_precedence_complex() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class PrecedenceTest {
             public static void main(String[] args) {
@@ -45,6 +50,8 @@ fn test_operator_precedence_complex() -> Result<()> {
 
 #[test]
 fn test_numeric_literals_edge_cases() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class NumericLiteralsTest {
             public static void main(String[] args) {
@@ -94,6 +101,8 @@ fn test_numeric_literals_edge_cases() -> Result<()> {
 
 #[test]
 fn test_string_and_char_edge_cases() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class StringCharTest {
             public static void main(String[] args) {
@@ -141,6 +150,8 @@ fn test_string_and_char_edge_cases() -> Result<()> {
 
 #[test]
 fn test_array_edge_cases() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ArrayEdgeCasesTest {
             public static void main(String[] args) {
@@ -195,6 +206,8 @@ fn test_array_edge_cases() -> Result<()> {
 
 #[test]
 fn test_short_circuit_evaluation_complex() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class ShortCircuitTest {
             private static boolean sideEffect = false;
@@ -252,6 +265,8 @@ fn test_short_circuit_evaluation_complex() -> Result<()> {
 
 #[test]
 fn test_type_conversion_edge_cases() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class TypeConversionTest {
             public static void main(String[] args) {
@@ -312,6 +327,8 @@ fn test_type_conversion_edge_cases() -> Result<()> {
 
 #[test]
 fn test_nested_expressions_deep() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class NestedExpressionsTest {
             public static void main(String[] args) {
@@ -376,6 +393,8 @@ fn test_nested_expressions_deep() -> Result<()> {
 
 #[test]
 fn test_null_and_reference_edge_cases() -> Result<()> {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
         public class NullReferenceTest {
             public static void main(String[] args) {

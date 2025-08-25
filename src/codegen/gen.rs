@@ -7,8 +7,7 @@
 use crate::ast::*;
 use crate::ast::{TypeEnum, PrimitiveType, ReferenceType};
 use crate::common::error::{Result, Error};
-use crate::common::type_resolver::TypeResolver;
-use crate::common::import::ImportResolver;
+use crate::common::compilation_context::CompilationContext;
 use crate::Config;
 use super::code::Code;
 use super::constpool::ConstantPool;
@@ -20,12 +19,11 @@ use super::type_inference::{TypeInference, ConstantValue};
 use super::type_cast_optimizer::TypeCastOptimizer;
 use super::class::ClassFile;
 // Backed up: use super::optimization_manager::OptimizationManager;
-use super::branch_optimizer::{BranchOptimizer, BranchOptimizationContext};
+use super::branch_optimizer::BranchOptimizer;
 use super::stack_map_optimizer::{StackMapOptimizer, StackMapTableCompressor};
-use super::line_number_optimizer::{LineNumberOptimizer, LineNumberContext};
-use super::jump_chain_optimizer::{JumpChainOptimizer, MachineState};
+use super::line_number_optimizer::LineNumberOptimizer;
+use super::jump_chain_optimizer::MachineState;
 use super::flag::access_flags;
-use super::attribute;
 use super::field;
 use super::method;
 
@@ -48,6 +46,9 @@ pub struct Gen {
     
     /// Configuration for code generation
     config: Config,
+    
+    /// Compilation context with class manager and shared state
+    pub compilation_context: Option<CompilationContext>,
     
     /// Current method context (transitional)
     pub method_context: MethodContext,
@@ -557,6 +558,54 @@ impl Gen {
             class_file: ClassFile::new(),            // JavaC ClassFile equivalent
             env: None,                               // Set per compilation unit
             config: Config::default(),               // Default configuration
+            compilation_context: None,               // Compilation context (set later)
+            method_context: MethodContext::new(),    // Transitional
+            class_context: ClassContext::new(),      // Transitional
+            type_inference,                          // JavaC Types equivalent
+            // Backed up: optimizer: OptimizationManager::new(),   // Optimization coordinator
+            branch_optimizer: BranchOptimizer::new(), // Branch optimization for conditional jumps
+            stack_map_optimizer: StackMapOptimizer::new(), // StackMapTable optimization for frame compression
+            register_alloc: crate::codegen::register_alloc::RegisterAllocator::new(), // Register allocation manager
+            dynamic_class_loader: None,              // Dynamic class loader (initialized on demand)
+            current_break_chain: None,               // Phase 2.3: break statement chain
+            current_continue_chain: None,            // Phase 2.3: continue statement chain
+            label_env_map: std::collections::HashMap::new(), // Label to environment mapping
+            loop_context_stack: Vec::new(),          // Optimized loop context stack
+            scope_manager: LoopScopeManager::new(), // Enhanced scope management
+            generic_signatures: None,               // Generic signatures from TransTypes
+            wash_type_info: None,                    // Type information from wash/attr phase
+            wash_symbol_env: None,                   // Symbol environment from wash/enter phase
+            unified_resolver: None,                  // Unified resolver for identifier resolution
+            line_number_optimizer: LineNumberOptimizer::new(true), // Line number debug info optimizer (enabled by default)
+            inner_class_relationships: Vec::new(),  // Inner class relationships for InnerClasses attribute
+            parent_class_name: None,                 // Parent class name for inner classes
+            current_super_class_name: None,          // Current super class name for constructor calls
+            lambda_counter: 0,                       // Lambda method counter for unique names
+            bootstrap_methods: Vec::new(),           // Bootstrap methods for invokedynamic
+            package_context: None,                   // Package context for current compilation unit
+            static_field_initializers: Vec::new(),  // Static field initializers for <clinit>
+            instance_field_initializers: Vec::new(), // Instance field initializers for constructors
+            pending_lambda_methods: Vec::new(),      // Pending lambda methods for class file generation
+            type_cast_optimizer: TypeCastOptimizer::new(), // Type cast optimizer for efficient conversions
+            array_access_optimizer: crate::codegen::array_access_optimizer::ArrayAccessOptimizer::new(), // Array access optimizer
+        }
+    }
+    
+    /// Create new generator instance with compilation context
+    pub fn new_with_context(mut context: CompilationContext) -> Self {
+        let symtab = Symtab::new();
+        let type_inference = TypeInference::new(symtab);
+        
+        // Set the phase to CodeGen
+        context.set_phase(crate::common::compilation_context::CompilePhase::CodeGen);
+        
+        Self {
+            code: None,                              // Created per method
+            pool: ConstantPool::new(),               // JavaC Pool equivalent
+            class_file: ClassFile::new(),            // JavaC ClassFile equivalent
+            env: None,                               // Set per compilation unit
+            config: context.config.clone(),          // Use config from context
+            compilation_context: Some(context),      // Set compilation context
             method_context: MethodContext::new(),    // Transitional
             class_context: ClassContext::new(),      // Transitional
             type_inference,                          // JavaC Types equivalent
@@ -689,6 +738,100 @@ impl Gen {
         } else {
             None
         }
+    }
+    
+    /// Dynamic method lookup using CompilationContext (replaces hardcoded mappings)
+    /// Reference: com.sun.tools.javac.comp.Resolve.findMethod()
+    pub fn lookup_method_in_classpath(&mut self, class_name: &str, method_name: &str, args: &[TypeEnum]) -> Option<crate::common::MethodInfo> {
+        if let Some(ref mut context) = self.compilation_context {
+            eprintln!("🔍 DYNAMIC_LOOKUP: Looking for method {}#{} with {} args", class_name, method_name, args.len());
+            
+            if let Some(method_info) = context.resolve_method(class_name, method_name, args) {
+                eprintln!("✅ DYNAMIC_LOOKUP: Found method {}#{} -> {}({}){}", 
+                         class_name, method_name, method_info.name, 
+                         method_info.parameters.join(", "), method_info.return_type);
+                return Some(method_info);
+            } else {
+                eprintln!("❌ DYNAMIC_LOOKUP: Method {}#{} not found", class_name, method_name);
+            }
+        } else {
+            eprintln!("⚠️  DYNAMIC_LOOKUP: No CompilationContext available for {}#{}", class_name, method_name);
+        }
+        None
+    }
+    
+    /// Resolve type name using CompilationContext (replaces hardcoded type mappings)
+    /// Reference: com.sun.tools.javac.comp.Resolve.findType()
+    pub fn resolve_type_name(&mut self, type_name: &str) -> String {
+        if let Some(ref mut context) = self.compilation_context {
+            let resolved = context.resolve_type_name(type_name);
+            eprintln!("🔍 TYPE_RESOLVE: '{}' -> '{}'", type_name, resolved);
+            return resolved;
+        }
+        
+        // Fallback to hardcoded common type mappings when no CompilationContext
+        eprintln!("⚠️  TYPE_RESOLVE: No CompilationContext, using hardcoded mapping for '{}'", type_name);
+        let resolved = match type_name {
+            // Common java.lang types
+            "String" => "java.lang.String",
+            "Object" => "java.lang.Object",
+            "Integer" => "java.lang.Integer",
+            "Boolean" => "java.lang.Boolean",
+            "Long" => "java.lang.Long",
+            "Double" => "java.lang.Double",
+            "Float" => "java.lang.Float",
+            "Character" => "java.lang.Character",
+            "Byte" => "java.lang.Byte",
+            "Short" => "java.lang.Short",
+            "Class" => "java.lang.Class",
+            "System" => "java.lang.System",
+            "Exception" => "java.lang.Exception",
+            "RuntimeException" => "java.lang.RuntimeException",
+            "Throwable" => "java.lang.Throwable",
+            // Common java.util types
+            "List" => "java.util.List",
+            "ArrayList" => "java.util.ArrayList",
+            "HashMap" => "java.util.HashMap",
+            "Map" => "java.util.Map",
+            "Set" => "java.util.Set",
+            "HashSet" => "java.util.HashSet",
+            "Iterator" => "java.util.Iterator",
+            "Collection" => "java.util.Collection",
+            // Common java.io types
+            "PrintStream" => "java.io.PrintStream",
+            "InputStream" => "java.io.InputStream",
+            "OutputStream" => "java.io.OutputStream",
+            // Default: return as-is
+            _ => type_name
+        };
+        eprintln!("🔍 HARDCODED_RESOLVE: '{}' -> '{}'", type_name, resolved);
+        resolved.to_string()
+    }
+    
+    /// Generate method signature using CompilationContext
+    /// Reference: com.sun.tools.javac.jvm.Gen.makeSignature()
+    pub fn get_method_signature(&mut self, class_name: &str, method_name: &str, args: &[TypeEnum]) -> Option<String> {
+        if let Some(ref mut context) = self.compilation_context {
+            if let Some(signature) = context.get_method_signature(class_name, method_name, args) {
+                eprintln!("✅ SIGNATURE: {}#{} -> {}", class_name, method_name, signature);
+                return Some(signature);
+            }
+        }
+        
+        eprintln!("❌ SIGNATURE: Failed to generate signature for {}#{}", class_name, method_name);
+        None
+    }
+    
+    /// Check if we have CompilationContext available
+    pub fn has_compilation_context(&self) -> bool {
+        self.compilation_context.is_some()
+    }
+    
+    /// Set CompilationContext for dynamic type resolution
+    /// This method allows external components (like ClassWriter) to provide compilation context
+    pub fn set_compilation_context(&mut self, context: crate::common::compilation_context::CompilationContext) {
+        eprintln!("🔧 GEN: Setting CompilationContext for dynamic type resolution");
+        self.compilation_context = Some(context);
     }
     
     /// Check if wash phases have completed successfully
@@ -2815,7 +2958,7 @@ impl Gen {
     }
     
     /// Simple type to descriptor conversion for interfaces
-    fn simple_type_to_descriptor(&self, type_ref: &TypeRef) -> String {
+    fn simple_type_to_descriptor(&mut self, type_ref: &TypeRef) -> String {
         // Use the new symbol resolution system to generate descriptors
         let base_descriptor = match self.resolve_to_descriptor(&type_ref.name) {
             Ok(descriptor) => descriptor,
@@ -3617,14 +3760,15 @@ impl Gen {
     
     /// Create method info from current code buffer and add to class file  
     fn create_method_info_from_code(&mut self, method: &MethodDecl) -> Result<()> {
-        let code = self.code.as_ref().ok_or_else(|| Error::CodeGen { 
-            message: "No code buffer for method".to_string() 
-        })?;
-        
-        // Add method name and descriptor to constant pool
+        // Generate method info first (needs mutable access)
         let name_idx = self.pool.add_utf8(&method.name);
         let descriptor = self.create_method_descriptor(method)?;
         let descriptor_idx = self.pool.add_utf8(&descriptor);
+        
+        // Now borrow code immutably 
+        let code = self.code.as_ref().ok_or_else(|| Error::CodeGen { 
+            message: "No code buffer for method".to_string() 
+        })?;
         
         // Convert modifiers to access flags
         let access_flags = super::modifiers_to_flags(&method.modifiers);
@@ -3646,7 +3790,7 @@ impl Gen {
             
             // Generate LineNumberTable using JavaC-aligned optimizer if debug is enabled
             if self.config.debug && self.line_number_optimizer.is_enabled() {
-                use super::attribute::{LineNumberTableAttribute, LineNumberEntry};
+                use super::attribute::LineNumberTableAttribute;
                 
                 // Get optimized line number entries from the line number optimizer
                 let line_entries = self.line_number_optimizer.get_line_numbers();
@@ -3785,12 +3929,12 @@ impl Gen {
         }
         
         // Add Signature attribute if stored during TransTypes phase
-        if let Some(ref signatures) = self.generic_signatures {
+        if self.generic_signatures.is_some() {
             // Get current class name for signature key
             let class_name = if let Some(ref class) = self.class_context.class {
-                &class.name
+                class.name.clone()
             } else {
-                "UnknownClass"
+                "UnknownClass".to_string()
             };
             
             // For constructors, include descriptor to distinguish overloads
@@ -3800,14 +3944,18 @@ impl Gen {
             } else {
                 format!("method:{}:{}", class_name, method.name)
             };
-            if let Some(signature) = signatures.get(&signature_key) {
-                let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
-                    &mut self.pool, 
-                    signature.clone()
-                ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create method signature attribute: {}", e)))?;
-                
-                method_info.attributes.push(signature_attr);
-                eprintln!("🔧 GEN: Added method signature attribute for '{}.{}'", class_name, method.name);
+            
+            // Now borrow signatures
+            if let Some(ref signatures) = self.generic_signatures {
+                if let Some(signature) = signatures.get(&signature_key) {
+                    let signature_attr = super::attribute::NamedAttribute::new_signature_attribute(
+                        &mut self.pool, 
+                        signature.clone()
+                    ).map_err(|e| crate::common::error::Error::codegen_error(format!("Failed to create method signature attribute: {}", e)))?;
+                    
+                    method_info.attributes.push(signature_attr);
+                    eprintln!("🔧 GEN: Added method signature attribute for '{}.{}'", class_name, method.name);
+                }
             }
         }
         
@@ -3845,7 +3993,7 @@ impl Gen {
     }
     
     /// Create method descriptor string from method declaration
-    fn create_method_descriptor(&self, method: &MethodDecl) -> Result<String> {
+    fn create_method_descriptor(&mut self, method: &MethodDecl) -> Result<String> {
         let mut descriptor = "(".to_string();
         
         // Add parameter types
@@ -3868,7 +4016,7 @@ impl Gen {
     }
     
     /// Convert TypeRef to JVM descriptor string
-    pub fn type_ref_to_descriptor(&self, type_ref: &TypeRef) -> Result<String> {
+    pub fn type_ref_to_descriptor(&mut self, type_ref: &TypeRef) -> Result<String> {
         // Check if this is an array type
         if type_ref.array_dims > 0 {
             let element_desc = self.type_ref_to_base_descriptor(&type_ref.name)?;
@@ -3882,72 +4030,18 @@ impl Gen {
     
     /// Convert base type name to JVM descriptor string  
     /// Now uses the new symbol resolution system
-    pub fn type_ref_to_base_descriptor(&self, name: &str) -> Result<String> {
+    pub fn type_ref_to_base_descriptor(&mut self, name: &str) -> Result<String> {
         // Use the new symbol resolution method that handles wash/SymbolEnvironment resolution
         self.resolve_to_descriptor(name)
     }
     
-    /// Use wash/SymbolEnvironment to resolve type names (new method)
-    /// Prioritize wash phase symbol resolution, fallback to builtin types
-    pub fn resolve_type_name(&self, simple_name: &str) -> String {
-        eprintln!("🔍 GEN: resolve_type_name called with '{}'", simple_name);
-        
-        // 0. Check for generic type parameters that need type erasure
-        // Generic type variables (T, E, K, V, etc.) should be erased to Object
-        if simple_name.len() == 1 && simple_name.chars().next().unwrap().is_uppercase() {
-            eprintln!("🔧 TYPE ERASURE: Converting generic type parameter '{}' to java.lang.Object", simple_name);
-            return "java.lang.Object".to_string();
-        }
-        
-        // 1. First try to use wash/SymbolEnvironment resolution
-        if let Some(ref symbol_env) = self.wash_symbol_env {
-            if let Some(qualified_name) = symbol_env.resolve_type(simple_name) {
-                eprintln!("🔧 GEN: Resolved {} -> {} (via wash/SymbolEnvironment)", simple_name, qualified_name);
-                return qualified_name;
-            }
-        }
-        
-        // 2. Fallback to original hardcoded mappings (gradually being replaced)
-        match simple_name {
-            // Basic type mappings
-            "String" => "java.lang.String".to_string(),
-            "Object" => "java.lang.Object".to_string(),
-            "Comparable" => "java.lang.Comparable".to_string(),
-            "Comparator" => "java.util.Comparator".to_string(),
-            "List" => "java.util.List".to_string(),
-            "Map" => "java.util.Map".to_string(),
-            "Set" => "java.util.Set".to_string(),
-            "Collection" => "java.util.Collection".to_string(),
-            "ListIterator" => "java.util.ListIterator".to_string(),
-            "Iterator" => "java.util.Iterator".to_string(),
-            "AbstractList" => "java.util.AbstractList".to_string(),
-            "UnsupportedOperationException" => "java.lang.UnsupportedOperationException".to_string(),
-            "NoSuchElementException" => "java.util.NoSuchElementException".to_string(),
-            _ => {
-                // Try to resolve through TypeResolver
-                let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
-                
-                if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(simple_name) {
-                    fully_qualified
-                } else if crate::common::consts::JAVA_LANG_SIMPLE_TYPES.contains(&simple_name) {
-                    eprintln!("🔧 GEN: Resolving {} via JAVA_LANG_SIMPLE_TYPES", simple_name);
-                    format!("java.lang.{}", simple_name)
-                } else {
-                    // Final fallback: assume it's already a fully qualified name or in default package
-                    eprintln!("⚠️ GEN: Could not resolve type '{}', using as-is", simple_name);
-                    simple_name.to_string()
-                }
-            }
-        }
-    }
-    
     /// Resolve type name to internal format (java.lang.String -> java/lang/String)
-    pub fn resolve_to_internal_name(&self, simple_name: &str) -> String {
+    pub fn resolve_to_internal_name(&mut self, simple_name: &str) -> String {
         self.resolve_type_name(simple_name).replace('.', "/")
     }
     
     /// Resolve type name to descriptor format (java.lang.String -> Ljava/lang/String;)
-    pub fn resolve_to_descriptor(&self, simple_name: &str) -> Result<String> {
+    pub fn resolve_to_descriptor(&mut self, simple_name: &str) -> Result<String> {
         // Handle primitive types
         match simple_name {
             "boolean" => return Ok("Z".to_string()),
@@ -4380,7 +4474,7 @@ impl LoopScopeManager {
 impl Gen {
     /// Extract frame information from bytecode using proper FrameBuilder
     fn extract_frame_information(&self, bytecode: &[u8]) -> Result<Vec<(u16, Vec<super::frame::VerificationType>, Vec<super::frame::VerificationType>)>> {
-        use super::frame::{FrameBuilder, StackMapFrame, VerificationType};
+        use super::frame::{FrameBuilder, StackMapFrame};
         
         // Use proper FrameBuilder to compute StackMapTable frames
         let frame_builder = FrameBuilder::new();

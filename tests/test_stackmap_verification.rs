@@ -4,6 +4,9 @@ use tolc::ast::TypeDecl;
 use tolc::Config;
 use std::process::Command;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_stackmap_if_else_generation() {
     let source = r#"
@@ -34,6 +37,9 @@ public class StackMapIfElse {
     
     let ast = parse_and_verify(source).expect("Failed to parse");
     let type_decl = ast.type_decls.iter().find(|td| matches!(td, TypeDecl::Class(c) if c.name == "StackMapIfElse")).expect("No StackMapIfElse class found");
+    
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     
     // Create config with StackMapTable enabled
     let config = Config::default()

@@ -27,9 +27,13 @@ enum Commands {
         #[arg(short, long, value_name = "DIR")]
         output: Option<PathBuf>,
         
-        /// Classpath for finding dependencies (overrides TOLC_CLASSPATH env var)
+        /// Classpath for finding dependencies (same as -cp)
         #[arg(long, value_name = "PATH")]
         classpath: Option<String>,
+        
+        /// Classpath for finding dependencies (same as --classpath)
+        #[arg(short = 'c', long = "cp", value_name = "PATH")]
+        cp: Option<String>,
         
         /// Verbose output
         #[arg(short, long)]
@@ -74,8 +78,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match &cli.command {
-        Commands::Compile { input, output, classpath, verbose, target_version, debug_frames, no_frames } => {
-            compile_file_with_classpath(input, output.as_ref(), classpath.as_deref(), *verbose, *target_version, *debug_frames, *no_frames)?;
+        Commands::Compile { input, output, classpath, cp, verbose, target_version, debug_frames, no_frames } => {
+            compile_file_with_classpath(input, output.as_ref(), classpath.as_deref(), cp.as_deref(), *verbose, *target_version, *debug_frames, *no_frames)?;
         }
         Commands::Parse { input, detailed } => {
             parse_file(input, *detailed)?;
@@ -88,17 +92,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Get classpath from command line argument, environment variable, or default
-fn get_effective_classpath(classpath_arg: Option<&str>) -> String {
-    // Priority: 1) Command line arg, 2) Environment variable, 3) Current directory
-    classpath_arg
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("TOLC_CLASSPATH").ok())
-        .unwrap_or_else(|| ".".to_string())
+/// Get effective classpath following JavaC's priority order
+/// 
+/// Priority (same as javac):
+/// 1. -cp or -classpath command line arguments (highest priority)
+/// 2. CLASSPATH environment variable (secondary priority)  
+/// 3. Current directory "." (default fallback)
+/// 
+/// Also supports TOLC_CLASSPATH for backward compatibility
+fn get_effective_classpath(classpath_arg: Option<&str>, cp_arg: Option<&str>) -> String {
+    use tolc::common::classpath::ClasspathResolver;
+    
+    // Use JavaC-aligned resolution with TOLC_CLASSPATH fallback for backward compatibility
+    ClasspathResolver::resolve_classpath_with_tolc_fallback(classpath_arg, cp_arg)
 }
 
-fn compile_file_with_classpath(input: &PathBuf, output: Option<&PathBuf>, classpath: Option<&str>, verbose: bool, target_version: u8, debug_frames: bool, no_frames: bool) -> Result<()> {
-    let effective_classpath = get_effective_classpath(classpath);
+fn compile_file_with_classpath(input: &PathBuf, output: Option<&PathBuf>, classpath: Option<&str>, cp: Option<&str>, verbose: bool, target_version: u8, debug_frames: bool, no_frames: bool) -> Result<()> {
+    let effective_classpath = get_effective_classpath(classpath, cp);
     
     if verbose {
         println!("Compiling {} with classpath: {}", input.display(), effective_classpath);
@@ -134,10 +144,21 @@ fn compile_file_internal(input: &PathBuf, output: Option<&PathBuf>, classpath: &
     let input_str = input.to_string_lossy();
     
     if input_str.ends_with(".java") {
-        // Use new Java compilation pipeline with custom classpath
-        let mut manager = tolc::common::manager::ClasspathManager::new(classpath);
-        tolc::compile_file_with_manager(&input_str, &output_str, &config, &mut manager)
-            .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
+        // Use simplified Java compilation pipeline
+        if verbose {
+            println!("Using simplified compilation pipeline with classpath: {}", classpath);
+        }
+        
+        // Use new API - either default classpath resolution or explicit classpath
+        if classpath == "." {
+            // Use default classpath resolution (JavaC-aligned)
+            tolc::compile_file(&input_str, &output_str, &config)
+                .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
+        } else {
+            // Use explicit classpath
+            tolc::compile_file_with_classpath(&input_str, &output_str, &config, classpath)
+                .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
+        }
     } else if input_str.ends_with(".tol") {
         // Use legacy .tol compilation
         if verbose {

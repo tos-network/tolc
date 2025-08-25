@@ -32,10 +32,6 @@ use super::items::{Item, Item as BytecodeItem, Items, typecodes};
 use super::branch_optimizer::BranchOptimizationContext;
 use super::opcodes;
 use crate::codegen::attr::ResolvedType;
-use crate::codegen::type_cast_optimizer::TypeCastOptimizer;
-use crate::common::classloader::{ClassLoader, DynamicLoadable};
-use crate::common::type_resolver::TypeResolver;
-use crate::common::import::ImportResolver;
 
 /// Lambda method information for deferred generation
 #[derive(Debug, Clone)]
@@ -4197,11 +4193,9 @@ impl Gen {
                     return is_static;
                 }
                 
-                // Then check dynamic class loader / classpath
-                if let Some(is_static) = self.lookup_method_in_classpath(&qualified_class, &tree.name) {
-                    eprintln!("✅ CLASSPATH LOOKUP: Found method '{}::{}' in classpath, is_static={}", qualified_class, tree.name, is_static);
-                    return is_static;
-                }
+                // TODO: Use CompilationContext-based lookup from gen.rs
+                // For now, fallback to heuristic static detection
+                eprintln!("🔄 CLASSPATH FALLBACK: Using heuristic static detection for '{}::{}'", qualified_class, tree.name);
                 
                 eprintln!("⚠️ QUALIFIED CALL: Method '{}::{}' not found in rt.rs or classpath", qualified_class, tree.name);
                 return false;
@@ -4213,9 +4207,8 @@ impl Gen {
                 if let Some(is_static) = self.lookup_method_with_type_resolver(&qualified_class, &tree.name) {
                     return is_static;
                 }
-                if let Some(is_static) = self.lookup_method_in_classpath(&qualified_class, &tree.name) {
-                    return is_static;
-                }
+                // TODO: Use CompilationContext-based lookup from gen.rs
+                // For now, fallback to heuristic static detection
                 return false;
             } else {
                 false // Complex target expression - likely instance method
@@ -4364,13 +4357,8 @@ impl Gen {
         }
     }
     
-    /// Lookup method in classpath using dynamic class loader
-    fn lookup_method_in_classpath(&self, qualified_class: &str, method_name: &str) -> Option<bool> {
-        // TODO: Implement classpath lookup using dynamic_class_loader
-        // For now, return None to indicate not found
-        eprintln!("🔍 CLASSPATH LOOKUP: Would search for '{}::{}' in classpath", qualified_class, method_name);
-        None
-    }
+    /// Use the CompilationContext-based lookup from gen.rs instead
+    // Removed duplicate method - using lookup_method_in_classpath from gen.rs
     
     /// Resolve simple class name to fully qualified name
     fn resolve_simple_class_name(&self, simple_name: &str) -> String {
@@ -5290,7 +5278,7 @@ impl Gen {
     
     /// Internal assignment implementation
     fn visit_assign_internal(&mut self, tree: &AssignmentExpr, env: &GenContext, need_result: bool) -> Result<BytecodeItem> {
-        use crate::codegen::items::{Item, typecodes};
+        use crate::codegen::items::typecodes;
         
         // JavaC pattern: Item l = genExpr(tree.lhs, tree.lhs.type);
         //                genExpr(tree.rhs, tree.lhs.type).load();
@@ -5325,7 +5313,7 @@ impl Gen {
     
     /// Generate left-hand side item for assignment (JavaC genExpr equivalent for lhs)
     fn generate_lhs_item_javac(&mut self, tree: &AssignmentExpr, env: &GenContext) -> Result<crate::codegen::items::Item> {
-        use crate::codegen::items::{Item, typecodes};
+        use crate::codegen::items::typecodes;
         
         match tree.target.as_ref() {
             Expr::Identifier(ident) => {
@@ -8714,7 +8702,7 @@ impl Gen {
     
     /// Infer functional interface for lambda expression - JavaC Attr.visitLambda equivalent
     fn infer_functional_interface(&mut self, lambda: &LambdaExpr) -> Result<FunctionalInterface> {
-        use crate::codegen::descriptor::{functional_interface_descriptor, type_enum_to_descriptor};
+        use crate::codegen::descriptor::functional_interface_descriptor;
         
         // Determine functional interface based on lambda signature
         let param_count = lambda.parameters.len();
@@ -8846,7 +8834,7 @@ impl Gen {
     
     /// Generate field descriptor from field declaration - JavaC equivalent
     pub fn generate_field_descriptor(&self, field: &crate::ast::FieldDecl) -> Result<String> {
-        use crate::codegen::descriptor::{field_descriptor_from_type_enum, type_to_descriptor};
+        use crate::codegen::descriptor::type_to_descriptor;
         
         let descriptor = type_to_descriptor(&field.type_ref);
         eprintln!("🔧 DEBUG: Generated field descriptor for {}: {}", field.name, descriptor);

@@ -42,7 +42,7 @@ impl TransTypes {
     
     /// Process AST through TransTypes phase - type erasure
     /// Corresponds to JavaC's TransTypes.translateTopLevelClass() method
-    pub fn process(&mut self, mut ast: Ast) -> Result<Ast> {
+    pub fn process(&mut self, ast: Ast) -> Result<Ast> {
         self.process_with_types(ast, &std::collections::HashMap::new())
     }
     
@@ -658,11 +658,11 @@ impl TransTypes {
                     "java.lang.Object".to_string()
                 }
             }
-            ResolvedType::Union(types) => {
+            ResolvedType::Union(_types) => {
                 // Erase to common supertype (simplified to Object)
                 "java.lang.Object".to_string()
             }
-            ResolvedType::Method(params, return_type) => {
+            ResolvedType::Method(_params, _return_type) => {
                 // Erase to functional interface (simplified)
                 "java.util.function.Function".to_string()
             }

@@ -11,7 +11,6 @@
 use crate::ast::{Ast, TypeDecl, ClassDecl, MethodDecl, Stmt, Expr, Block, TryStmt};
 use crate::common::error::Result;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 
 /// Flow analysis mode for definite assignment
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,11 +264,11 @@ impl Flow {
                 crate::ast::ClassMember::Method(method_decl) => {
                     self.analyze_method_decl_liveness(method_decl)?;
                 }
-                crate::ast::ClassMember::Constructor(constructor_decl) => {
+                crate::ast::ClassMember::Constructor(_constructor_decl) => {
                     eprintln!("🔍 FLOW: Liveness analysis for constructor");
                     // TODO: Implement constructor liveness analysis
                 }
-                crate::ast::ClassMember::Initializer(initializer) => {
+                crate::ast::ClassMember::Initializer(_initializer) => {
                     eprintln!("🔍 FLOW: Liveness analysis for initializer");
                     // TODO: Implement initializer liveness analysis
                 }
@@ -769,8 +768,8 @@ impl Flow {
         // Simplified - just check for common inheritance patterns
         match (subtype, supertype) {
             (_, "java.lang.Throwable") => true,
-            (_, "java.lang.Exception") => !subtype.contains("Error"),
             ("java.lang.RuntimeException", "java.lang.Exception") => true,
+            (_, "java.lang.Exception") => !subtype.contains("Error"),
             (_, "java.lang.RuntimeException") => subtype.contains("RuntimeException"),
             _ => subtype == supertype,
         }

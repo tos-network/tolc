@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::common::manager::ClasspathManager;
+use crate::common::class_manager::ClassManager;
 
 /// Symbol kinds matching JavaC's Kinds.java
 #[derive(Debug, Clone, PartialEq)]
@@ -104,9 +104,9 @@ pub struct SymbolEnvironment {
     pub fields: HashMap<String, VariableSymbol>,
     /// Generic instantiation cache (T -> String, T -> Integer, etc.)
     pub instantiation_cache: HashMap<String, Vec<String>>,
-    /// Shared ClasspathManager for centralized classpath management
-    /// This replaces multiple independent ClasspathManager instances across the compilation process
-    pub classpath_manager: Option<Arc<Mutex<ClasspathManager>>>,
+    /// Shared ClassManager for centralized classpath management
+    /// This replaces multiple independent ClassManager instances across the compilation process
+    pub classpath_manager: Option<Arc<Mutex<ClassManager>>>,
 }
 
 impl std::fmt::Debug for SymbolEnvironment {
@@ -123,7 +123,7 @@ impl std::fmt::Debug for SymbolEnvironment {
             .field("variables", &self.variables)
             .field("fields", &self.fields)
             .field("instantiation_cache", &self.instantiation_cache)
-            .field("classpath_manager", &"<ClasspathManager>") // Don't try to debug the ClasspathManager
+            .field("classpath_manager", &"<ClassManager>") // Don't try to debug the ClassManager
             .finish()
     }
 }
@@ -148,10 +148,10 @@ impl Default for SymbolEnvironment {
 }
 
 impl SymbolEnvironment {
-    /// Create SymbolEnvironment with shared ClasspathManager
+    /// Create SymbolEnvironment with shared ClassManager
     /// This ensures all type resolution operations use the same classpath instance
     pub fn with_classpath(classpath: &str) -> Self {
-        let manager = Arc::new(Mutex::new(ClasspathManager::new(classpath)));
+        let manager = Arc::new(Mutex::new(ClassManager::with_classpath(classpath)));
         
         Self {
             classes: HashMap::new(),
@@ -169,15 +169,15 @@ impl SymbolEnvironment {
         }
     }
     
-    /// Get reference to the shared ClasspathManager
-    /// Returns None if no ClasspathManager was configured
-    pub fn get_classpath_manager(&self) -> Option<Arc<Mutex<ClasspathManager>>> {
+    /// Get reference to the shared ClassManager
+    /// Returns None if no ClassManager was configured
+    pub fn get_classpath_manager(&self) -> Option<Arc<Mutex<ClassManager>>> {
         self.classpath_manager.clone()
     }
     
-    /// Create a new SymbolEnvironment with an existing ClasspathManager
+    /// Create a new SymbolEnvironment with an existing ClassManager
     /// Useful for sharing the same manager across multiple compilation units
-    pub fn with_shared_classpath_manager(manager: Arc<Mutex<ClasspathManager>>) -> Self {
+    pub fn with_shared_classpath_manager(manager: Arc<Mutex<ClassManager>>) -> Self {
         Self {
             classes: HashMap::new(),
             imports: HashMap::new(),

@@ -2,8 +2,13 @@ use tolc::parser::parse_and_verify;
 use tolc::codegen::{ClassWriter, class_file_to_bytes};
 use tolc::ast::TypeDecl;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_field_generation() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package test;
 

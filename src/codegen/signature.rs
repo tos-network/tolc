@@ -7,8 +7,6 @@
 
 use crate::ast::*;
 use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
-use crate::common::type_resolver::TypeResolver;
-use crate::common::import::ImportResolver;
 use std::collections::HashMap;
 
 /// Global type name resolver that maps simple type names to their fully qualified names

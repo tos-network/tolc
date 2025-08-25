@@ -3,8 +3,13 @@ use tolc::codegen::{ClassWriter, class_file_to_bytes};
 use tolc::ast::TypeDecl;
 use tolc::Config;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_if_else_branch_improvement() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package test;
 

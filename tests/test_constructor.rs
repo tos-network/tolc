@@ -2,8 +2,13 @@ use tolc::parser::parse_java;
 use tolc::codegen::SemanticAnalyzer;
 use tolc::{Config, compile2file};
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn test_constructor_initialization() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package test;
 

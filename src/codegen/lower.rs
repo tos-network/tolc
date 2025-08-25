@@ -11,7 +11,7 @@
 //! - Assertions → conditional throws
 
 use crate::ast::{Ast, TypeDecl, ClassDecl, Stmt, Expr, MethodDecl, ConstructorDecl, EnhancedForStmt, 
-                 Block, TypeRef, TypeEnum, ReferenceType, BinaryOp, Parameter, VarDeclStmt, VariableDeclarator, LiteralExpr, Literal};
+                 Block, TypeRef, VarDeclStmt, VariableDeclarator, LiteralExpr, Literal};
 use crate::common::error::Result;
 use std::collections::HashMap;
 
@@ -167,7 +167,7 @@ impl Lower {
     
     /// Process AST through Lower phase - desugar syntax
     /// Corresponds to JavaC's Lower.translateTopLevelClass() method
-    pub fn process(&mut self, mut ast: Ast) -> Result<Ast> {
+    pub fn process(&mut self, ast: Ast) -> Result<Ast> {
         self.process_with_types(ast, &std::collections::HashMap::new())
     }
     

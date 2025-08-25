@@ -5,9 +5,7 @@
 
 use crate::ast::{TypeRef, TypeEnum, PrimitiveType, ReferenceType, LambdaParameter};
 use crate::common::consts::JAVA_LANG_SIMPLE_TYPES;
-use crate::common::type_resolver::TypeResolver;
-use crate::common::import::ImportResolver;
-use crate::common::error::{Result, Error};
+use crate::common::error::Result;
 
 pub fn type_to_descriptor(ty: &TypeRef) -> String {
     let mut desc = String::new();
@@ -89,10 +87,13 @@ pub fn type_to_descriptor(ty: &TypeRef) -> String {
                         let mut type_resolver = crate::common::type_resolver::OwnedTypeResolver::new("tests/java");
                         
                         if let Some(fully_qualified) = type_resolver.resolve_type_name_simple(simple) {
+                            eprintln!("🔍 DEBUG: type_resolver resolved '{}' to '{}'", simple, fully_qualified);
                             fully_qualified.replace('.', "/")
                         } else if JAVA_LANG_SIMPLE_TYPES.contains(&simple) {
+                            eprintln!("🔍 DEBUG: Found '{}' in JAVA_LANG_SIMPLE_TYPES, mapping to java/lang/{}", simple, simple);
                             format!("java/lang/{}", simple)
                         } else {
+                            eprintln!("🔍 DEBUG: No mapping found for '{}', using as-is", simple);
                             simple.replace('.', "/")
                         }
                     }

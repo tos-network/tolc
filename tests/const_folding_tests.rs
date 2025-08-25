@@ -1,6 +1,12 @@
 use tolc::parser::parse_and_verify;
 
-fn ok(src: &str) { let _ = parse_and_verify(src).expect("expected ok"); }
+mod common;
+use common::setup_test_classpath;
+
+fn ok(src: &str) { 
+    setup_test_classpath();
+    let _ = parse_and_verify(src).expect("expected ok"); 
+}
 
 #[test]
 fn static_final_int_arith_folds_to_constantvalue() {

@@ -5,9 +5,9 @@
 //! When field/method resolution fails, this system automatically loads
 //! the required class symbols from classpath.
 
-use crate::ast::{TypeDecl, ClassDecl, InterfaceDecl, FieldDecl, MethodDecl, TypeRef, TypeEnum, PrimitiveType};
-use crate::common::env::{SymbolEnvironment, ClassSymbol, VariableSymbol, SymbolKind};
-use crate::common::{error::Result, manager::ClasspathManager, type_resolver::TypeResolver, import::ImportResolver};
+use crate::ast::TypeRef;
+use crate::common::env::{SymbolEnvironment, ClassSymbol};
+use crate::common::{error::Result, class_manager::ClassManager};
 use std::collections::HashMap;
 
 /// Dynamic class loader for dependency resolution
@@ -17,13 +17,13 @@ pub struct ClassLoader<'a> {
     loaded_classes: HashMap<String, bool>,
     /// Symbol environment to populate
     symbol_env: SymbolEnvironment,
-    /// ClasspathManager for class resolution
-    manager: &'a mut ClasspathManager,
+    /// ClassManager for class resolution
+    manager: &'a mut ClassManager,
 }
 
 impl<'a> ClassLoader<'a> {
     /// Create new dynamic class loader
-    pub fn new(symbol_env: SymbolEnvironment, manager: &'a mut ClasspathManager) -> Self {
+    pub fn new(symbol_env: SymbolEnvironment, manager: &'a mut ClassManager) -> Self {
         Self {
             loaded_classes: HashMap::new(),
             symbol_env,
@@ -350,10 +350,10 @@ impl<'a> ClassLoader<'a> {
     }
 }
 
-/// Standalone ClassLoader that owns its ClasspathManager
+/// Standalone ClassLoader that owns its ClassManager
 /// This allows existing code to continue working while we migrate
 pub struct StandaloneClassLoader {
-    manager: ClasspathManager,
+    manager: ClassManager,
     loaded_classes: HashMap<String, bool>,
     symbol_env: SymbolEnvironment,
 }
@@ -361,7 +361,7 @@ pub struct StandaloneClassLoader {
 impl StandaloneClassLoader {
     pub fn new(symbol_env: SymbolEnvironment, default_classpath: &str) -> Self {
         StandaloneClassLoader {
-            manager: ClasspathManager::new(default_classpath),
+            manager: ClassManager::with_classpath(default_classpath),
             loaded_classes: HashMap::new(),
             symbol_env,
         }
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn test_dynamic_class_loader() {
         let symbol_env = SymbolEnvironment::default();
-        let mut manager = crate::common::manager::ClasspathManager::new("tests/java");
+        let mut manager = crate::common::class_manager::ClassManager::with_classpath("tests/java");
         let mut loader = ClassLoader::new(symbol_env, &mut manager);
         
         // Test loading common classes if they exist in classpath
@@ -428,8 +428,8 @@ mod tests {
     fn test_current_directory_access() {
         println!("🔍 Testing ClassLoader with current directory");
         
-        // Create ClasspathManager using current directory
-        let mut manager = crate::common::manager::ClasspathManager::new(".");
+        // Create ClassManager using current directory
+        let mut manager = crate::common::class_manager::ClassManager::with_classpath(".");
         
         // Check if we can find TestClass.java in current directory
         match manager.find_source_file("TestClass") {

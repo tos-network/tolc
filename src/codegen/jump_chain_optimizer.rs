@@ -13,7 +13,6 @@
 
 use crate::codegen::opcode_enum::Opcode;
 use crate::common::error::Result;
-use std::collections::HashMap;
 
 /// JavaC Chain equivalent - represents a linked list of jumps
 /// Based on javac's Code.java:1400-1424

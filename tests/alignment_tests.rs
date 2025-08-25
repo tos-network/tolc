@@ -4,9 +4,14 @@ use tolc::codegen::gen::Gen;
 use std::fs;
 use std::process::Command;
 
+mod common;
+use common::setup_test_classpath;
+
 /// Test JavaC alignment for simple logical operations
 #[test]
 fn test_javac_alignment_simple_logical() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package test;
 
@@ -45,6 +50,8 @@ public class SimpleLogical {
 /// Test JavaC alignment for complex logical operations
 #[test]
 fn test_javac_alignment_complex_logical() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package test;
 
@@ -87,6 +94,8 @@ public class ComplexLogical {
 /// Test JavaC alignment for constant folding
 #[test]
 fn test_javac_alignment_constant_folding() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package test;
 
@@ -174,6 +183,8 @@ fn compare_with_javac(source: &str, class_name: &str) -> Result<(), Box<dyn std:
 /// Test JavaC bytecode comparison (requires javac and javap installed)
 #[test]
 fn test_javac_bytecode_comparison() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 public class SimpleTest {
     public boolean test(boolean a, boolean b) {

@@ -14,7 +14,7 @@
 use crate::codegen::opcode_enum::Opcode;
 use crate::codegen::items::{Item, typecodes};
 use crate::common::error::Result;
-use crate::ast::{TypeEnum, CastExpr};
+use crate::ast::CastExpr;
 use std::collections::HashMap;
 
 /// JavaC-aligned Type Cast Optimizer
@@ -67,7 +67,6 @@ impl TypeCastOptimizer {
     /// Initialize conversion table with JavaC-compatible mappings
     /// Based on javac's Items.java coerce() method and Code.java truncate()
     fn initialize_conversion_table(&mut self) {
-        use crate::codegen::opcodes;
         
         // INT conversions (narrowing)
         self.conversion_table.insert((typecodes::INT, typecodes::BYTE), vec![Opcode::I2b]);

@@ -2,8 +2,13 @@ use tolc::parser::parse_tol;
 use tolc::codegen::ClassWriter;
 use tolc::ast::TypeDecl;
 
+mod common;
+use common::setup_test_classpath;
+
 #[test]
 fn try_with_resources_emits_exception_table_and_close_paths() {
+    // Set test classpath to resolve java.lang.String properly
+    setup_test_classpath();
     let source = r#"
 package p;
 

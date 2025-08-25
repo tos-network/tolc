@@ -729,60 +729,188 @@ pub struct SemanticAnalyzer {
     pub trans_types: trans_types::TransTypes,
     pub lower: lower::Lower,
     pub register_alloc: register_alloc::RegisterAllocator, // Register allocation for local variables
+    /// Shared compilation context for unified state management
+    pub compilation_context: Option<crate::common::compilation_context::CompilationContext>,
 }
 
 impl SemanticAnalyzer {
     pub fn new() -> Self {
+        // Use JavaC-aligned classpath resolution instead of just TOLC_CLASSPATH
+        use crate::common::classpath::ClasspathResolver;
+        use crate::common::compilation_context::CompilationContext;
+        
+        let config = crate::Config::default();
+        
+        // Use JavaC-aligned classpath resolution with TOLC_CLASSPATH fallback
+        let classpath = ClasspathResolver::resolve_classpath_with_tolc_fallback(None, None);
+        let compilation_context = CompilationContext::new(&classpath, config.clone());
+        
         Self {
-            enter: enter::EnhancedEnter::new("."),
-            attr: attr::Attr::new(),
-            flow: flow::Flow::new(),
-            trans_types: trans_types::TransTypes::new(),
-            lower: lower::Lower::new(),
-            register_alloc: register_alloc::RegisterAllocator::new(),
-        }
-    }
-
-
-    /// Create SemanticAnalyzer with custom ClasspathManager (legacy compatibility)
-    pub fn new_with_manager(manager: &mut crate::common::manager::ClasspathManager) -> Result<Self> {
-        let classpath_entries = manager.get_classpath_entries();
-        let classpath = if classpath_entries.is_empty() {
-            ".".to_string()
-        } else {
-            classpath_entries[0].to_string_lossy().to_string()
-        };
-
-        Ok(Self {
             enter: enter::EnhancedEnter::new(&classpath),
             attr: attr::Attr::new(),
             flow: flow::Flow::new(),
             trans_types: trans_types::TransTypes::new(),
             lower: lower::Lower::new(),
             register_alloc: register_alloc::RegisterAllocator::new(),
-        })
+            compilation_context: Some(compilation_context),
+        }
+    }
+
+
+    /// Create SemanticAnalyzer with custom classpath
+    pub fn new_with_classpath(classpath: &str) -> Self {
+        // Create compilation context with custom classpath
+        use crate::common::compilation_context::CompilationContext;
+        let config = crate::Config::default();
+        let compilation_context = CompilationContext::new(classpath, config.clone());
+
+        Self {
+            enter: enter::EnhancedEnter::new(classpath),
+            attr: attr::Attr::new(),
+            flow: flow::Flow::new(),
+            trans_types: trans_types::TransTypes::new(),
+            lower: lower::Lower::new(),
+            register_alloc: register_alloc::RegisterAllocator::new(),
+            compilation_context: Some(compilation_context),
+        }
+    }
+    
+    /// Get access to internal ClassManager through CompilationContext
+    pub fn get_class_manager(&mut self) -> Option<&mut crate::common::class_manager::ClassManager> {
+        self.compilation_context.as_mut().map(|ctx| &mut ctx.class_manager)
+    }
+    
+    /// Get classpath being used by internal ClassManager
+    pub fn get_classpath(&self) -> String {
+        if let Some(ref ctx) = self.compilation_context {
+            let entries = ctx.class_manager.get_classpath_entries();
+            if !entries.is_empty() {
+                entries[0].to_string_lossy().to_string()
+            } else {
+                ".".to_string()
+            }
+        } else {
+            ".".to_string()
+        }
     }
     
     /// Run complete semantic analysis pipeline on AST
     /// Returns semantically analyzed and transformed AST ready for code generation
     pub fn analyze(&mut self, mut ast: Ast) -> Result<Ast> {
-        eprintln!("🔍 SEMANTIC: Starting semantic analysis pipeline");
+        eprintln!("🔍 SEMANTIC: Starting semantic analysis pipeline with CompilationContext");
         
-        // Phase 1: Enter - Build symbol tables
-        ast = self.enter.process(ast)?;
-        let symbol_env = self.enter.get_symbol_environment();
-        
-        // Phase 2: Attr - Type checking and resolution (with symbols)
-        ast = self.attr.process_with_symbols(ast, Some(symbol_env))?;
-        
-        // Phase 3: Flow - Definite assignment analysis (with symbols)
-        ast = self.flow.process_with_symbols(ast, Some(symbol_env))?;
-        
-        // Phase 4: TransTypes - Generic type erasure (with type info)
-        ast = self.trans_types.process_with_types(ast, &self.attr.get_type_information())?;
-        
-        // Phase 5: Lower - Desugar syntax (with type info)
-        ast = self.lower.process_with_types(ast, &self.trans_types.get_erased_types())?;
+        if let Some(ref mut context) = self.compilation_context {
+            // Phase 1: Enter - Build symbol tables
+            context.set_phase(crate::common::compilation_context::CompilePhase::Enter);
+            ast = self.enter.process(ast)?;
+            let symbol_env = self.enter.get_symbol_environment();
+            context.set_symbol_env(symbol_env.clone());
+            
+            // Phase 2: Attr - Type checking and resolution (with symbols)
+            context.set_phase(crate::common::compilation_context::CompilePhase::Attr);
+            ast = self.attr.process_with_symbols(ast, Some(&symbol_env))?;
+            let type_info = self.attr.get_type_information();
+            // Convert HashMap<String, ResolvedType> to HashMap<String, TypeEnum> for context
+            // This is a temporary conversion until we unify the type systems
+            let mut type_enum_map = std::collections::HashMap::new();
+            for (key, resolved_type) in type_info {
+                // Convert ResolvedType to TypeEnum - simplified for now
+                use crate::ast::{TypeEnum, PrimitiveType as AstPrimitiveType, ReferenceType};
+                use crate::codegen::attr::{ResolvedType, PrimitiveType as AttrPrimitiveType};
+                let type_enum = match resolved_type {
+                    ResolvedType::Primitive(prim_type) => {
+                        let ast_prim = match prim_type {
+                            AttrPrimitiveType::Boolean => AstPrimitiveType::Boolean,
+                            AttrPrimitiveType::Byte => AstPrimitiveType::Byte,
+                            AttrPrimitiveType::Short => AstPrimitiveType::Short,
+                            AttrPrimitiveType::Int => AstPrimitiveType::Int,
+                            AttrPrimitiveType::Long => AstPrimitiveType::Long,
+                            AttrPrimitiveType::Float => AstPrimitiveType::Float,
+                            AttrPrimitiveType::Double => AstPrimitiveType::Double,
+                            AttrPrimitiveType::Char => AstPrimitiveType::Char,
+                        };
+                        TypeEnum::Primitive(ast_prim)
+                    },
+                    ResolvedType::Reference(class_name) => TypeEnum::Reference(ReferenceType::Class(class_name.clone())),
+                    ResolvedType::Array(component_type) => {
+                        // For arrays, we'll use a simplified approach for now
+                        // Arrays in TypeEnum should use TypeRef, but for now we'll simplify
+                        match component_type.as_ref() {
+                            ResolvedType::Primitive(prim) => {
+                                let ast_prim = match prim {
+                                    AttrPrimitiveType::Boolean => AstPrimitiveType::Boolean,
+                                    AttrPrimitiveType::Byte => AstPrimitiveType::Byte,
+                                    AttrPrimitiveType::Short => AstPrimitiveType::Short,
+                                    AttrPrimitiveType::Int => AstPrimitiveType::Int,
+                                    AttrPrimitiveType::Long => AstPrimitiveType::Long,
+                                    AttrPrimitiveType::Float => AstPrimitiveType::Float,
+                                    AttrPrimitiveType::Double => AstPrimitiveType::Double,
+                                    AttrPrimitiveType::Char => AstPrimitiveType::Char,
+                                };
+                                // For now, treat arrays as reference types since TypeEnum doesn't have a proper array variant
+                                let type_name = match ast_prim {
+                                    AstPrimitiveType::Boolean => "boolean",
+                                    AstPrimitiveType::Byte => "byte", 
+                                    AstPrimitiveType::Short => "short",
+                                    AstPrimitiveType::Int => "int",
+                                    AstPrimitiveType::Long => "long",
+                                    AstPrimitiveType::Float => "float",
+                                    AstPrimitiveType::Double => "double",
+                                    AstPrimitiveType::Char => "char",
+                                };
+                                TypeEnum::Reference(ReferenceType::Class(format!("{}[]", type_name)))
+                            },
+                            _ => TypeEnum::Reference(ReferenceType::Class("Object[]".to_string())),
+                        }
+                    },
+                    ResolvedType::Generic(class_name, _) => TypeEnum::Reference(ReferenceType::Class(class_name.clone())),
+                    ResolvedType::Class(class_type) => TypeEnum::Reference(ReferenceType::Class(class_type.name.clone())),
+                    _ => TypeEnum::Reference(ReferenceType::Class("Object".to_string())), // Default fallback
+                };
+                type_enum_map.insert(key.to_string(), type_enum);
+            }
+            context.set_type_info(type_enum_map);
+            
+            // Phase 3: Flow - Definite assignment analysis (with symbols)
+            context.set_phase(crate::common::compilation_context::CompilePhase::Flow);
+            ast = self.flow.process_with_symbols(ast, Some(&symbol_env))?;
+            // TODO: Add flow analysis results to context when available
+            
+            // Phase 4: TransTypes - Generic type erasure (with type info)
+            context.set_phase(crate::common::compilation_context::CompilePhase::TransTypes);
+            ast = self.trans_types.process_with_types(ast, &self.attr.get_type_information())?;
+            
+            // Phase 5: Lower - Desugar syntax (with type info)
+            context.set_phase(crate::common::compilation_context::CompilePhase::Lower);
+            ast = self.lower.process_with_types(ast, &self.trans_types.get_erased_types())?;
+            
+            // Check for compilation errors
+            if context.has_errors() {
+                eprintln!("⚠️  SEMANTIC: {} compilation errors found:", context.get_errors().len());
+                for error in context.get_errors() {
+                    eprintln!("  - {}", error);
+                }
+            }
+        } else {
+            // Fallback to old pipeline if no CompilationContext is available
+            eprintln!("⚠️  SEMANTIC: Running without CompilationContext (legacy mode)");
+            
+            // Phase 1: Enter - Build symbol tables
+            ast = self.enter.process(ast)?;
+            let symbol_env = self.enter.get_symbol_environment();
+            
+            // Phase 2: Attr - Type checking and resolution (with symbols)
+            ast = self.attr.process_with_symbols(ast, Some(&symbol_env))?;
+            
+            // Phase 3: Flow - Definite assignment analysis (with symbols)
+            ast = self.flow.process_with_symbols(ast, Some(&symbol_env))?;
+            
+            // Phase 4: TransTypes - Generic type erasure (with type info)
+            ast = self.trans_types.process_with_types(ast, &self.attr.get_type_information())?;
+            
+            // Phase 5: Lower - Desugar syntax (with type info)
+            ast = self.lower.process_with_types(ast, &self.trans_types.get_erased_types())?;
+        }
         
         eprintln!("✅ SEMANTIC: Semantic analysis pipeline complete");
         Ok(ast)
@@ -791,6 +919,22 @@ impl SemanticAnalyzer {
     /// Get generic signatures stored during TransTypes phase
     pub fn get_generic_signatures(&self) -> &std::collections::HashMap<String, String> {
         &self.trans_types.generic_signatures
+    }
+    
+    /// Get reference to CompilationContext
+    pub fn get_compilation_context(&self) -> Option<&crate::common::compilation_context::CompilationContext> {
+        self.compilation_context.as_ref()
+    }
+    
+    /// Get mutable reference to CompilationContext
+    pub fn get_compilation_context_mut(&mut self) -> Option<&mut crate::common::compilation_context::CompilationContext> {
+        self.compilation_context.as_mut()
+    }
+    
+    /// Set CompilationContext (useful for sharing context between components)
+    pub fn set_compilation_context(&mut self, context: crate::common::compilation_context::CompilationContext) {
+        eprintln!("🔧 SEMANTIC: Setting CompilationContext for semantic analysis pipeline");
+        self.compilation_context = Some(context);
     }
 }
 
